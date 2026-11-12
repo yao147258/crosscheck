@@ -6,3 +6,5 @@ export * from './store/artifact-store';
 export * from './approvals/hash';
 export * from './approvals/approvals';
 export * from './workflow/gate';
+export * from './verdict/evidence-guard';
+export * from './verdict/consensus';
