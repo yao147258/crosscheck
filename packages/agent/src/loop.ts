@@ -91,6 +91,8 @@ export async function runAgent<O>(opts: RunAgentOptions<O>): Promise<AgentResult
   let invalid = 0;
   const info = (): RunInfo => ({ steps, retried, messages });
   const blocked = (reason: BlockReason, detail: string): AgentResult<O> => ({ status: 'blocked', reason, detail, ...info() });
+  // 外部信号与“剩余时长”超时信号的合并：任意一个触发都应中止当前这次模型调用 / 工具执行
+  const boundedSignal = () => AbortSignal.any([abortSignal, AbortSignal.timeout(budget.remainingMs())]);
 
   while (true) {
     if (abortSignal.aborted) return blocked('interrupted', '执行被中断');
@@ -99,10 +101,11 @@ export async function runAgent<O>(opts: RunAgentOptions<O>): Promise<AgentResult
 
     let res: Awaited<ReturnType<typeof generateText>>;
     let ref: string;
+    const genSignal = boundedSignal();
     try {
       const r = await callWithFallback(
         models,
-        (model) => generateText({ model, system, messages, tools: sdkTools, maxRetries: 0, abortSignal }),
+        (model) => generateText({ model, system, messages, tools: sdkTools, maxRetries: 0, abortSignal: genSignal }),
         resilience,
       );
       res = r.value;
@@ -110,6 +113,7 @@ export async function runAgent<O>(opts: RunAgentOptions<O>): Promise<AgentResult
       if (r.attempts > 1) retried = true;
     } catch (err) {
       if (abortSignal.aborted) return blocked('interrupted', '执行被中断');
+      if (genSignal.aborted) return blocked('budget', budget.overrun() ?? '时长预算耗尽');
       return blocked('model-error', err instanceof Error ? err.message : String(err));
     }
 
@@ -117,11 +121,16 @@ export async function runAgent<O>(opts: RunAgentOptions<O>): Promise<AgentResult
     budget.recordStep();
     budget.recordTokens((res.usage.inputTokens ?? 0) + (res.usage.outputTokens ?? 0));
     onUsage?.(ref, { inputTokens: res.usage.inputTokens, outputTokens: res.usage.outputTokens });
-    messages.push(...res.responseMessages);
+    // 只保留非 tool 角色的消息：tool 角色的结果一律由本循环统一生成（见下方），避免同一个
+    // toolCallId 既有 SDK 自动生成的（如未知工具触发的 tool-error），又有我们自己生成的两条结果
+    messages.push(...res.responseMessages.filter((m) => m.role !== 'tool'));
+
+    const overrun = budget.overrun();
+    if (overrun) return blocked('budget', overrun);
 
     if (res.toolCalls.length === 0) {
       invalid++;
-      if (invalid >= maxInvalidOutputs) return blocked('invalid-output', `连续 ${invalid} 次没有按要求调用工具`);
+      if (invalid >= maxInvalidOutputs) return blocked('invalid-output', `累计 ${invalid} 次没有按要求调用工具`);
       messages.push({
         role: 'user',
         content: `你必须调用工具：完成时调用 ${FINISH_TOOL} 提交结果，无法继续时调用 ${REPORT_BLOCKED_TOOL}。`,
@@ -129,29 +138,59 @@ export async function runAgent<O>(opts: RunAgentOptions<O>): Promise<AgentResult
       continue;
     }
 
+    const calls = res.toolCalls;
     const results: Array<{ type: 'tool-result'; toolCallId: string; toolName: string; output: ToolResultOutput }> = [];
     let finished: { value: O } | undefined;
     let reported: string | undefined;
 
-    for (const call of res.toolCalls) {
+    // 硬约束：report_blocked 优先于一切；finish 必须单独调用（不能和其他调用同轮出现）
+    const hasReportBlocked = calls.some((c) => c.toolName === REPORT_BLOCKED_TOOL);
+    const finishMustBeAlone = !hasReportBlocked && calls.some((c) => c.toolName === FINISH_TOOL) && calls.length > 1;
+
+    for (const call of calls) {
+      if (abortSignal.aborted) return blocked('interrupted', '执行被中断');
+
       const reply = (out: ToolResultOutput) =>
         results.push({ type: 'tool-result', toolCallId: call.toolCallId, toolName: call.toolName, output: out });
+      const skip = (error: string) => {
+        onToolCall?.({ name: call.toolName, input: call.input, ok: false, error });
+        reply({ type: 'error-text', value: error });
+      };
+
+      if (hasReportBlocked && call.toolName !== REPORT_BLOCKED_TOOL) {
+        skip('未执行：本轮已上报障碍');
+        continue;
+      }
+      if (finishMustBeAlone && call.toolName !== FINISH_TOOL) {
+        skip('未执行：finish 必须单独调用');
+        continue;
+      }
 
       if (call.toolName === FINISH_TOOL) {
+        if (finishMustBeAlone) {
+          invalid++;
+          skip('finish 必须单独调用：请先观察本轮其他工具调用的结果，再单独调用 finish 提交。');
+          continue;
+        }
         const parsed = output.safeParse(call.input);
         if (parsed.success) {
           finished = { value: parsed.data };
+          onToolCall?.({ name: FINISH_TOOL, input: call.input, ok: true, output: parsed.data });
           reply({ type: 'json', value: '已收到' });
         } else {
           invalid++;
-          reply({ type: 'error-text', value: `结果不合格，请修正后重新调用 ${FINISH_TOOL}：\n${z.prettifyError(parsed.error)}` });
+          const error = `结果不合格，请修正后重新调用 ${FINISH_TOOL}：\n${z.prettifyError(parsed.error)}`;
+          onToolCall?.({ name: FINISH_TOOL, input: call.input, ok: false, error });
+          reply({ type: 'error-text', value: error });
         }
         continue;
       }
 
       if (call.toolName === REPORT_BLOCKED_TOOL) {
         const parsed = ReportBlockedInput.safeParse(call.input);
-        reported = parsed.success ? parsed.data.reason : '代理上报障碍但未说明原因';
+        const reason = parsed.success ? parsed.data.reason : '代理上报障碍但未说明原因';
+        if (reported === undefined) reported = reason;
+        onToolCall?.({ name: REPORT_BLOCKED_TOOL, input: call.input, ok: true, output: reason });
         reply({ type: 'json', value: '已记录' });
         continue;
       }
@@ -170,13 +209,26 @@ export async function runAgent<O>(opts: RunAgentOptions<O>): Promise<AgentResult
         reply({ type: 'error-text', value: error });
         continue;
       }
+
+      const execSignal = boundedSignal();
+      let raw: unknown;
       try {
-        const out = toJsonValue(await t.execute(parsed.data, { signal: abortSignal }));
+        raw = await t.execute(parsed.data, { signal: execSignal });
+      } catch (err) {
+        if (abortSignal.aborted) return blocked('interrupted', '执行被中断');
+        if (execSignal.aborted) return blocked('budget', budget.overrun() ?? '时长预算耗尽');
+        const error = `工具 ${t.name} 执行失败：${err instanceof Error ? err.message : String(err)}`;
+        onToolCall?.({ name: t.name, input: parsed.data, ok: false, error });
+        reply({ type: 'error-text', value: error });
+        continue;
+      }
+      try {
+        const out = toJsonValue(raw);
         onToolCall?.({ name: t.name, input: parsed.data, ok: true, output: out });
         reply({ type: 'json', value: out });
       } catch (err) {
-        const error = `工具 ${t.name} 执行失败：${err instanceof Error ? err.message : String(err)}`;
-        onToolCall?.({ name: t.name, input: parsed.data, ok: false, error });
+        const error = `工具 ${t.name} 已执行，但结果无法序列化：${err instanceof Error ? err.message : String(err)}`;
+        onToolCall?.({ name: t.name, input: parsed.data, ok: true, error });
         reply({ type: 'error-text', value: error });
       }
     }
@@ -185,6 +237,6 @@ export async function runAgent<O>(opts: RunAgentOptions<O>): Promise<AgentResult
 
     if (reported !== undefined) return blocked('reported', reported);
     if (finished) return { status: 'done', output: finished.value, ...info() };
-    if (invalid >= maxInvalidOutputs) return blocked('invalid-output', `结果连续 ${invalid} 次不合格`);
+    if (invalid >= maxInvalidOutputs) return blocked('invalid-output', `结果累计 ${invalid} 次不合格`);
   }
 }
