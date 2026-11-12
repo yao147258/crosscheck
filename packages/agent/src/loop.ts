@@ -106,7 +106,9 @@ export async function runAgent<O>(opts: RunAgentOptions<O>): Promise<AgentResult
       const r = await callWithFallback(
         models,
         (model) => generateText({ model, system, messages, tools: sdkTools, maxRetries: 0, abortSignal: genSignal }),
-        resilience,
+        // 把本轮的合并信号（外部 signal + 预算超时）传给 callWithFallback：
+        // 超时属于中断类错误，不应被重试，也不应触发切换备用模型
+        { ...resilience, signal: genSignal },
       );
       res = r.value;
       ref = r.ref;

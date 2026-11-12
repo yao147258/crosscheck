@@ -253,6 +253,48 @@ describe('runAgent', () => {
       expect(r).toMatchObject({ status: 'blocked', reason: 'budget' });
     });
 
+    it('模型调用因预算超时被中止时，主模型只调用一次、备用模型未被调用，判为 budget（不重试、不切换）', async () => {
+      const primary = scriptedModel([{ hang: true }]);
+      const backup = scriptedModel([{ toolCalls: [{ name: 'finish', input: { answer: 'ok' } }] }]);
+      let current = 0;
+      const now = () => current;
+      const budget = new BudgetTracker({ steps: 10, tokens: 1_000_000, minutes: 1 }, now);
+      current = 60_000 - 20; // 把“已用时长”推到只剩 20ms 预算
+      const { options } = opts([], {
+        models: [
+          { ref: 'mock:primary', model: primary },
+          { ref: 'mock:backup', model: backup },
+        ],
+        budget,
+        resilience: { retries: 3, sleep: async () => {} },
+      });
+      const r = await runAgent(options);
+      expect(r).toMatchObject({ status: 'blocked', reason: 'budget' });
+      expect(primary.doGenerateCalls).toHaveLength(1);
+      expect(backup.doGenerateCalls).toHaveLength(0);
+    });
+
+    it('模型调用因预算超时被中止，即使底层错误不带 AbortError/TimeoutError 名字，也不重试、不切换', async () => {
+      const primary = scriptedModel([{ hangWithGenericError: true }]);
+      const backup = scriptedModel([{ toolCalls: [{ name: 'finish', input: { answer: 'ok' } }] }]);
+      let current = 0;
+      const now = () => current;
+      const budget = new BudgetTracker({ steps: 10, tokens: 1_000_000, minutes: 1 }, now);
+      current = 60_000 - 20;
+      const { options } = opts([], {
+        models: [
+          { ref: 'mock:primary', model: primary },
+          { ref: 'mock:backup', model: backup },
+        ],
+        budget,
+        resilience: { retries: 3, sleep: async () => {} },
+      });
+      const r = await runAgent(options);
+      expect(r).toMatchObject({ status: 'blocked', reason: 'budget' });
+      expect(primary.doGenerateCalls).toHaveLength(1);
+      expect(backup.doGenerateCalls).toHaveLength(0);
+    });
+
     it('工具执行挂起且时长预算即将耗尽时判为 budget（而非一直挂起）', async () => {
       const hang = defineTool({
         name: 'hang',
