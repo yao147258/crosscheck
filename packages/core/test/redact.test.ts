@@ -67,4 +67,22 @@ describe('Redactor', () => {
       nested: { api_key: REDACTED },
     });
   });
+
+  it('敏感请求头名带空白被脱敏', () => {
+    expect(r.headers({ ' token ': 'abc' })).toEqual({
+      ' token ': REDACTED,
+    });
+  });
+
+  it('自定义敏感字段名带空白被脱敏', () => {
+    expect(r.headers({ ' idCard ': '110' })).toEqual({
+      ' idCard ': REDACTED,
+    });
+  });
+
+  it('对象字段名带空白被脱敏', () => {
+    expect(r.value({ ' secret ': 's' })).toEqual({
+      ' secret ': REDACTED,
+    });
+  });
 });

@@ -15,7 +15,7 @@ export function createRedactor(extraFields: string[] = []): Redactor {
   const fields = new Set([...DEFAULT_FIELDS, ...extraFields].map((f) => f.toLowerCase()));
   // 字段名包含 password 的也一律脱敏（如 newPassword）
   const isSensitive = (key: string): boolean => {
-    const k = key.toLowerCase();
+    const k = key.trim().toLowerCase();
     return fields.has(k) || k.includes('password');
   };
 
