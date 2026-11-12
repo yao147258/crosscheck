@@ -1,7 +1,7 @@
 export const REDACTED = '[REDACTED]';
 
 const SENSITIVE_HEADERS = new Set(['authorization', 'proxy-authorization', 'cookie', 'set-cookie']);
-const DEFAULT_FIELDS = ['password', 'passwd', 'pwd'];
+const DEFAULT_FIELDS = ['password', 'passwd', 'pwd', 'token', 'access_token', 'refresh_token', 'id_token', 'secret', 'client_secret', 'api_key', 'apikey'];
 
 export interface Redactor {
   headers(h: Record<string, string | string[]>): Record<string, string | string[]>;
@@ -26,6 +26,17 @@ export function createRedactor(extraFields: string[] = []): Redactor {
       for (const [k, x] of Object.entries(v)) out[k] = isSensitive(k) ? REDACTED : value(x);
       return out as T;
     }
+    // 处理字符串化的 JSON
+    if (typeof v === 'string') {
+      const trimmed = v.trim();
+      if ((trimmed.startsWith('{') || trimmed.startsWith('[')) && (trimmed.endsWith('}') || trimmed.endsWith(']'))) {
+        try {
+          return JSON.stringify(value(JSON.parse(trimmed))) as T;
+        } catch {
+          return v;
+        }
+      }
+    }
     return v;
   };
 
@@ -39,7 +50,7 @@ export function createRedactor(extraFields: string[] = []): Redactor {
     headers(h) {
       const out: Record<string, string | string[]> = {};
       for (const [k, v] of Object.entries(h)) {
-        const hit = SENSITIVE_HEADERS.has(k.toLowerCase()) || isSensitive(k);
+        const hit = SENSITIVE_HEADERS.has(k.trim().toLowerCase()) || isSensitive(k);
         out[k] = hit ? (Array.isArray(v) ? v.map(() => REDACTED) : REDACTED) : v;
       }
       return out;
@@ -60,7 +71,16 @@ export function createRedactor(extraFields: string[] = []): Redactor {
     url(u) {
       try {
         const url = new URL(u);
+        // 脱敏 username 和 password
+        if (url.username) url.username = REDACTED;
+        if (url.password) url.password = REDACTED;
+        // 脱敏查询参数
         url.search = params(url.searchParams).toString();
+        // 脱敏 hash 中的参数
+        if (url.hash && url.hash.includes('=')) {
+          const hashParams = new URLSearchParams(url.hash.slice(1)); // 去掉开头的 #
+          url.hash = '#' + params(hashParams).toString();
+        }
         return url.toString();
       } catch {
         return u;
