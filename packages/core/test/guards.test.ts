@@ -64,6 +64,43 @@ describe('checkRequest', () => {
   it('method 带前后空白仍能命中禁止规则', () => {
     expect(checkRequest({ url: 'http://localhost:3000/api/orders/1', method: ' delete ' }, g).ok).toBe(false);
   });
+
+  it('N4 矩阵参数伪装的 .. 段必须被拒绝（原始 .. 已被 URL 解析器自身折叠，不在此列）', () => {
+    expect(checkRequest({ url: 'http://localhost:3000/foo/..;/admin/x' }, g).ok).toBe(false);
+  });
+
+  it('N6 条目写明端口（含默认端口 80/443）必须严格比较', () => {
+    const gPort: Guardrails = {
+      allowedHosts: ['127.0.0.1:80', 'secure.example.com:443'],
+      forbidden: [],
+      redactFields: [],
+    };
+    expect(checkRequest({ url: 'http://127.0.0.1/' }, gPort).ok).toBe(true);
+    expect(checkRequest({ url: 'http://127.0.0.1:80/' }, gPort).ok).toBe(true);
+    expect(checkRequest({ url: 'http://127.0.0.1:5432/' }, gPort).ok).toBe(false);
+    expect(checkRequest({ url: 'https://secure.example.com/' }, gPort).ok).toBe(true);
+    expect(checkRequest({ url: 'https://secure.example.com:8443/' }, gPort).ok).toBe(false);
+  });
+
+  it('N7 /** 前缀分支必须正确转义，不抛异常也不误判', () => {
+    const g7: Guardrails = {
+      allowedHosts: ['localhost:3000'],
+      forbidden: [{ path: '/**/x/**' }, { path: '/admin/*/**' }],
+      redactFields: [],
+    };
+    expect(() => checkRequest({ url: 'http://localhost:3000/a/x/b' }, g7)).not.toThrow();
+    expect(checkRequest({ url: 'http://localhost:3000/admin' }, g7).ok).toBe(true);
+    expect(checkRequest({ url: 'http://localhost:3000/admin/a/b' }, g7).ok).toBe(false);
+  });
+
+  it('N8 规则路径自身的尾斜杠也要规范化', () => {
+    const g8: Guardrails = {
+      allowedHosts: ['localhost:3000'],
+      forbidden: [{ path: '/api/' }],
+      redactFields: [],
+    };
+    expect(checkRequest({ url: 'http://localhost:3000/api' }, g8).ok).toBe(false);
+  });
 });
 
 describe('checkReadonlySql', () => {
@@ -99,6 +136,18 @@ describe('checkReadonlySql', () => {
     'SELECT "pg_sleep"(10)',
     "SELECT \"set_config\"('a','b',false)",
   ])('拒绝：%s', (sql) => {
+    expect(checkReadonlySql(sql).ok).toBe(false);
+  });
+
+  it.each([
+    "SELECT /* /* */ ' */ ; DROP TABLE t; -- '",
+    "SELECT /* /* */ ' */ * INTO newt FROM users -- '",
+    'SELECT 1 --x\r; DROP TABLE t',
+    'SELECT * --\rINTO newt FROM users',
+    "SELECT $é$'$é$; DROP TABLE t; SELECT $é$'$é$",
+    'SELECT U&"pg!0073leep" UESCAPE \'!\'(10)',
+    'SELECT 1 --1; DROP TABLE t',
+  ])('N1/N2/N3/N5/N8 绕过必须被拒绝：%s', (sql) => {
     expect(checkReadonlySql(sql).ok).toBe(false);
   });
 });
