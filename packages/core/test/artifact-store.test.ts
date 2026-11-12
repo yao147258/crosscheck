@@ -66,4 +66,14 @@ describe('ArtifactStore', () => {
     await store.writeJson('x/y.json', { a: 1 });
     expect(await store.readJson('x/y.json', schema)).toEqual({ a: 1 });
   });
+
+  it('同一路径并发写入不冲突，最终内容是其中之一', async () => {
+    const schema = (await import('zod')).z.object({ a: (await import('zod')).z.number() });
+    await expect(
+      Promise.all(Array.from({ length: 10 }, (_, i) => store.writeJson('x/concurrent.json', { a: i }))),
+    ).resolves.toBeDefined();
+    const result = await store.readJson('x/concurrent.json', schema);
+    expect(result?.a).toBeGreaterThanOrEqual(0);
+    expect(result?.a).toBeLessThan(10);
+  });
 });

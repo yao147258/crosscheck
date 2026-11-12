@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { mkdir, readdir, readFile, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import YAML from 'yaml';
@@ -46,9 +47,25 @@ export class ArtifactStore {
   private async writeText(rel: string, text: string): Promise<void> {
     const abs = this.resolve(rel);
     await mkdir(path.dirname(abs), { recursive: true });
-    const tmp = `${abs}.${process.pid}.tmp`;
+    // 临时文件名包含随机 UUID：同进程并发写同一路径时 pid 相同会冲突，UUID 保证互不相同
+    const tmp = `${abs}.${process.pid}.${randomUUID()}.tmp`;
     await writeFile(tmp, text, 'utf8');
-    await rename(tmp, abs);
+    await this.renameRetrying(tmp, abs);
+  }
+
+  /**
+   * 并发往同一目标路径改名时，Windows 上偶发 EPERM/EBUSY（目标文件被另一次改名短暂占用），
+   * 属于瞬时竞争，短暂重试即可
+   */
+  private async renameRetrying(tmp: string, abs: string, attemptsLeft = 5): Promise<void> {
+    try {
+      await rename(tmp, abs);
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (attemptsLeft <= 0 || (code !== 'EPERM' && code !== 'EBUSY')) throw err;
+      await new Promise((r) => setTimeout(r, 5));
+      await this.renameRetrying(tmp, abs, attemptsLeft - 1);
+    }
   }
 
   private parse<T>(rel: string, data: unknown, schema: z.ZodType<T>): T {
