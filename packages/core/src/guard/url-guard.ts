@@ -1,19 +1,37 @@
 import type { Guardrails } from '../schema/guardrails';
 import type { GuardResult } from '../verdict/evidence-guard';
 
-function hostAllowed(url: URL, entry: string): boolean {
-  const e = entry.toLowerCase();
-  const host = url.hostname.toLowerCase();
-  const [pattern, port] = e.startsWith('[') ? [e, undefined] : (e.split(':') as [string, string | undefined]);
-  if (port !== undefined) {
-    const actualPort = url.port || (url.protocol === 'https:' ? '443' : '80');
-    if (actualPort !== port) return false;
-  }
-  if (pattern.startsWith('*.')) return host.endsWith(pattern.slice(1));
-  return host === pattern;
+function escapeLiteral(ch: string): string {
+  return ch.replace(/[.+?^${}()|[\]\\]/g, '\\$&');
 }
 
-/** `**` 匹配任意多段，`*` 只匹配单段内的字符 */
+/** 解析白名单条目的主机名与端口；支持 `host`、`host:port`、`[ipv6]`、`[ipv6]:port` */
+function parseHostEntry(entry: string): { hostname: string; port: string } | null {
+  try {
+    const parsed = new URL(`http://${entry}`);
+    return { hostname: parsed.hostname.toLowerCase(), port: parsed.port };
+  } catch {
+    return null;
+  }
+}
+
+function hostAllowed(url: URL, entry: string): boolean {
+  const trimmed = entry.trim();
+  if (trimmed.toLowerCase().startsWith('*.')) {
+    const suffix = trimmed.slice(1).toLowerCase();
+    return url.hostname.toLowerCase().endsWith(suffix);
+  }
+  const parsed = parseHostEntry(trimmed);
+  if (!parsed) return false;
+  if (url.hostname.toLowerCase() !== parsed.hostname) return false;
+  if (parsed.port !== '') {
+    const actualPort = url.port || (url.protocol === 'https:' ? '443' : '80');
+    if (actualPort !== parsed.port) return false;
+  }
+  return true;
+}
+
+/** `**` 匹配任意多段（其前缀自身也算匹配，即 `/api/**` 也匹配 `/api`），`*` 只匹配单段内的字符；忽略大小写 */
 function globToRegExp(glob: string): RegExp {
   let re = '';
   for (let i = 0; i < glob.length; i++) {
@@ -24,10 +42,41 @@ function globToRegExp(glob: string): RegExp {
     } else if (ch === '*') {
       re += '[^/]*';
     } else {
-      re += ch.replace(/[.+?^${}()|[\]\\]/g, '\\$&');
+      re += escapeLiteral(ch);
     }
   }
-  return new RegExp(`^${re}$`);
+  if (glob.endsWith('/**')) {
+    const prefix = escapeLiteral(glob.slice(0, -3));
+    return new RegExp(`^(?:${prefix}|${re})$`, 'i');
+  }
+  return new RegExp(`^${re}$`, 'i');
+}
+
+/**
+ * 规范化 pathname 仅用于禁止规则匹配（不修改实际请求）：
+ * - 含编码的 `/` 或 `\`（`%2f`、`%5c`，不区分大小写）或原始 `\` → 视为非法，返回 null
+ * - 按段 decodeURIComponent（解码失败 → null）
+ * - 去掉每段中 `;` 及其后内容（矩阵参数）
+ * - 合并连续的 `/`，去掉末尾的 `/`（根路径 `/` 保留）
+ * - 转为小写，便于大小写无关匹配
+ */
+function normalizePathForMatch(pathname: string): string | null {
+  if (/%2f|%5c/i.test(pathname) || pathname.includes('\\')) return null;
+  const segments = pathname.split('/');
+  const decoded: string[] = [];
+  for (const seg of segments) {
+    let d: string;
+    try {
+      d = decodeURIComponent(seg);
+    } catch {
+      return null;
+    }
+    const semi = d.indexOf(';');
+    decoded.push(semi === -1 ? d : d.slice(0, semi));
+  }
+  let merged = decoded.join('/').replace(/\/+/g, '/');
+  if (merged.length > 1 && merged.endsWith('/')) merged = merged.slice(0, -1);
+  return merged.toLowerCase();
 }
 
 /** 校验 HTTP/浏览器请求是否在白名单内，且不命中禁止规则 */
@@ -44,10 +93,14 @@ export function checkRequest(req: { url: string; method?: string }, g: Guardrail
   if (!g.allowedHosts.some((entry) => hostAllowed(url, entry))) {
     return { ok: false, reason: `主机不在白名单内：${url.host}` };
   }
-  const method = (req.method ?? 'GET').toUpperCase();
+  const normalizedPath = normalizePathForMatch(url.pathname);
+  if (normalizedPath === null) {
+    return { ok: false, reason: `路径包含不允许的编码：${url.pathname}` };
+  }
+  const method = (req.method ?? 'GET').trim().toUpperCase();
   for (const rule of g.forbidden) {
-    if (rule.method && rule.method.toUpperCase() !== method) continue;
-    if (globToRegExp(rule.path).test(url.pathname)) {
+    if (rule.method && rule.method.trim().toUpperCase() !== method) continue;
+    if (globToRegExp(rule.path).test(normalizedPath)) {
       return { ok: false, reason: `命中禁止规则：${rule.method ?? '任意方法'} ${rule.path}` };
     }
   }
