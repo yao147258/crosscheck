@@ -22,6 +22,13 @@ function globFragmentSource(glob: string): string {
   return re;
 }
 
+/**
+ * 白名单条目的合法格式：`host`、`host:port`、`*.host`、`[ipv6]`、`[ipv6]:port`。
+ * 不符合该格式（例如误写了路径后缀 `host:port/path`）的条目一律判定为“不匹配任何请求”（宁可误拒），
+ * 避免这类条目被 `new URL('http://' + entry)` 悄悄解析成功、却在不知不觉中丢掉端口限制。
+ */
+const HOST_ENTRY_PATTERN = /^(\*\.)?(\[[^\]]+\]|[^:/\s[\]]+)(:\d+)?$/;
+
 /** 解析白名单条目的主机名与端口；支持 `host`、`host:port`、`[ipv6]`、`[ipv6]:port`。
  * 端口是否“写明”看条目原文是否以 `:数字` 结尾，不依赖 URL 对默认端口（80/443）的省略行为。 */
 function parseHostEntry(entry: string): { hostname: string; port: string | null } | null {
@@ -36,6 +43,7 @@ function parseHostEntry(entry: string): { hostname: string; port: string | null 
 
 function hostAllowed(url: URL, entry: string): boolean {
   const trimmed = entry.trim();
+  if (!HOST_ENTRY_PATTERN.test(trimmed)) return false;
   if (trimmed.toLowerCase().startsWith('*.')) {
     const suffix = trimmed.slice(1).toLowerCase();
     return url.hostname.toLowerCase().endsWith(suffix);
@@ -51,11 +59,22 @@ function hostAllowed(url: URL, entry: string): boolean {
 }
 
 /**
+ * 合并连续的 `/`，去掉末尾的 `/`（根路径 `/` 保留），转为小写。
+ * 请求路径（`normalizePathForMatch`）与规则路径（`globToRegExp`）共用此函数做规范化，
+ * 保证两边的 `/` 规范化行为完全一致（例如规则 `/a//b` 与请求 `/a/b` 能够匹配上）。
+ */
+function collapseSlashesAndLowercase(path: string): string {
+  let merged = path.replace(/\/+/g, '/');
+  if (merged.length > 1 && merged.endsWith('/')) merged = merged.slice(0, -1);
+  return merged.toLowerCase();
+}
+
+/**
  * `**` 匹配任意多段（其前缀自身也算匹配，即 `/api/**` 也匹配 `/api`），`*` 只匹配单段内的字符；忽略大小写。
- * 规则路径自身也规范化末尾的 `/`（`/api/` 等价于 `/api`），与请求路径的规范化保持一致。
+ * 规则路径自身也用与请求路径相同的方式规范化（合并 `//`、去掉末尾 `/`、转小写）。
  */
 function globToRegExp(glob: string): RegExp {
-  const normalizedGlob = glob.length > 1 && glob.endsWith('/') ? glob.slice(0, -1) : glob;
+  const normalizedGlob = collapseSlashesAndLowercase(glob);
   const re = globFragmentSource(normalizedGlob);
   if (normalizedGlob.endsWith('/**')) {
     const prefix = globFragmentSource(normalizedGlob.slice(0, -3));
@@ -70,8 +89,7 @@ function globToRegExp(glob: string): RegExp {
  * - 按段 decodeURIComponent（解码失败 → null）
  * - 去掉每段中 `;` 及其后内容（矩阵参数）
  * - 任何一段（去掉矩阵参数后）为 `.` 或 `..` → 视为非法，返回 null（防止 `/foo/..;/admin` 这类伪装）
- * - 合并连续的 `/`，去掉末尾的 `/`（根路径 `/` 保留）
- * - 转为小写，便于大小写无关匹配
+ * - 合并连续的 `/`、去掉末尾的 `/`、转小写（与规则路径共用 `collapseSlashesAndLowercase`）
  */
 function normalizePathForMatch(pathname: string): string | null {
   if (/%2f|%5c/i.test(pathname) || pathname.includes('\\')) return null;
@@ -89,9 +107,7 @@ function normalizePathForMatch(pathname: string): string | null {
     if (trimmed === '.' || trimmed === '..') return null;
     decoded.push(trimmed);
   }
-  let merged = decoded.join('/').replace(/\/+/g, '/');
-  if (merged.length > 1 && merged.endsWith('/')) merged = merged.slice(0, -1);
-  return merged.toLowerCase();
+  return collapseSlashesAndLowercase(decoded.join('/'));
 }
 
 /** 校验 HTTP/浏览器请求是否在白名单内，且不命中禁止规则 */

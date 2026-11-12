@@ -13,25 +13,21 @@ const DISALLOWED_CONTROL_CHARS = /[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/;
 const UNICODE_ESCAPE_QUOTE = /u&["']/i;
 const UESCAPE_CLAUSE = /\bUESCAPE\b/i;
 
-function isCommentWhitespace(c: string | undefined): boolean {
-  return c === ' ' || c === '\t' || c === '\n' || c === '\r';
-}
-
 type ScanResult = { ok: true; body: string } | { ok: false; reason: string };
 
 /**
  * 从左到右单遍扫描 SQL 文本：
- * - 行注释（两个连续短横线开头，到行尾或输入结尾）→ 替换为一个空格；
- *   短横线后必须紧跟空白字符或输入结尾，否则直接判定失败（部分数据库如 MySQL 不把它当注释，
- *   若我们仍当注释删掉会把后面真实的恶意语句一并隐藏）。
- * - 块注释（斜杠星号开头、星号斜杠结尾）→ 替换为一个空格；块注释内部再次出现开始标记（嵌套）
- *   视为失败（PostgreSQL 支持嵌套块注释，朴素的“找第一个结束标记”会被嵌套注释绕过）。
- * - `'...'`（`''` 为转义）字符串字面量 → 替换为占位 `''`。
+ * - 不再尝试按方言区分"合法注释"：字符串/标识符之外一旦出现 `--`、`/*`、`*\/` 中任意一种标记，
+ *   直接判定失败（原因统一为"只读查询中不允许注释"）。不同数据库（PostgreSQL 嵌套块注释、
+ *   MySQL `/*!`/`/*M!` 条件注释、`--` 后是否要求空白等）对注释的语义差异太大、太容易被绕过，
+ *   与其逐一堵漏洞，不如完全不允许注释出现（宁可误拒）。
+ * - `'...'`（`''` 为转义）字符串字面量 → 替换为占位 `''`，其内部的 `--`/`/*`/`*\/` 不受影响
+ *   （例如 `SELECT '--'` 仍允许）。
  * - `"..."`、反引号包裹的标识符（重复引号为转义）→ 替换为其内部文本（去掉引号本身），
- *   这样引号包裹的函数名/关键字仍会被后续的黑名单检查命中（宁可误拒）。
- * - 扫描到字符串/标识符/注释之外的单独 `$` 字符 → 直接判定失败（不局限于 ASCII 美元符引号标签，
- *   任何语言字符都可以出现在标签里，统一按“字符串/标识符/注释之外一律不允许出现 $”处理）。
- * 任何未闭合的字符串/标识符/块注释都直接判定失败。
+ *   这样引号包裹的函数名/关键字仍会被后续的黑名单检查命中（宁可误拒）；其内部的注释标记同样不受影响。
+ * - 扫描到字符串/标识符之外的单独 `$` 字符 → 直接判定失败（不局限于 ASCII 美元符引号标签，
+ *   任何语言字符都可以出现在标签里，统一按“字符串/标识符之外一律不允许出现 $”处理）。
+ * 任何未闭合的字符串/标识符都直接判定失败。
  */
 function scanSql(sql: string): ScanResult {
   let out = '';
@@ -40,31 +36,8 @@ function scanSql(sql: string): ScanResult {
   while (i < n) {
     const ch = sql[i]!;
     const next = sql[i + 1];
-    if (ch === '-' && next === '-') {
-      const after = sql[i + 2];
-      if (after !== undefined && !isCommentWhitespace(after)) {
-        return { ok: false, reason: '行注释短横线后必须紧跟空白或输入结尾' };
-      }
-      let end = n;
-      for (let k = i + 2; k < n; k++) {
-        if (sql[k] === '\n' || sql[k] === '\r') {
-          end = k;
-          break;
-        }
-      }
-      out += ' ';
-      i = end;
-      continue;
-    }
-    if (ch === '/' && next === '*') {
-      const end = sql.indexOf('*/', i + 2);
-      if (end === -1) return { ok: false, reason: '块注释未闭合' };
-      if (sql.slice(i + 2, end).includes('/*')) {
-        return { ok: false, reason: '块注释存在嵌套，不允许' };
-      }
-      out += ' ';
-      i = end + 2;
-      continue;
+    if ((ch === '-' && next === '-') || (ch === '/' && next === '*') || (ch === '*' && next === '/')) {
+      return { ok: false, reason: '只读查询中不允许注释' };
     }
     if (ch === "'") {
       let j = i + 1;
@@ -125,9 +98,9 @@ function scanSql(sql: string): ScanResult {
  */
 export function checkReadonlySql(sql: string): GuardResult {
   if (DISALLOWED_CONTROL_CHARS.test(sql)) return { ok: false, reason: '包含不允许的控制字符' };
+  if (sql.includes('\r')) return { ok: false, reason: '不允许出现 \\r（回车符）' };
   if (sql.includes('\\')) return { ok: false, reason: '不允许使用反斜杠转义' };
   if (sql.includes('#')) return { ok: false, reason: '不允许使用 # 注释' };
-  if (sql.includes('/*!')) return { ok: false, reason: '不允许使用 /*! 条件注释' };
   if (UNICODE_ESCAPE_QUOTE.test(sql)) return { ok: false, reason: '不允许使用 Unicode 转义标识符/字符串（U&）' };
   if (UESCAPE_CLAUSE.test(sql)) return { ok: false, reason: '不允许使用 UESCAPE 子句' };
   const scanned = scanSql(sql);

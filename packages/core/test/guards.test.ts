@@ -101,6 +101,40 @@ describe('checkRequest', () => {
     };
     expect(checkRequest({ url: 'http://localhost:3000/api' }, g8).ok).toBe(false);
   });
+
+  it('N8(第 3 轮) 规则路径的 // 也要合并后再匹配', () => {
+    const g8b: Guardrails = {
+      allowedHosts: ['localhost:3000'],
+      forbidden: [{ path: '/a//b' }],
+      redactFields: [],
+    };
+    expect(checkRequest({ url: 'http://localhost:3000/a/b' }, g8b).ok).toBe(false);
+  });
+
+  it('B2 带路径的白名单条目格式非法，视为不匹配任何请求', () => {
+    const gBad: Guardrails = {
+      allowedHosts: ['localhost:3000/'],
+      forbidden: [],
+      redactFields: [],
+    };
+    expect(checkRequest({ url: 'http://localhost:3000/' }, gBad).ok).toBe(false);
+    expect(checkRequest({ url: 'http://localhost:5432/' }, gBad).ok).toBe(false);
+  });
+
+  it('B2 带路径的白名单条目（带子路径）同样格式非法', () => {
+    const gBad2: Guardrails = {
+      allowedHosts: ['localhost:3000/x'],
+      forbidden: [],
+      redactFields: [],
+    };
+    expect(checkRequest({ url: 'http://localhost:3000/' }, gBad2).ok).toBe(false);
+    expect(checkRequest({ url: 'http://localhost:5432/' }, gBad2).ok).toBe(false);
+  });
+
+  it('B2 既有的通配符白名单条目仍能正常通过', () => {
+    expect(checkRequest({ url: 'https://a.staging.example.com/' }, g).ok).toBe(true);
+    expect(checkRequest({ url: 'http://localhost:3000/api/x' }, g).ok).toBe(true);
+  });
 });
 
 describe('checkReadonlySql', () => {
@@ -109,7 +143,9 @@ describe('checkReadonlySql', () => {
     'select count(*) from orders;',
     'WITH t AS (SELECT 1 AS x) SELECT x FROM t',
     "SELECT * FROM logs WHERE msg = 'please DELETE me; now'",
-    'SELECT replace(name, \'a\', \'b\') FROM t -- trailing comment with UPDATE',
+    "SELECT '--'",
+    "SELECT '/* x */'",
+    'SELECT "a--b" FROM t',
   ])('允许：%s', (sql) => {
     expect(checkReadonlySql(sql)).toEqual({ ok: true });
   });
@@ -135,6 +171,9 @@ describe('checkReadonlySql', () => {
     'SELECT "pg_terminate_backend"(pid) FROM pg_stat_activity',
     'SELECT "pg_sleep"(10)',
     "SELECT \"set_config\"('a','b',false)",
+    // 第 3 轮：从允许列表移入——控制者裁定不再支持按方言区分的注释豁免，
+    // 只读查询中一律不允许出现 --/*/*/（字符串/标识符内部除外），这里的 -- 在字符串外，必须拒绝
+    'SELECT replace(name, \'a\', \'b\') FROM t -- trailing comment with UPDATE',
   ])('拒绝：%s', (sql) => {
     expect(checkReadonlySql(sql).ok).toBe(false);
   });
@@ -148,6 +187,16 @@ describe('checkReadonlySql', () => {
     'SELECT U&"pg!0073leep" UESCAPE \'!\'(10)',
     'SELECT 1 --1; DROP TABLE t',
   ])('N1/N2/N3/N5/N8 绕过必须被拒绝：%s', (sql) => {
+    expect(checkReadonlySql(sql).ok).toBe(false);
+  });
+
+  it.each([
+    "SELECT /* /*/ ' */ */ ; DROP TABLE t; -- '",
+    "SELECT /* /*/ ' */ */ * INTO newt FROM users -- '",
+    "SELECT * FROM users -- \r'\nINTO OUTFILE '/tmp/x' -- '",
+    "SELECT 1 -- \r'\n; DROP TABLE t; -- '",
+    "SELECT * FROM t /*M! INTO OUTFILE '/tmp/x' */",
+  ])('第 3 轮 N1/B1 绕过必须被拒绝：%s', (sql) => {
     expect(checkReadonlySql(sql).ok).toBe(false);
   });
 });
