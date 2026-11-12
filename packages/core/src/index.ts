@@ -5,3 +5,4 @@ export * from './schema/verdict';
 export * from './store/artifact-store';
 export * from './approvals/hash';
 export * from './approvals/approvals';
+export * from './workflow/gate';
