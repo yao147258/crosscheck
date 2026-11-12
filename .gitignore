@@ -1,0 +1,7 @@
+node_modules/
+dist/
+coverage/
+*.log
+.env
+# 被测项目中的执行记录（示例项目同样适用）
+.crosscheck/runs/
