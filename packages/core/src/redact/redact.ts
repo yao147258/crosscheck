@@ -10,13 +10,21 @@ export interface Redactor {
   url(u: string): string;
 }
 
+// 子串命中的字段名一律脱敏（如 accessToken、X-API-Key、tokenizer_version），
+// 宁可误伤也不漏敏感信息
+const SENSITIVE_SUBSTRINGS = ['password', 'token', 'secret', 'apikey'];
+
+/** 键名规范化：两端去空白、转小写、去掉 `_` 和 `-`，使驼峰/蛇形/中划线写法等价 */
+function normalizeKey(key: string): string {
+  return key.trim().toLowerCase().replace(/[_-]/g, '');
+}
+
 /** 证据落盘前统一脱敏；extraFields 来自 guardrails.yaml 的 redactFields */
 export function createRedactor(extraFields: string[] = []): Redactor {
-  const fields = new Set([...DEFAULT_FIELDS, ...extraFields].map((f) => f.toLowerCase()));
-  // 字段名包含 password 的也一律脱敏（如 newPassword）
+  const fields = new Set([...DEFAULT_FIELDS, ...extraFields].map(normalizeKey));
   const isSensitive = (key: string): boolean => {
-    const k = key.trim().toLowerCase();
-    return fields.has(k) || k.includes('password');
+    const k = normalizeKey(key);
+    return fields.has(k) || SENSITIVE_SUBSTRINGS.some((s) => k.includes(s));
   };
 
   const value = <T>(v: T): T => {

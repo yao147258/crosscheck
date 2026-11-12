@@ -85,4 +85,32 @@ describe('Redactor', () => {
       ' secret ': REDACTED,
     });
   });
+
+  it('驼峰写法的常见凭证字段被脱敏', () => {
+    const input = { accessToken: 'a', refreshToken: 'b', clientSecret: 'c', authToken: 'd', name: 'ok' };
+    expect(r.value(input)).toEqual({
+      accessToken: REDACTED,
+      refreshToken: REDACTED,
+      clientSecret: REDACTED,
+      authToken: REDACTED,
+      name: 'ok',
+    });
+  });
+
+  it('常见凭证请求头 X-API-Key、X-Auth-Token 被脱敏', () => {
+    expect(r.headers({ 'X-API-Key': 'k', 'X-Auth-Token': 't', Accept: '*/*' })).toEqual({
+      'X-API-Key': REDACTED,
+      'X-Auth-Token': REDACTED,
+      Accept: '*/*',
+    });
+  });
+
+  it('键名规范化后比较：下划线/中划线/驼峰写法的自定义字段互相匹配', () => {
+    const r2 = createRedactor(['id_card']);
+    expect(r2.value({ idCard: '110', 'id-card': '110' })).toEqual({
+      idCard: REDACTED,
+      'id-card': REDACTED,
+    });
+    expect(r2.headers({ 'ID-CARD': '110' })).toEqual({ 'ID-CARD': REDACTED });
+  });
 });
