@@ -75,6 +75,16 @@ describe('ConfigSchema', () => {
     expect(cfg.providers).toEqual({});
   });
 
+  it('budget 为空对象时补全 perCase 默认值', () => {
+    const cfg = ConfigSchema.parse({ models, budget: {} });
+    expect(cfg.budget.perCase).toEqual({ steps: 60, tokens: 400000, minutes: 10 });
+  });
+
+  it('budget.perCase 部分字段时补全其他字段', () => {
+    const cfg = ConfigSchema.parse({ models, budget: { perCase: { steps: 5 } } });
+    expect(cfg.budget.perCase).toEqual({ steps: 5, tokens: 400000, minutes: 10 });
+  });
+
   it('模型引用必须是 provider:model 形式', () => {
     expect(ConfigSchema.safeParse({ models: { ...models, executor: 'gpt-5.4' } }).success).toBe(false);
   });

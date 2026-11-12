@@ -22,7 +22,7 @@ const BudgetLimitsSchema = z.object({
 });
 export type BudgetLimits = z.infer<typeof BudgetLimitsSchema>;
 
-export const ConfigSchema = z.object({
+const baseConfigSchema = z.object({
   models: z.object({
     extractor: ModelRefSchema,
     planner: ModelRefSchema,
@@ -40,15 +40,9 @@ export const ConfigSchema = z.object({
   providers: z.record(z.string(), ProviderConfigSchema).default({}),
   budget: z
     .object({
-      perCase: BudgetLimitsSchema,
+      perCase: BudgetLimitsSchema.optional(),
     })
-    .default({
-      perCase: {
-        steps: 60,
-        tokens: 400000,
-        minutes: 10,
-      },
-    }),
+    .optional(),
   /** 每百万 token 单价，键为模型引用 */
   pricing: z
     .record(ModelRefSchema, z.object({ inputPerMTok: z.number().nonnegative(), outputPerMTok: z.number().nonnegative() }))
@@ -56,4 +50,39 @@ export const ConfigSchema = z.object({
   requirementsDocs: z.array(z.string()).default([]),
   defaultEnvironment: z.string().optional(),
 });
+
+export const ConfigSchema = baseConfigSchema.transform((config) => {
+  // 确保 budget 和 perCase 有完整的默认值
+  if (!config.budget) {
+    config.budget = {
+      perCase: {
+        steps: 60,
+        tokens: 400000,
+        minutes: 10,
+      },
+    };
+  } else if (!config.budget.perCase) {
+    config.budget.perCase = {
+      steps: 60,
+      tokens: 400000,
+      minutes: 10,
+    };
+  } else {
+    // 补全 perCase 中缺失的字段
+    config.budget.perCase = {
+      steps: config.budget.perCase.steps ?? 60,
+      tokens: config.budget.perCase.tokens ?? 400000,
+      minutes: config.budget.perCase.minutes ?? 10,
+    };
+  }
+  return config as {
+    models: typeof config.models;
+    providers: Record<string, any>;
+    budget: { perCase: { steps: number; tokens: number; minutes: number } };
+    pricing: Record<string, any>;
+    requirementsDocs: string[];
+    defaultEnvironment?: string;
+  };
+});
+
 export type Config = z.infer<typeof ConfigSchema>;
