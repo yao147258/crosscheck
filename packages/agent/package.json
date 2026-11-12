@@ -1,0 +1,16 @@
+{
+  "name": "@crosscheck/agent",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./testing": "./src/testing/scripted-model.ts"
+  },
+  "dependencies": {
+    "@crosscheck/core": "workspace:^",
+    "@crosscheck/models": "workspace:^",
+    "ai": "^7.0.170",
+    "zod": "^4.6.7"
+  }
+}
