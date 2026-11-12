@@ -131,6 +131,36 @@ describe('checkRequest', () => {
     expect(checkRequest({ url: 'http://localhost:5432/' }, gBad2).ok).toBe(false);
   });
 
+  it.each(['*.ex.com:8080', 'a@host', 'host#x', 'host\\x', 'host?x', '*.[::1]', '*.*.ex.com'])(
+    '第 4 轮 不合法的白名单条目 %s 不放行任何请求',
+    (entry) => {
+      const gBad: Guardrails = { allowedHosts: [entry], forbidden: [], redactFields: [] };
+      for (const url of [
+        'http://a.ex.com:8080/',
+        'http://a.ex.com/',
+        'http://host/',
+        'http://a@host/',
+        'http://[::1]/',
+        'http://a.b.ex.com/',
+      ]) {
+        expect(checkRequest({ url }, gBad).ok).toBe(false);
+      }
+    },
+  );
+
+  it('第 4 轮 合法白名单条目格式仍然生效', () => {
+    const gOk: Guardrails = {
+      allowedHosts: ['*.staging.example.com', '[::1]:3000', '127.0.0.1', 'Example.COM:8080'],
+      forbidden: [],
+      redactFields: [],
+    };
+    expect(checkRequest({ url: 'https://a.staging.example.com/' }, gOk).ok).toBe(true);
+    expect(checkRequest({ url: 'http://[::1]:3000/' }, gOk).ok).toBe(true);
+    expect(checkRequest({ url: 'http://127.0.0.1:9999/' }, gOk).ok).toBe(true);
+    expect(checkRequest({ url: 'http://example.com:8080/' }, gOk).ok).toBe(true);
+    expect(checkRequest({ url: 'http://example.com:8081/' }, gOk).ok).toBe(false);
+  });
+
   it('B2 既有的通配符白名单条目仍能正常通过', () => {
     expect(checkRequest({ url: 'https://a.staging.example.com/' }, g).ok).toBe(true);
     expect(checkRequest({ url: 'http://localhost:3000/api/x' }, g).ok).toBe(true);
@@ -198,5 +228,24 @@ describe('checkReadonlySql', () => {
     "SELECT * FROM t /*M! INTO OUTFILE '/tmp/x' */",
   ])('第 3 轮 N1/B1 绕过必须被拒绝：%s', (sql) => {
     expect(checkReadonlySql(sql).ok).toBe(false);
+  });
+
+  it.each([
+    "WITH x([a']) AS (SELECT 1) DELETE FROM t WHERE 1 IN (SELECT [a'] FROM x)",
+    "SELECT 1 AS [a'];DROP TABLE t;SELECT 1 AS [']",
+    "SELECT load_extension('x')",
+  ])('第 4 轮 S1 SQLite 方括号标识符 / load_extension 必须被拒绝：%s', (sql) => {
+    expect(checkReadonlySql(sql).ok).toBe(false);
+  });
+
+  it('第 4 轮 S1 方括号的拒绝原因可读', () => {
+    expect(checkReadonlySql('SELECT [a] FROM t')).toEqual({
+      ok: false,
+      reason: '不允许在字符串/引号标识符之外使用方括号（[ 或 ]）',
+    });
+  });
+
+  it.each(["SELECT '[a]'", 'SELECT "[a]" FROM t'])('第 4 轮 字符串/引号标识符内的方括号仍允许：%s', (sql) => {
+    expect(checkReadonlySql(sql)).toEqual({ ok: true });
   });
 });

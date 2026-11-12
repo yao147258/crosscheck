@@ -4,7 +4,7 @@ const FORBIDDEN_WORDS =
   /\b(INSERT|UPDATE|DELETE|MERGE|UPSERT|DROP|ALTER|CREATE|TRUNCATE|GRANT|REVOKE|CALL|EXEC|EXECUTE|COPY|LOCK|INTO|ATTACH|DETACH|PRAGMA|VACUUM|LOAD|HANDLER|SET|RENAME|COMMENT|REINDEX|CLUSTER|REFRESH|NOTIFY|LISTEN)\b/i;
 
 const FORBIDDEN_FUNCS =
-  /\b(pg_sleep\w*|sleep|benchmark|dblink\w*|lo_\w+|pg_read_\w+|pg_write_\w+|pg_ls_dir|load_file|pg_terminate_backend|pg_cancel_backend|set_config|nextval|setval)\s*\(/i;
+  /\b(pg_sleep\w*|sleep|benchmark|dblink\w*|lo_\w+|pg_read_\w+|pg_write_\w+|pg_ls_dir|load_file|load_extension|pg_terminate_backend|pg_cancel_backend|set_config|nextval|setval)\s*\(/i;
 
 /** 除空格、\t、\n、\r 外的 ASCII 控制字符（含 \0），一律视为非法输入 */
 const DISALLOWED_CONTROL_CHARS = /[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/;
@@ -27,6 +27,9 @@ type ScanResult = { ok: true; body: string } | { ok: false; reason: string };
  *   这样引号包裹的函数名/关键字仍会被后续的黑名单检查命中（宁可误拒）；其内部的注释标记同样不受影响。
  * - 扫描到字符串/标识符之外的单独 `$` 字符 → 直接判定失败（不局限于 ASCII 美元符引号标签，
  *   任何语言字符都可以出现在标签里，统一按“字符串/标识符之外一律不允许出现 $”处理）。
+ * - 字符串/引号标识符之外出现 `[` 或 `]` → 直接判定失败。SQLite（及 SQL Server）把 `[...]` 当作标识符，
+ *   其内部的 `'` 不是字符串开头；若按普通字符处理，`[a']` 会让扫描器误判字符串边界、漏检其后的写操作。
+ *   与注释同理，不尝试兼容方言，一律拒绝（代价：PG 数组下标 `arr[1]` 会被误拒）。
  * 任何未闭合的字符串/标识符都直接判定失败。
  */
 function scanSql(sql: string): ScanResult {
@@ -82,6 +85,9 @@ function scanSql(sql: string): ScanResult {
       out += content;
       i = j;
       continue;
+    }
+    if (ch === '[' || ch === ']') {
+      return { ok: false, reason: '不允许在字符串/引号标识符之外使用方括号（[ 或 ]）' };
     }
     if (ch === '$') {
       return { ok: false, reason: '不允许在字符串/标识符/注释之外出现美元符号' };
