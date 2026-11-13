@@ -42,6 +42,12 @@ importers:
         specifier: ^4.6.7
         version: 4.6.7
 
+  packages/discovery:
+    dependencies:
+      yaml:
+        specifier: ^2.9.1
+        version: 2.9.1
+
   packages/models:
     dependencies:
       '@ai-sdk/anthropic':
@@ -65,6 +71,21 @@ importers:
       ai:
         specifier: ^7.0.170
         version: 7.0.170(zod@4.6.7)
+      zod:
+        specifier: ^4.6.7
+        version: 4.6.7
+
+  packages/requirements:
+    dependencies:
+      '@crosscheck/agent':
+        specifier: workspace:^
+        version: link:../agent
+      '@crosscheck/core':
+        specifier: workspace:^
+        version: link:../core
+      '@crosscheck/models':
+        specifier: workspace:^
+        version: link:../models
       zod:
         specifier: ^4.6.7
         version: 4.6.7
