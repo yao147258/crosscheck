@@ -45,9 +45,15 @@ function parseHostEntry(entry: string): { hostname: string; port: string | null 
   }
 }
 
+export function isValidHostEntry(entry: string): boolean {
+  const value = entry.trim();
+  if (!HOST_ENTRY_PATTERN.test(value)) return false;
+  return parseHostEntry(value.startsWith('*.') ? value.slice(2) : value) !== null;
+}
+
 function hostAllowed(url: URL, entry: string): boolean {
   const trimmed = entry.trim();
-  if (!HOST_ENTRY_PATTERN.test(trimmed)) return false;
+  if (!isValidHostEntry(trimmed)) return false;
   if (trimmed.toLowerCase().startsWith('*.')) {
     const suffix = trimmed.slice(1).toLowerCase();
     return url.hostname.toLowerCase().endsWith(suffix);

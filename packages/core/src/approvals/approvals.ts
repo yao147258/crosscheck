@@ -1,6 +1,17 @@
 import { z } from 'zod';
 import type { ArtifactStore } from '../store/artifact-store';
 import { contentHash } from './hash';
+import type { Clause, TestCase } from '../schema/artifacts';
+
+/** 确认绑定用例与 covers 对应条款内容，不绑定无关条款或数组顺序。 */
+export function caseApprovalPayload(tc: TestCase, clauses: Clause[]) {
+  const covered = [...new Set(tc.covers)].sort().map((id) => {
+    const matches = clauses.filter((clause) => clause.id === id);
+    if (matches.length !== 1) throw new Error(`用例 ${tc.id} 的覆盖条款缺失或重复：${id}`);
+    return { id, hash: contentHash(matches[0]) };
+  });
+  return { version: 1 as const, testCase: { ...tc, covers: [...tc.covers].sort() }, clauses: covered };
+}
 
 export type ApprovalKind = 'clause' | 'case' | 'profile';
 export type ApprovalState = 'approved' | 'stale' | 'none';
@@ -39,6 +50,19 @@ export class Approvals {
 
   approve(kind: ApprovalKind, id: string, content: unknown, by: string, at: Date = new Date()): void {
     this.entries.set(key(kind, id), { hash: contentHash(content), by, at: at.toISOString() });
+  }
+
+  approveCase(tc: TestCase, clauses: Clause[], by: string, at: Date = new Date()): void {
+    this.approve('case', tc.id, caseApprovalPayload(tc, clauses), by, at);
+  }
+
+  stateCase(tc: TestCase, clauses: Clause[]): ApprovalState {
+    if (!this.record('case', tc.id)) return 'none';
+    try {
+      return this.state('case', tc.id, caseApprovalPayload(tc, clauses));
+    } catch {
+      return 'stale';
+    }
   }
 
   revoke(kind: ApprovalKind, id: string): void {

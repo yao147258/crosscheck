@@ -1,7 +1,7 @@
 export const REDACTED = '[REDACTED]';
 
 const SENSITIVE_HEADERS = new Set(['authorization', 'proxy-authorization', 'cookie', 'set-cookie']);
-const DEFAULT_FIELDS = ['password', 'passwd', 'pwd', 'token', 'access_token', 'refresh_token', 'id_token', 'secret', 'client_secret', 'api_key', 'apikey'];
+const DEFAULT_FIELDS = ['password', 'passwd', 'pwd', 'token', 'access_token', 'refresh_token', 'id_token', 'secret', 'client_secret', 'api_key', 'apikey', 'session', 'sid', 'sessionId'];
 
 export interface Redactor {
   headers(h: Record<string, string | string[]>): Record<string, string | string[]>;
@@ -66,6 +66,7 @@ export function createRedactor(extraFields: string[] = []): Redactor {
     value,
     text(body, contentType = '') {
       const ct = contentType.toLowerCase();
+      if (ct.includes('multipart/')) return '[OMITTED: multipart]';
       if (ct.includes('json')) {
         try {
           return JSON.stringify(value(JSON.parse(body)));
@@ -78,7 +79,9 @@ export function createRedactor(extraFields: string[] = []): Redactor {
     },
     url(u) {
       try {
-        const url = new URL(u);
+        const absolute = /^[a-z][a-z\d+.-]*:/i.test(u);
+        const protocolRelative = u.startsWith('//');
+        const url = new URL(u, 'http://redactor.invalid/');
         // 脱敏 username 和 password
         if (url.username) url.username = REDACTED;
         if (url.password) url.password = REDACTED;
@@ -86,10 +89,16 @@ export function createRedactor(extraFields: string[] = []): Redactor {
         url.search = params(url.searchParams).toString();
         // 脱敏 hash 中的参数
         if (url.hash && url.hash.includes('=')) {
-          const hashParams = new URLSearchParams(url.hash.slice(1)); // 去掉开头的 #
-          url.hash = '#' + params(hashParams).toString();
+          const hash = url.hash.slice(1);
+          const split = hash.indexOf('?');
+          const prefix = split >= 0 ? hash.slice(0, split + 1) : '';
+          const hashParams = new URLSearchParams(split >= 0 ? hash.slice(split + 1) : hash);
+          url.hash = '#' + prefix + params(hashParams).toString();
         }
-        return url.toString();
+        if (absolute) return url.toString();
+        if (protocolRelative) return '//' + url.host + url.pathname + url.search + url.hash;
+        const path = u.startsWith('/') ? url.pathname : url.pathname.slice(1);
+        return path + url.search + url.hash;
       } catch {
         return u;
       }

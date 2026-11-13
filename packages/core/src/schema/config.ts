@@ -15,7 +15,7 @@ const ProviderConfigSchema = z.object({
   apiKeyEnv: z.string().regex(/^[A-Z_][A-Z0-9_]*$/, '这里只写环境变量名').optional(),
 });
 
-const BudgetLimitsSchema = z.object({
+export const BudgetLimitsSchema = z.object({
   steps: z.number().int().positive().default(60),
   tokens: z.number().int().positive().default(400000),
   minutes: z.number().positive().default(10),
@@ -38,6 +38,8 @@ export const ConfigSchema = z.object({
       .prefault({}),
   }),
   providers: z.record(z.string(), ProviderConfigSchema).prefault({}),
+  /** 按完整模型引用登记能力，未登记的引用一律视为不支持图片，含备用模型。 */
+  capabilities: z.record(ModelRefSchema, z.object({ images: z.boolean().default(false) })).prefault({}),
   budget: z.object({ perCase: BudgetLimitsSchema.prefault({}) }).prefault({}),
   /** 每百万 token 单价，键为模型引用 */
   pricing: z
