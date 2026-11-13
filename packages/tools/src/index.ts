@@ -5,3 +5,5 @@ export * from './evidence/store';
 export * from './network/policy';
 export * from './network/http-client';
 export * from './http/tools';
+export * from './db/postgres';
+export * from './db/tools';

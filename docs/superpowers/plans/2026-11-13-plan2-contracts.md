@@ -30,6 +30,8 @@
 - 普通 DB 工具只使用 data-model 的只读连接，并对具名查询及临时 SELECT 运行只读守卫。
 - SQL fixture 必填独立 `connection:{kind:'postgres',env}`，以及 query 名、固定 params 数组；只在准备阶段执行。
 - 画像拒绝 fixture 与只读连接使用同一个环境变量名。两个不同变量也可能实际指向同一账号，schema 不能证明权限隔离；部署与适配器必须再验证。
+- PostgreSQL 连接环境变量只接受完整 TCP URL：显式 host、用户名、非空密码、数据库，未写端口时固定 5432；不继承其他 `PG*` 环境变量或 pgpass。仅支持默认验证 TLS / `sslmode=verify-full`，或 URL 显式 `sslmode=disable`；不支持免密、Unix socket、客户端证书/自定义根证书文件及其他 URL 查询参数。真实 PG 权限、超时及取消尚未验证。
+- 具名查询按声明顺序绑定参数；`type:'json'` 的非 null 值统一 JSON 编码，nullable 的 JS null 表示 SQL NULL。临时 SELECT 无类型声明，保留 pg 原生参数绑定语义。
 - SQL fixture 可引用已确认 queries 中的 SQL，但只读工具不会因为 query 已确认就绕过守卫。
 - 用例继续使用 `fixtures:string[]`。普通夹具缺失可交准备阶段现场造数；必需 reset 不存在、既有夹具失败不能靠现场猜测替代。
 
