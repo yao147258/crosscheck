@@ -50,7 +50,7 @@ describe('Task2 浏览器证据真实呈现', () => {
     expect(shown.has(image.id)).toBe(false);
     expect(shown.get(dom.id)).toMatchObject({ truncated: false });
     const parts = primary.doGenerateCalls[0]!.prompt.flatMap(m => m.role === 'user' ? m.content : []);
-    // SDK把公开ModelMessage的image part规范化为provider的file part。
+    // 检查 SDK 最终 provider 的 PNG，而非仅检查公开消息对象。
     const file = parts.find(p => p.type === 'file');
     expect(file).toMatchObject({ type: 'file', mediaType: 'image/png' });
     if (file?.type !== 'file' || file.data.type !== 'data' || !(file.data.data instanceof Uint8Array)) throw new Error('未送入真实PNG bytes');
@@ -61,6 +61,22 @@ describe('Task2 浏览器证据真实呈现', () => {
       expect(JSON.stringify(call.prompt)).toContain('宿主证据不完整');
       expect(JSON.stringify(call.prompt)).not.toContain('actionId');
     }
+  }));
+  it('公开附件使用非弃用 file part，SDK 最终 provider PNG 逐字节保持一致', async () => fixture(async (store, _artifacts, image) => {
+    const presenter = createEvidencePresenter(store, { capabilities: { 'mock:image': { images: true } } });
+    const prepared = await prepareContext([], { ref: 'mock:image', signal: signal(), presenter, requiredEvidenceIds: [image.id] });
+    const parts = prepared.messages.flatMap(message => message.role === 'user' && Array.isArray(message.content) ? message.content : []);
+    expect(parts.some(part => part.type === 'image')).toBe(false);
+    const file = parts.find(part => part.type === 'file');
+    expect(file).toMatchObject({ type: 'file', mediaType: 'image/png' });
+    if (file?.type !== 'file' || !(file.data instanceof Uint8Array)) throw new Error('公开附件不是内存 PNG');
+    expect(Buffer.from(file.data)).toEqual(png);
+    const model = scriptedModel([finish]);
+    const result = await runAgent({ stage: 'review', models: [{ ref: 'mock:image', model }], system: '按图片判断', messages: [], tools: [], output: z.object({ answer: z.string() }), budget: budget(), evidencePresenter: presenter, requiredEvidenceIds: [image.id] });
+    expect(result.status).toBe('done');
+    const actual = model.doGenerateCalls[0]!.prompt.flatMap(message => message.role === 'user' ? message.content : []).find(part => part.type === 'file');
+    if (actual?.type !== 'file' || actual.data.type !== 'data' || !(actual.data.data instanceof Uint8Array)) throw new Error('provider 未收到内存 PNG');
+    expect(Buffer.from(actual.data.data)).toEqual(png);
   }));
   it('未配置images默认无图，仍核验截图；读盘失败原样传播且不provider重试', async () => fixture(async (store, artifacts, image) => {
     const presenter = createEvidencePresenter(store);
@@ -77,7 +93,7 @@ describe('Task2 浏览器证据真实呈现', () => {
     const prepared = await prepareContext([], { ref: 'mock:a', signal: signal(), presenter, requiredEvidenceIds: [image.id, dom.id], maxAttachmentBytes: png.length - 1, maxAttachmentChars: 150 });
     expect(prepared.incompleteEvidenceIds).toEqual([image.id, dom.id]);
     expect(prepared.presentedEvidence).toEqual([{ id: dom.id, type: 'dom', truncated: true }]);
-    expect(prepared.messages.flatMap(m => m.role === 'user' && Array.isArray(m.content) ? m.content : []).some(p => p.type === 'image')).toBe(false);
+    expect(prepared.messages.flatMap(m => m.role === 'user' && Array.isArray(m.content) ? m.content : []).some(p => p.type === 'file' && p.mediaType === 'image/png')).toBe(false);
     const two = await prepareContext([], { ref: 'mock:a', signal: signal(), presenter: async () => [
       { id: 'one', type: 'screenshot', bytes: png, mediaType: 'image/png', truncated: false },
       { id: 'two', type: 'screenshot', bytes: png, mediaType: 'image/png', truncated: false },

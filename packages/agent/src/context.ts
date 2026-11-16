@@ -150,7 +150,7 @@ export async function prepareContext(messages: ModelMessage[], options: PrepareC
     if (evidence.type === 'screenshot') {
       const text = header + (truncated ? marker : '');
       if (evidence.bytes.byteLength > remainingBytes || text.length > remaining) { incomplete.add(id); continue; }
-      attachments.push({ role: 'user', content: [{ type: 'text', text }, { type: 'image', image: evidence.bytes, mediaType: evidence.mediaType }] });
+      attachments.push({ role: 'user', content: [{ type: 'text', text }, { type: 'file', data: evidence.bytes, mediaType: evidence.mediaType }] });
       remainingBytes -= evidence.bytes.byteLength;
       remaining -= text.length;
     } else {

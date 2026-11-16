@@ -1,6 +1,6 @@
 # 计划 2 消费契约与实施裁定
 
-本文件记录计划 2 已审查的数据契约和兼容性决策，供后续工具、执行管线及计划 3 复用。**这是开发中的契约，不表示真实执行工具或 CLI 已全部实现。**
+本文件记录计划 2 的数据契约和兼容性决策，供后续工具、执行管线及计划 3 复用。**2026-11-16 当前能力已恢复标准 Chromium 浏览器执行和 CLI 真实端到端验证**；§4 保留 2026-11-13 暂缓历史，并追加最新有效裁定，不代表所有后续计划或厂商/真实 PG 已验。
 
 ## 1. 系统画像
 
@@ -14,9 +14,9 @@
 | pages.yaml | `version:1`、`pages` 映射；environment/path/description/knowledge/sources/可选 actor |
 | data-model.yaml | `version:1`、可选 `connection:{kind:'postgres',env}`、`queries` 映射 |
 | fixtures.yaml | `version:1`、`fixtures` 映射；command/http/sql 判别联合 |
-| guardrails.yaml | 沿用现有 allowedHosts/forbidden/redactFields，不加 version |
+| guardrails.yaml | allowedHosts/forbidden/redactFields、可选 screenshotMasks，不加 version |
 
-没有某类功能也要提供并确认合法空配置，不能漏文件绕过画像门禁。真实运行必须选中已存在环境，且所选用例的 actor 存在。环境和目录的 URL 不构成网络授权，授权唯一来源仍是 guardrails。
+没有某类功能也要提供并确认合法空配置，不能漏文件绕过画像门禁。真实运行必须选中已存在环境，且所选用例的 actor 存在。环境和目录的 URL 不构成 HTTP 工具网络授权，其授权来源仍是 guardrails；浏览器页面自身请求不受该网络准入守卫限制，仅在可信环境使用。
 
 ### 认证与命令
 
@@ -104,7 +104,7 @@ RunStore 在提交及恢复消费结果时检查证据文件存在、摘要匹�
 - HAR 必须从内存清理标准字段，含 headers/cookies/query/postData/content/Location；无效 URL 和不可解析正文明确省略，不能原文回退。
 - `postData.params` 保留安全表单参数并清理敏感字段，不支持格式明确标记省略。
 - 同进程多实例按物理项目根与 attempt 串行登记索引；跨进程仍要求宿主在采集至提交整个生命周期持有 RunStore 锁。
-- 截图登记尚未开放，必须等可信浏览器采集实际遮罩通过后接入。自由文本仅保证已知 secret 与指定编码变体替换，不能自动识别所有未知秘密。
+- 截图仅接受可信浏览器采集器提供的内存 PNG（模块私有能力），不能靠调用方声明 complete:true 注册任意图片。遮罩后才落盘，读取时核验签名/hash/归属。自由文本仅保证已知 secret 与指定编码变体替换，不能自动识别所有未知秘密。
 
 ### HTTP 工具消费约定
 
@@ -116,15 +116,26 @@ RunStore 在提交及恢复消费结果时检查证据文件存在、摘要匹�
 
 网络、取消、超限等操作错误使用 `HttpOperationError` 携带已保存 evidenceIds。status 0 是宿主失败/未发送事件，不是实际服务器响应；真实 HTTP 响应另有独立记录。存储异常不能伪装网络故障或静默变成无证据成功。
 
-### 浏览器工具（暂缓，未交付）
+### 浏览器工具裁定历史（2026-11-13 暂缓，已被下节覆盖）
 
-2026-11-13 用户裁定暂缓浏览器工具，计划 2 只交付 HTTP/DB 闭环。
+以下仅保留当时历史，不是当前能力说明：2026-11-13 用户裁定暂缓浏览器工具，计划 2 当时只交付 HTTP/DB 闭环。
 
 - 真实 Chromium 1254 准入验证中，CDP `Fetch.requestPaused` 在已测路径上做到了发送前拦截：导航、逐跳重定向、子资源、fetch、iframe/OOPIF、弹窗首请求、dedicated worker、表单、下载。
 - 但 WebSocket 握手无法用 Fetch 或 `Network.setBlockedURLs` 在发送前阻断；WebTransport/WebRTC 未测。按"未覆盖能力不得开放"，浏览器能力不开放。
 - `packages/tools/src/browser/` 下的代码是未审查的研究成果，不导出、不接入，任何任务不得消费。
 - 本阶段不产生 screenshot/dom 证据。要求这两类证据的用例，以及 form/replay 认证的用例，在副作用前 BLOCKED 并写明原因。token 的 storage 注入同样不支持。
 - 后续恢复浏览器（含计划 3 record 复用安全采集）必须先解决 WebSocket（候选：宿主强制本地代理，只按 host:port 放行），再补完动作、遮蔽截图、采证和工具工厂，并独立审查。
+
+### 浏览器当前有效契约（2026-11-16 恢复）
+
+- 用户明确取消网络隔离/强制代理/WT、RTC 禁用要求，不再追求 WebSocket 发送前准入。标准 Playwright Chromium 页面请求正常运行，无浏览器网络隔离保证，**仅可信测试环境**。HTTP `RequestPolicy` 与只读 DB 守卫不变，allowedHosts/forbidden 不涵盖网页自身流量。
+- BrowserHost 惰性启动每用例独立 context，受限 `browser_action` 为 navigate/click/fill/select/press/wait/observe，定位器 css/role/text/testId/xpath；模型无 evaluate、shell、宿主文件或落盘路径能力。fill 的 value/env 二选一，环境变量值不交给模型，轨迹只记录 secretRef 或脱敏值。
+- 人工确认与画像哈希、共享预算/deadline、取消、阶段工具授权、盲审、hash/归属/完整呈现门禁保持。取消/正常/异常均等待 browser/采证清理再提交结果；恢复新 attempt 不复用 session；HTTP-only 不启动浏览器。
+- `guardrails.screenshotMasks?: string[]` 为可选 CSS selector，无默认空数组，旧配置省略时哈希不变，更改必须重新人工确认。PNG/DOM 当前视口采集先遮罩密码/敏感字段、已知秘密、填写值、批准 selector，iframe/canvas/svg 等无法核验区域保守遮罩/省略。控件值已脱敏，不能据隐藏值断言实际填写内容；不是整页/动画一致性或未知秘密绝对无泄漏保证。
+- 网络只保存有界 URL/方法/状态等元数据，正文/头/cookie 在源头省略，不能冒充完整业务响应；不写原始 Playwright HAR/trace/storageState。console 有界并清理已知秘密。截图按实际模型 ref 的 images 能力附内存 PNG `file part`，DOM 为安全文本，未完整呈现不能 PASS/FAIL。
+- form/replay 只消费批准动作（goto/click/fill(env)/waitFor），不录制；storage token 只注入精确 baseURL origin。header/command/token header 作用于主 page 同 origin 请求，不保证 popup/iframe/worker 的头认证。HTTP facade 对同 origin 读取当前浏览器 cookie；浏览器 cookie 遵循原生 domain/path/secure 规则，**不按端口隔离**，不能宣称跨端口秘密隔离。
+- CLI 真机闭环使用真实 loopback 表单、构建 JS 入口与 scripted 模型，验证双方 PNG/DOM 附件、PASS/DISPUTED/无图 BLOCKED、三报告、签名/hash/归属/脱敏与静态 HTML 安全；取消/预算/恢复复用已有 runner/tools 覆盖。不调用外部模型，不把默认跳过 real 组的通过当真实浏览器验证。
+- Chromium 安装、完整 capabilities 示例、`pnpm build` / run / 离线 report 与 `CROSSCHECK_REAL_BROWSER=1` 串行测试命令见 `docs/manual-integration.md`。真实 PG、厂商联调和最低 Node 本轮未执行；Node22.12 CLI 冒烟仅为历史验证。
 
 ## 5. 模型能力与兼容性
 

@@ -16,7 +16,7 @@ pnpm --filter @crosscheck/cli exec crosscheck --help
 node packages/cli/dist/index.js --help
 ```
 
-浏览器报告测试使用开发依赖 Playwright 的本地 Chromium。若本机尚无浏览器，可显式安装开发工具 `pnpm --filter @crosscheck/cli exec playwright install chromium`。这仅验证报告 file 页面，不代表交付被测网页操作能力。
+浏览器执行使用运行时依赖 Playwright 的 Chromium，安装命令为 `pnpm --filter @crosscheck/cli exec playwright install chromium`。HTTP-only 用例不要求启动 Chromium。必须在 Crosscheck 仓库构建后运行 `packages/cli/dist/index.js` / `pnpm crosscheck`，不依赖隐式 TypeScript loader。仅用于可信测试环境：标准浏览器没有网络隔离，普通页面自身请求、重定向、WebSocket/WebTransport/WebRTC 正常运行；不安装强制代理，不承诺阻断页面访问其他目标。HTTP/DB 工具的现有守卫不变。
 
 以下示例假设用户自己启动了 `http://127.0.0.1:3000` 测试应用，`GET /health` 返回成功，`POST /api/action` 改变状态，`GET /api/item` 返回完整 JSON `{ "status": "done" }`。服务不存在时必须先人工提供适配，Crosscheck 不会替用户启动未知系统。
 
@@ -36,10 +36,14 @@ providers: {}
 defaultEnvironment: local
 budget:
   perCase: { steps: 30, tokens: 100000, minutes: 5 }
-capabilities: {}
+capabilities:
+  "openai:your-executor-model": { images: true }
+  "google:your-reviewer-model": { images: true }
 pricing: {}
 requirementsDocs: []
 ```
+
+图片配置键是**完整模型 ref**（provider:model），不是角色或裸型号；备用模型也要单独声明。每次实际候选重新装配附件，缺省 `images:false`；截图路径/ID 不代表模型看过图，无图候选不能对要求 screenshot 的预期伪造 PASS/FAIL。只为确认支持图片的型号配置 true，不是给任意型号自动增加视觉能力。
 
 未登记模型价格时 cost 为 null，显示“未知”，不是 0；失败尝试没有 usage 也不能推算费用。推荐执行/复核使用不同厂商；同源会记录独立性低可靠提示，假模型测试不证明厂商质量。
 
@@ -66,7 +70,23 @@ actors:
     inject: { kind: header, name: Authorization }
 ```
 
-`TEST_API_TOKEN` 值需含服务所需完整前缀（例如 `Bearer ...`）。也可声明 token cookie 注入；**storage 注入不支持**。form/replay 虽能解析为画像，但运行会 BLOCKED，不能当已支持功能。
+`TEST_API_TOKEN` 值需含服务所需完整前缀（例如 `Bearer ...`）。token 也支持 `{ kind: cookie, name: sid }` 或 `{ kind: storage, storage: local, name: access_token }`（storage 可选 local/session）。storage 仅在环境 baseURL 的精确 origin 注入，不自动转换为 HTTP 认证头。
+
+form/replay 消费已人工批准动作，不实现录制，例如在 actors 中追加如下配置，并将用例 actor 改为 member：
+
+```yaml
+  member:
+    kind: form # replay 使用相同受限动作格式
+    environment: local
+    actions:
+      - { kind: goto, url: /login }
+      - { kind: fill, selector: 'input[name=username]', env: TEST_USERNAME }
+      - { kind: fill, selector: 'input[name=password]', env: TEST_PASSWORD }
+      - { kind: click, selector: 'button[type=submit]' }
+      - { kind: waitFor, selector: '#logged-in' }
+```
+
+reset→其他夹具→认证顺序固定。浏览器与 HTTP 共享当前 actor：HTTP facade 仅对 baseURL 同 origin 读取浏览器 cookie；header/command/token header 仅向主 page 的同 origin 请求注入，不承诺弹窗、iframe、worker 的头认证覆盖。浏览器原生 cookie 按 domain/path/secure 等规则发送，**cookie 不按端口隔离**，同主机其他端口可能收到它；header/storage 的精确 origin 范围不能被解释为 cookie 网络隔离。不同用例不复用上下文，恢复建立新会话。
 
 `.crosscheck/system/api-catalog.yaml`
 
@@ -119,9 +139,11 @@ allowedHosts: ["127.0.0.1:3000"]
 forbidden:
   - { method: DELETE, path: "/**" }
 redactFields: [phone, email]
+# 可选：批准的 CSS 遮罩；旧配置可完全省略此键
+screenshotMasks: ['[data-private]', '.customer-details']
 ```
 
-允许主机精确含端口；禁止终点在重定向每跳发送前检查。允许的业务 POST 仍会真实修改测试状态，网络策略不是业务回滚器，也不是 OS 沙箱。
+HTTP 工具允许主机精确含端口，重定向每跳发送前检查禁止终点；这些策略**不约束浏览器页面自身流量**。允许的 POST/浏览器点击仍会真实修改测试状态，不提供业务回滚或 OS 沙箱。`screenshotMasks` 是 optional 而非默认空数组，省略不改变旧画像审批哈希；添加/修改 selector 后必须重新审阅确认画像。
 
 ## 3. 条款与用例
 
@@ -154,7 +176,11 @@ redactFields: [phone, email]
       evidence: [network]
 ```
 
-用例需显式声明 network/db 证据。screenshot/dom 证据会在 start/reset/网络/模型前 BLOCKED。计划 2 **不含浏览器工具**：WebSocket 无法在发送前可靠阻断，故不交付页面导航、点击、表单、replay、storage 或截图采集；不能宣称支持页面操作验收。HTML 保留已保存 PNG 的静态渲染接口，run 没有截图时显示“无截图证据”，不放占位图。
+用例需显式声明所需证据：HTTP 用 network、查询用 db；浏览器用例可声明 `[screenshot, dom]`。例如将上述用例改为页面测试时，同时修改条款原文/出处、步骤为“导航 /form，填写已授权测试数据，点击保存，观察成功提示”，预期为“页面显示保存成功”，证据为 `[screenshot, dom]`，然后重新人工确认，不能只改证据类型却仍按 HTTP JSON 要求判断。
+
+模型通过 `browser_action` 使用 navigate/fill/click/select/press/wait/observe；定位器支持 css/role/text/testId/xpath，fill 的 `value` 与 `env` 二选一，敏感信息只用 env 引用。没有 evaluate/shell/宿主文件路径。每动作前后采集当前视口 PNG 和安全 DOM，密码/敏感字段、填写值、已知秘密、批准 selector，以及 iframe/canvas 等不可可靠核验区域被遮罩/省略；控件值不暴露给模型，不能根据隐藏值断言实际填写内容。请断言可见成功提示或另取允许的业务观察。
+
+截图只覆盖当前视口，不是整页、所有滚动位置或动画期间的一致性证明；选择器不能保证识别未知秘密。网络证据仅 URL/方法/状态等有界元数据，正文/头/cookie 源头省略，不足以证明完整业务响应；DOM 被省略/截断或图片未呈现也不能伪造完整证据。采证先在内存脱敏再落盘，不保存原始 HAR/trace/storageState；报告无截图时明确“无截图证据”，不放占位图。自动脱敏不是绝对无泄漏承诺，分享前人工检查。
 
 ## 4. 人工审阅与独立确认
 
@@ -238,4 +264,16 @@ start/stop 是可选的批准**一次性 JSON 适配命令**：`{ program: '<可
 
 ## 当前验证边界
 
-HTTP loopback、SDK scripted 模型、实际构建 CLI、静态 HTML file 浏览器检查与 Node 22.12 冒烟有自动验证；不是三厂商质量、召回率/误报率或真实环境验收。真实厂商和真实 PG 未执行。浏览器执行工具为暂缓（未交付），不是“未测但支持”。
+2026-11-16 恢复交付标准 Chromium 自动操作（覆盖 2026-11-13 暂缓历史）：真实 loopback 表单、scripted 模型、构建后的 CLI 子进程、执行/盲审 PNG 与 DOM 附件、PASS/DISPUTED/无图 BLOCKED、证据归属/hash、JSON/JUnit/HTML 与静态 file 报告均有自动验证。不消耗外部模型 token。取消/清理、预算、认证/恢复复用已有 runner/tools 测试覆盖，不意味着生产环境、任意网页或完整网络隔离已验。
+
+```powershell
+pnpm typecheck
+pnpm build
+pnpm test # 默认跳过 CROSSCHECK_REAL_BROWSER 门控组，不能据此称真实浏览器已验
+$env:CROSSCHECK_REAL_BROWSER = '1'
+pnpm vitest run packages/cli/test/browser-e2e.test.ts --maxWorkers=1 --testTimeout=15000
+pnpm vitest run --maxWorkers=1 --testTimeout=15000
+Remove-Item Env:CROSSCHECK_REAL_BROWSER
+```
+
+真实 PG、厂商模型联调、质量/召回率/误报率本轮未执行。最低 Node 22.12 的 CLI 冒烟是之前历史，本轮未在该最低版本重验浏览器链路；当前机器通过不等于最低版本验证。
