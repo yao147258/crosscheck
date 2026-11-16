@@ -109,3 +109,13 @@ git diff --check
 - 普通可信项目的稳定 DOM 截图，不承诺抵御恶意像素编码；动态 URL/JSON 敏感字段已走语义规则，不再用“未登记动态秘密”解释这些漏遮。
 - 超限聚合文本 64000 字符保守省略其最小可用区域；截图仍是当前视口。动态密钥后登记不能回溯清洗 PNG。
 - 取消发生在尚无 browser 的 launch 阶段时，Playwright 不提供 launch 的 AbortSignal；等待明确的最长 10 秒启动期限，若迟到取得资源则关闭后才结束启动。newContext/newPage 阶段已得资源会立即关闭。
+
+## 修复轮 2（BASE bc28479，仅 F1/F2）
+
+- 只修改 capture 与对应真实测试，未重开复核已通过的 R2–R9；未派代理、未调用 review 技能，未恢复网络隔离或修改 agent/auth/runner、`.gitignore`。
+- RED：新增参数化真实像素用例，分别构造 1×1 overflow:visible 祖先下 display:contents 秘密，以及 visibility:hidden 祖先下显式 visibility:visible 秘密。先用仅在内存的原始 PNG 找到真实黑色字形像素，再验证可信 PNG 中这些像素消失。初次测试校准采样数量后，两用例均在字形断言失败（仍为 `[0,0,31]`），确认非几何推测。
+- F1：保留现有局部 mask，并通过 `page.screenshot({style})` 在拍摄期间对敏感根及所有后代强制 `visibility:hidden!important`；因此祖先 mask 只有 1×1 也不会残留溢出字形，后代显式 visible 同样被压制。由 Playwright 管理临时样式，不写应用持久状态。
+- F2：display:none 仍可整棵剪枝；visibility:hidden 节点继续递归，当前不可见直接文字不加入聚合，可见后代正常进入既有敏感检测/遮罩。
+- GREEN：两个用例均通过，已知秘密不进入 DOM，实际字形位置变为白色或遮罩粉色，安全邻居保持绿色；截图后 span computed visibility 恢复 visible，验证未持久修改应用状态。
+- 执行命令：PowerShell `$env:CROSSCHECK_REAL_BROWSER='1'; pnpm vitest run packages/tools/test/browser-standard.real.test.ts packages/tools/test/browser-standard.test.ts`，结果 **2 文件、18 项通过，其中 12 项真实 Chromium**；`pnpm typecheck`、`git diff --check` 均通过。按要求未重复全量回归。
+- 当前可信稳定页面与当前视口边界不变；截图临时隐藏造成局部空白属于已声明遮罩省略，不将其当作完整未遮罩观察。F1/F2 已修复，待协调者复核。

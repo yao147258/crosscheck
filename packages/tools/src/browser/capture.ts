@@ -21,9 +21,11 @@ export async function capturePage(page: Page, redactor: EvidenceRedactor, screen
       if (['script', 'style', 'head', 'meta', 'link', 'title'].includes(element.localName)) return;
       if (nodes.length >= 2000) { overflow = true; return; }
       const style = getComputedStyle(element), rect = element.getBoundingClientRect();
-      if (style.display === 'none' || style.visibility === 'hidden') return;
+      if (style.display === 'none') return;
+      // visibility 可由后代恢复；只跳过当前节点的不可见文字，不剪枝。
+      const visible = style.visibility === 'visible';
       const input = element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement || element instanceof HTMLSelectElement;
-      const text = [...element.childNodes].filter(n => n.nodeType === Node.TEXT_NODE).map(n => n.textContent ?? '').join('');
+      const text = visible ? [...element.childNodes].filter(n => n.nodeType === Node.TEXT_NODE).map(n => n.textContent ?? '').join('') : '';
       const i = nodes.length;
       const node = { tag: element.localName, type: input && 'type' in element ? String(element.type) : undefined, name: element.getAttribute('name') ?? undefined,
         text: text.length <= 2000 ? text : '', value: input && element.value.length <= 2000 ? element.value : undefined, selector,
@@ -32,7 +34,7 @@ export async function capturePage(page: Page, redactor: EvidenceRedactor, screen
         approved: selectors.some(s => element.matches(s)), box: rect.width > 0 && rect.height > 0, parent, parts: [] as (string | number)[], incomplete: text.length > 2000 || input && element.value.length > 2000 };
       nodes.push(node);
       for (const child of element.childNodes) {
-        if (child.nodeType === Node.TEXT_NODE) node.parts.push((child.textContent ?? '').slice(0, 64001));
+        if (child.nodeType === Node.TEXT_NODE) { if (visible) node.parts.push((child.textContent ?? '').slice(0, 64001)); }
         else if (child instanceof Element) {
           const siblings = [...element.children].filter(e => e.localName === child.localName);
           const id = visit(child, i, `${selector} > ${CSS.escape(child.localName)}:nth-of-type(${siblings.indexOf(child) + 1})`);
@@ -68,7 +70,10 @@ export async function capturePage(page: Page, redactor: EvidenceRedactor, screen
     locator: { strategy: 'css' as const, value: n.selector }, sensitive: hidden.has(i), ...(hidden.has(i) ? { omissionReason: n.incomplete ? 'limit' as const : 'masked-region' as const } : {}) }]);
   const masks = [...roots].filter(i => ![...roots].some(other => other !== i && nodes[i]!.selector.startsWith(nodes[other]!.selector + ' > '))).map(i => nodes[i]!.selector);
   if (snapshot.overflow) { masks.push('html'); dom.push({ tag: 'observation', incomplete: true, omissionReason: 'limit' }); }
-  const bytes = await page.screenshot({ type: 'png', mask: masks.map(s => page.locator(s)), maskColor: '#FF00FF', animations: 'disabled', caret: 'hide', timeout: 5000 });
+  // mask 矩形不一定覆盖 overflow 字形；截图临时样式同时隐藏整个敏感子树，包含显式恢复 visible 的后代。
+  // screenshot 的 style 仅在拍摄期间应用，Playwright 完成或失败后移除，不修改应用持久状态。
+  const style = masks.map(s => `${s}, ${s} * { visibility: hidden !important; }`).join('\n');
+  const bytes = await page.screenshot({ type: 'png', mask: masks.map(s => page.locator(s)), style, maskColor: '#FF00FF', animations: 'disabled', caret: 'hide', timeout: 5000 });
   const screenshot = Object.freeze({ kind: 'masked-capture' as const });
   trusted.set(screenshot, { bytes: Buffer.from(bytes), redactor });
   return { dom, screenshot };

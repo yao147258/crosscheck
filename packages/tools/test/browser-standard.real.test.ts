@@ -83,6 +83,30 @@ describe.skipIf(skip)('标准 Playwright 真实表单与可信采证', () => {
       expect(pixel(png, 490, 265)).toEqual([0, 204, 0]);
     } finally { await s.host.close(); await rm(s.root, { recursive: true, force: true }); }
   });
+  it.each(['F1', 'F2'])('%s 无盒子溢出与隐藏祖先的可见秘密字形不进入截图，安全邻居不变', async scenario => {
+    const s = await setup();
+    try {
+      const session = await s.host.getSession(s.signal);
+      const content = scenario === 'F1'
+        ? `<div style="width:1px;height:1px;overflow:visible"><span style="display:contents">${secret}</span></div>`
+        : `<div style="visibility:hidden"><span style="visibility:visible">${secret}</span></div>`;
+      await session.page.setContent(`<style>body{margin:0;background:white;color:black;font:24px monospace}#safe{position:absolute;top:100px;width:500px;height:40px;background:#00cc00}</style>${content}<div id="safe">安全邻居</div>`);
+      // 原始 PNG 只在内存定位真实字形像素，不落盘；断言覆盖祖先 1px 框以外的文字。
+      const baseline = await session.page.screenshot();
+      const ink: [number, number][] = [];
+      for (let y = 4; y < 28; y += 6) for (let x = 10; x < 280; x += 4) if (pixel(baseline, x, y).every(c => c < 80)) ink.push([x, y]);
+      expect(ink.length).toBeGreaterThan(10);
+      const r = tools.createEvidenceRedactor([], [secret]);
+      const store = new tools.EvidenceStore(s.artifacts, { runId: 'run-1', caseId: 'M-TC-1', attempt: 1 }, r);
+      const captured = await capturePage(session.page, r);
+      const dom = await store.readTextEvidence((await store.saveDom(captured.dom, s.meta())).id);
+      expect(dom.text).not.toContain(secret); expect(dom.text).toContain('安全邻居');
+      const png = (await store.readScreenshotEvidence((await store.saveScreenshot(captured.screenshot, s.meta())).id)).bytes;
+      for (const [x, y] of ink) expect([[255, 255, 255], [255, 0, 255]]).toContainEqual(pixel(png, x, y));
+      expect(pixel(png, 490, 110)).toEqual([0, 204, 0]);
+      expect(await session.page.locator('span').evaluate(el => getComputedStyle(el).visibility)).toBe('visible');
+    } finally { await s.host.close(); await rm(s.root, { recursive: true, force: true }); }
+  }, 20000);
   it('R9 局部文本超限仅省略对应区域，证据明确不完整', async () => {
     const s = await setup();
     try {
