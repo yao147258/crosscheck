@@ -34,7 +34,7 @@ packages/
 - `cli → (tui, report, discovery, requirements, planner, runner, tools, models) → core`
 - `discovery / requirements / planner → agent → models → core`
 - `planner → tools`（使用 `profile_search` 与 `requirements_search`）
-- `tui → (core, runner)`（读取运行结果、证据），`tui` 不依赖任何模型包
+- `tui → (core, runner, report)`（复用 report 的 `loadReportData` 读取并校验历史快照与证据），`tui` 不依赖任何模型包
 
 ## 3. 共享约定
 
@@ -144,17 +144,15 @@ crosscheck review [profile|clauses|cases|results] [--module <id>] [--run <runId>
 
 ### 7.1 通用交互
 
-- `↑/↓` 移动，`Enter` 展开详情，`Esc` 返回上一级，`q` 退出，`?` 显示快捷键帮助。
+- `↑/↓` 移动，`Enter` 展开详情，`Esc` 返回上一级，`q` 退出，每个视图底部常驻快捷键提示。
 - 每次确认、撤销、编辑、删除都**立即落盘**（先写工件，再写 `approvals.json`），不设"保存"步骤。
-- 落盘失败时，在状态栏显示红色错误，内存状态回滚到操作前。
+- 同一 `ReviewSession` 忙碌时拒绝新变更。落盘失败时，在状态栏显示红色错误，并从磁盘重新加载确认记录；已写入的工件不回滚，确认状态按真实内容重新计算。若重载也失败，禁止继续使用该会话，需重新打开。
 
 ### 7.2 编辑
 
-1. 依次读取环境变量 `VISUAL`、`EDITOR`。都没有时，在状态栏提示"请设置 EDITOR 环境变量"，不执行编辑。
-2. 把要编辑的内容（画像整个文件，或单条条款/用例）写成 `.crosscheck/.edit/<随机名>.yaml`，暂停 Ink 渲染，同步启动编辑器并继承终端。
-3. 编辑器退出后读回内容，用对应 schema 校验：
-   - 通过：写回工件。因为内容变了，原有确认自动失效（哈希不匹配）。
-   - 不通过：提示错误，并询问"重新编辑 / 放弃修改"。
+1. 依次读取环境变量 `VISUAL`、`EDITOR`。都没有时，在状态栏提示"请设置 VISUAL 或 EDITOR 环境变量"，不执行编辑。
+2. 把要编辑的内容（画像整个文件，或单条条款/用例）写成 `.crosscheck/.edit/<随机名>.yaml`；UI 通过 Ink 7.1.1 的 `useApp().suspendTerminal` 暂停渲染与输入并移交终端，同步启动编辑器并继承终端，回调结束后恢复。io 层保持可注入的 `EditorHost` 接口。
+3. 编辑器退出后读回内容并校验：内容未变视为放弃；通过则写回工件（内容变化会使原确认失效）；不通过则把错误以 "#! " 开头的注释写在文件顶部重新打开编辑器，用户不做修改直接关闭即放弃修改。
 4. 无论结果如何，都删除临时文件。
 5. 编辑器命令按空白切分成程序和参数，不经过 shell。
 
@@ -178,7 +176,7 @@ crosscheck review [profile|clauses|cases|results] [--module <id>] [--run <runId>
 
 - 通过 `RunStore.load` 和 `readSummary()` 读取运行，只列出包含 `FAIL` 或 `DISPUTED` 预期的用例。
 - 详情分左右两栏，显示 executor 和 reviewer 的判定（verdict、引用的证据 id、理由）；下方列出证据（id、类型、摘要）。
-- `o` 打开选中的证据：通过 `RunStore.readEvidence` 校验摘要后，写到 `.crosscheck/.open/<证据 id>.<扩展名>`，再用系统程序打开（Windows `cmd /c start ""`、macOS `open`、Linux `xdg-open`）。失败时只在状态栏提示。
+- `o` 打开选中的证据：通过 `RunStore.readEvidence` 校验摘要后，写到 `.crosscheck/.open/<证据 id>.<扩展名>`，再用系统程序打开（Windows `explorer.exe`、macOS `open`、Linux `xdg-open`，均不经过 shell）。失败时只在状态栏提示。
 - 裁决按预期粒度进行：`b` 确认是 bug；`f` 误报；`c` 条款有问题。每次裁决可附一行备注。
 - 选 `c` 时，额外把该用例覆盖的条款（用例覆盖多条时让人选择）设为 `unclear` 并写回，同时撤销该条款的确认。
 
@@ -208,7 +206,7 @@ DispositionsFileSchema = z.strictObject({ version: z.literal(1), runId: z.string
 ```
 packages/tui/src/
 ├─ app.tsx              路由：home / profile / clauses / cases / results
-├─ state/               纯函数：把工件和确认记录投影成视图模型；操作 → 新状态 + 落盘指令
+├─ state/               不含 UI 的加载与操作函数：读取工件与确认记录生成视图数据；操作通过 ReviewSession.mutate 落盘，失败时重新加载确认记录
 ├─ io/                  落盘、编辑器、系统打开；全部通过接口注入，测试时替换为假实现
 ├─ views/               每个视图一个组件，只负责渲染和按键映射
 └─ index.ts             runReview(options): Promise<number>

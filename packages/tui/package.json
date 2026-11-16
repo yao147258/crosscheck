@@ -1,0 +1,22 @@
+{
+  "name": "@crosscheck/tui",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": { ".": "./src/index.ts" },
+  "engines": { "node": ">=22.12" },
+  "dependencies": {
+    "@crosscheck/core": "workspace:^",
+    "@crosscheck/report": "workspace:^",
+    "@crosscheck/runner": "workspace:^",
+    "ink": "7.1.1",
+    "react": "19.2.0",
+    "yaml": "^2.9.1",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/react": "19.2.0",
+    "ai": "^7.0.170",
+    "ink-testing-library": "4.0.0"
+  }
+}
