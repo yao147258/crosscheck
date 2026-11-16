@@ -191,6 +191,102 @@ describe('用例审核', () => {
 });
 
 describe('审核边界与终端可用性', () => {
+  const noEditor: EditorHost = { async edit() { throw new Error('未设置 EDITOR'); } };
+  const pageDown = '\u001B[6~';
+  const pageUp = '\u001B[5~';
+  async function scrollUntil(ui: ReturnType<typeof render>, target: string, key = KEYS.down) {
+    let seen = frame(ui);
+    for (let i = 0; i < 120 && !seen.replaceAll('\n', '').includes(target); i++) {
+      const before = frame(ui);
+      ui.stdin.write(key);
+      await waitFor(() => frame(ui) !== before);
+      expect(frame(ui).split('\n').length).toBeLessThanOrEqual(16);
+      seen += `\n${frame(ui)}`;
+    }
+    expect(seen.replaceAll('\n', '')).toContain(target);
+    return seen;
+  }
+
+  it('40×16 无 EDITOR 的单用例可 Enter 读取基本预期与证据，Esc 返回原选中项', async () => {
+    const { session, artifacts } = await createProject();
+    await artifacts.saveClauses('M', [clause(1)]);
+    await approveClause(session, 'M', 'M-AC-1');
+    await artifacts.saveCases('M', [testCase(1, ['M-AC-1'])]);
+    const ui = render(<App env={{ session, editor: noEditor, open }} initial={{ name: 'cases', module: 'M' }} />);
+    resize(ui, 40, 16);
+    await waitFor(() => frame(ui).includes('› M-TC-1'));
+    expect(frame(ui)).toContain('Enter 详情');
+    ui.stdin.write(KEYS.enter);
+    await waitFor(() => frame(ui).includes('完整详情 · M-TC-1'));
+    await scrollUntil(ui, 'E1 值为 ok');
+    await scrollUntil(ui, 'network');
+    ui.stdin.write('a');
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect((await Approvals.load(artifacts)).record('case', 'M-TC-1')).toBeUndefined();
+    ui.stdin.write(KEYS.escape);
+    await waitFor(() => frame(ui).includes('› M-TC-1'));
+    ui.stdin.write('a');
+    await waitForAction(ui, '已确认 M-TC-1', 'M-TC-1');
+  });
+
+  it('40×16 无 EDITOR 可滚动长多行预期和末尾全部证据，PageUp 返回开头，返回列表保留第二项', async () => {
+    const { session, artifacts } = await createProject();
+    await artifacts.saveClauses('M', [clause(1)]);
+    await approveClause(session, 'M', 'M-AC-1');
+    await artifacts.saveCases('M', [testCase(1, ['M-AC-1']), testCase(2, ['M-AC-1'], {
+      steps: ['检查开始', '检查结束'],
+      expectations: [{ id: 'E1', text: `预期开头\n${'中间内容'.repeat(80)}\n预期末尾`, evidence: ['screenshot', 'dom', 'network', 'console', 'db'] }, { id: 'E2', text: '最后一项预期', evidence: ['db'] }],
+    })]);
+    const ui = render(<App env={{ session, editor: noEditor, open }} initial={{ name: 'cases', module: 'M' }} />);
+    resize(ui, 40, 16);
+    await waitFor(() => frame(ui).includes('› M-TC-1'));
+    ui.stdin.write(KEYS.down);
+    await waitFor(() => frame(ui).includes('› M-TC-2'));
+    ui.stdin.write(KEYS.enter);
+    await waitFor(() => frame(ui).includes('完整详情 · M-TC-2'));
+    await scrollUntil(ui, '预期开头');
+    const seen = await scrollUntil(ui, '最后一项预期', pageDown);
+    const joined = seen.replaceAll('\n', '');
+    expect(joined).toContain('预期末尾');
+    for (const evidence of ['screenshot', 'dom', 'network', 'console', 'db']) expect(joined).toContain(evidence);
+    await scrollUntil(ui, '角色 guest', pageUp);
+    ui.stdin.write(KEYS.escape);
+    await waitFor(() => frame(ui).includes('› M-TC-2'));
+    ui.stdin.write('d');
+    await waitFor(() => frame(ui).includes('删除 M-TC-2？(y/N)'));
+    ui.stdin.write(KEYS.enter);
+    await waitFor(() => frame(ui).includes('已取消'));
+    expect(frame(ui)).not.toContain('完整详情');
+    expect(await artifacts.loadCases('M')).toHaveLength(2);
+  });
+
+  it('40×16 无 EDITOR 可读完整条款正文、长来源、摘录备注，滚动不改变列表选择', async () => {
+    const { session, artifacts } = await createProject();
+    await artifacts.saveClauses('M', [clause(1), clause(2, {
+      text: `正文开头\n${'长正文'.repeat(80)}\n正文末尾`,
+      source: { file: `${'需求目录/'.repeat(20)}来源末尾.md`, line: 27, excerpt: `摘录开头\n${'摘录内容'.repeat(40)}\n摘录末尾` },
+      notes: '完整备注末尾',
+    })]);
+    const ui = render(<App env={{ session, editor: noEditor, open }} initial={{ name: 'clauses', module: 'M' }} />);
+    resize(ui, 40, 16);
+    await waitFor(() => frame(ui).includes('› M-AC-1'));
+    expect(frame(ui)).toContain('Enter 详情');
+    ui.stdin.write(KEYS.down);
+    await waitFor(() => frame(ui).includes('› M-AC-2'));
+    ui.stdin.write(KEYS.enter);
+    await waitFor(() => frame(ui).includes('完整详情 · M-AC-2'));
+    await scrollUntil(ui, '正文末尾');
+    await scrollUntil(ui, '来源末尾.md:27');
+    await scrollUntil(ui, '摘录末尾');
+    await scrollUntil(ui, '完整备注末尾');
+    const before = frame(ui);
+    ui.stdin.write(KEYS.up);
+    await waitFor(() => frame(ui) !== before);
+    ui.stdin.write(KEYS.escape);
+    await waitFor(() => frame(ui).includes('› M-AC-2'));
+    expect((await Approvals.load(artifacts)).record('clause', 'M-AC-2')).toBeUndefined();
+  });
+
   it.each(['clauses', 'cases'] as const)('%s 空态与加载失败不允许行操作', async (name) => {
     const { session, artifacts } = await createProject();
     const ui = render(<App env={{ session, editor, open }} initial={{ name, module: 'M' }} />);
@@ -220,6 +316,9 @@ describe('审核边界与终端可用性', () => {
     await waitFor(() => frame(ui).includes(`› ${id}`));
     ui.stdin.write('a');
     await entered.promise;
+    ui.stdin.write(KEYS.enter);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(frame(ui)).not.toContain('完整详情');
     ui.stdin.write('r');
     ui.stdin.write(KEYS.escape);
     ui.stdin.write('q');

@@ -1,4 +1,5 @@
-import { Box, Text, useWindowSize, type Key } from 'ink';
+import { Box, Text, useBoxMetrics, useInput, useWindowSize, type DOMElement, type Key } from 'ink';
+import { useRef, useState } from 'react';
 
 export interface Status { kind: 'info' | 'error'; text: string }
 export interface ListItem { key: string; label: string; color?: string; header?: boolean }
@@ -46,6 +47,35 @@ export function List({ items, index, maxRows }: { items: ListItem[]; index: numb
         const active = ordinal === clampIndex(index, selectable + 1);
         return <Text key={item.key} color={item.color} inverse={active} wrap="truncate-end">{active ? '› ' : '  '}{item.label}</Text>;
       })}
+    </Box>
+  );
+}
+
+export function ReviewDetails({ title, lines, close, quit }: { title: string; lines: string[]; close(): void; quit(): void }) {
+  const { rows, columns } = useWindowSize();
+  const content = useRef<DOMElement>(null);
+  const { height } = useBoxMetrics(content);
+  const [requested, setRequested] = useState(0);
+  const viewport = Math.max(1, rows - 5);
+  const maximum = Math.max(0, height - viewport);
+  const offset = Math.min(requested, maximum);
+  useInput((input, key) => {
+    if (key.ctrl) return;
+    if (key.escape) { close(); return; }
+    if (input === 'q') { quit(); return; }
+    const delta = key.downArrow ? 1 : key.upArrow ? -1 : key.pageDown ? viewport : key.pageUp ? -viewport : 0;
+    if (delta) setRequested(Math.max(0, Math.min(maximum, offset + delta)));
+  });
+  return (
+    <Box flexDirection="column">
+      <Text bold wrap="truncate-end">完整详情 · {title}</Text>
+      <Box height={viewport} overflow="hidden" flexShrink={0}>
+        <Box ref={content} position="absolute" top={-offset} width={columns} flexDirection="column" flexShrink={0}>
+          {lines.map((line, i) => <Text key={i} wrap="hard">{line}</Text>)}
+        </Box>
+      </Box>
+      <Text dimColor>行 {offset + 1}-{Math.min(height, offset + viewport)}/{height}</Text>
+      <Footer keys={'↑↓ 滚动 · PageUp/PageDown 翻页\nEsc 返回列表 · q 退出'} />
     </Box>
   );
 }

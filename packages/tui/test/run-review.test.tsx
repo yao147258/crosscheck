@@ -58,6 +58,20 @@ const editor = { async edit() { throw new Error('本测试不使用编辑器'); 
 const open = async () => {};
 
 describe('runReview 真实 Ink 退出码', () => {
+  it.each(['clauses', 'cases'] as const)('%s 完整详情中的 Ctrl+C 保持中断码 2', async (view) => {
+    const { artifacts } = await createProject();
+    await artifacts.saveClauses('M', [clause(1)]);
+    await artifacts.saveCases('M', [testCase(1, ['M-AC-1'])]);
+    const io = createTerminal();
+    const result = runReview({ artifacts, reviewer: '退出码测试', editor, open, view, module: 'M' });
+    const id = view === 'clauses' ? 'M-AC-1' : 'M-TC-1';
+    await waitFor(() => io.output().includes(`› ${id}`));
+    io.stdin.write(KEYS.enter);
+    await waitFor(() => io.output().includes(`完整详情 · ${id}`));
+    io.stdin.write('\u0003');
+    await expect(result).resolves.toBe(2);
+  });
+
   it.each(['clauses', 'cases'] as const)('%s 二次确认中的 Ctrl+C 直接中断，不执行删除或转为普通退出', async (view) => {
     const { artifacts } = await createProject();
     await artifacts.saveClauses('M', [clause(1)]);

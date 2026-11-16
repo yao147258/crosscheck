@@ -1,14 +1,15 @@
 import { Box, Text, useInput, useWindowSize } from 'ink';
-import { useState } from 'react';
-import { APPROVAL_COLOR, APPROVAL_LABEL, Footer, List, StatusLine, clampIndex, moveIndex, type ListItem } from '../components';
+import { useContext, useState } from 'react';
+import { APPROVAL_COLOR, APPROVAL_LABEL, Footer, List, ReviewDetails, StatusLine, clampIndex, moveIndex, type ListItem } from '../components';
 import { handleConfirm, type PendingConfirm } from '../confirm';
-import { useReview } from '../context';
+import { ActionContext, useReview } from '../context';
 import { useAction, useEditorPause, useLoader } from '../hooks';
 import { navKey, type Nav } from '../routes';
 import { approveAllCases, approveCase, deleteCase, editCase, loadCaseOverview, revokeCase, type CaseRow } from '../state/cases';
 
 export function CasesView({ nav, module }: { nav: Nav; module: string }) {
   const { session, editor } = useReview();
+  const actions = useContext(ActionContext);
   const { rows: terminalRows, columns } = useWindowSize();
   const compact = columns < 70 || terminalRows < 24;
   const { data, error, reload } = useLoader(() => loadCaseOverview(session, module), [session, module]);
@@ -16,6 +17,7 @@ export function CasesView({ nav, module }: { nav: Nav; module: string }) {
   const pause = useEditorPause();
   const [index, setIndex] = useState(0);
   const [pending, setPending] = useState<PendingConfirm>();
+  const [details, setDetails] = useState(false);
   const byId = new Map((data?.rows ?? []).map((r) => [r.testCase.id, r]));
   const items: ListItem[] = [];
   const ordered: CaseRow[] = [];
@@ -42,12 +44,26 @@ export function CasesView({ nav, module }: { nav: Nav; module: string }) {
     if (!data) return;
     if (input === 'A') { setPending({ text: '确认本模块所有可确认的用例？(y/N)', action: () => approveAllCases(session, module) }); return; }
     if (!row) return;
+    if (key.return) {
+      if (actions?.busy.current) setStatus({ kind: 'error', text: '请等待当前操作完成' });
+      else setDetails(true);
+      return;
+    }
     const id = row.testCase.id;
     if (input === 'a') void run(() => approveCase(session, module, id));
     if (input === 'r') void run(() => revokeCase(session, module, id));
     if (input === 'e') void run(() => pause(() => editCase(session, editor, module, id)));
     if (input === 'd') setPending({ text: `删除 ${id}？(y/N)`, action: () => deleteCase(session, module, id) });
-  });
+  }, { isActive: !details });
+  if (details && row) return (
+    <ReviewDetails title={row.testCase.id} close={() => setDetails(false)} quit={nav.quit} lines={[
+      `${row.testCase.id} ${APPROVAL_LABEL[row.approval]}`,
+      `覆盖 ${row.testCase.covers.join(', ')}`,
+      `角色 ${row.testCase.actor} · 夹具 ${row.testCase.fixtures.join(', ') || '无'}`,
+      ...row.testCase.steps.map((step, i) => `${i + 1}. ${step}`),
+      ...row.testCase.expectations.flatMap((e) => [`${e.id} ${e.text}`, `证据 ${e.evidence.join(', ')}`]),
+    ]} />
+  );
   const cov = data?.coverage;
   return (
     <Box flexDirection="column">
@@ -70,7 +86,7 @@ export function CasesView({ nav, module }: { nav: Nav; module: string }) {
       <Box flexDirection="column" maxHeight={2} overflow="hidden" flexShrink={0}>
         <StatusLine status={status} />
       </Box>
-      <Footer keys={compact ? '↑↓ 移动 · a/r/e 确认/撤销/编辑\nd 删除 · A 全确认 · Esc/q 返回/退出' : '↑↓ 移动 · a 确认 · r 撤销 · e 编辑 · d 删除 · A 全部确认 · Esc 返回 · q 退出'} />
+      <Footer keys={compact ? 'Enter 详情 · ↑↓ · a/r/e 确认/撤销/编辑\nd 删除 · A 全确认 · Esc/q 返回/退出' : 'Enter 详情 · ↑↓ 移动 · a 确认 · r 撤销 · e 编辑 · d 删除 · A 全部确认 · Esc 返回 · q 退出'} />
     </Box>
   );
 }

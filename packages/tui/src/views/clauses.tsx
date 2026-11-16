@@ -1,14 +1,15 @@
 import { Box, Text, useInput, useWindowSize } from 'ink';
-import { useState } from 'react';
-import { APPROVAL_COLOR, APPROVAL_LABEL, Footer, List, StatusLine, clampIndex, moveIndex } from '../components';
+import { useContext, useState } from 'react';
+import { APPROVAL_COLOR, APPROVAL_LABEL, Footer, List, ReviewDetails, StatusLine, clampIndex, moveIndex } from '../components';
 import { handleConfirm, type PendingConfirm } from '../confirm';
-import { useReview } from '../context';
+import { ActionContext, useReview } from '../context';
 import { useAction, useEditorPause, useLoader } from '../hooks';
 import { navKey, type Nav } from '../routes';
 import { approveAllClauses, approveClause, deleteClause, editClause, loadClauseRows, markClauseUnclear, revokeClause } from '../state/clauses';
 
 export function ClausesView({ nav, module }: { nav: Nav; module: string }) {
   const { session, editor } = useReview();
+  const actions = useContext(ActionContext);
   const { rows: terminalRows, columns } = useWindowSize();
   const compact = columns < 70 || terminalRows < 24;
   const { data, error, reload } = useLoader(() => loadClauseRows(session, module), [session, module]);
@@ -16,6 +17,7 @@ export function ClausesView({ nav, module }: { nav: Nav; module: string }) {
   const pause = useEditorPause();
   const [index, setIndex] = useState(0);
   const [pending, setPending] = useState<PendingConfirm>();
+  const [details, setDetails] = useState(false);
   const rows = data ?? [];
   const current = clampIndex(index, rows.length);
   const row = rows[current];
@@ -27,13 +29,27 @@ export function ClausesView({ nav, module }: { nav: Nav; module: string }) {
     if (!data) return;
     if (input === 'A') { setPending({ text: '确认所有 active 未确认条款？(y/N)', action: () => approveAllClauses(session, module) }); return; }
     if (!row) return;
+    if (key.return) {
+      if (actions?.busy.current) setStatus({ kind: 'error', text: '请等待当前操作完成' });
+      else setDetails(true);
+      return;
+    }
     const id = row.clause.id;
     if (input === 'a') void run(() => approveClause(session, module, id));
     if (input === 'r') void run(() => revokeClause(session, module, id));
     if (input === 'u') void run(() => markClauseUnclear(session, module, id));
     if (input === 'e') void run(() => pause(() => editClause(session, editor, module, id)));
     if (input === 'd') setPending({ text: `删除 ${id}？(y/N)`, action: () => deleteClause(session, module, id) });
-  });
+  }, { isActive: !details });
+  if (details && row) return (
+    <ReviewDetails title={row.clause.id} close={() => setDetails(false)} quit={nav.quit} lines={[
+      `${row.clause.id} [${row.clause.status}] ${APPROVAL_LABEL[row.approval]}`,
+      row.clause.text,
+      `来源 ${row.clause.source.file}:${row.clause.source.line}`,
+      `摘录 ${row.clause.source.excerpt}`,
+      `备注 ${row.clause.notes || '无'}`,
+    ]} />
+  );
   return (
     <Box flexDirection="column">
       <Text bold wrap="truncate-end">条款审核 · {module}</Text>
@@ -54,7 +70,7 @@ export function ClausesView({ nav, module }: { nav: Nav; module: string }) {
       <Box flexDirection="column" maxHeight={2} overflow="hidden" flexShrink={0}>
         <StatusLine status={status} />
       </Box>
-      <Footer keys={compact ? '↑↓ 移动 · a/r/e 确认/撤销/编辑\nu unclear · d 删除 · A 全确认 · Esc/q' : '↑↓ 移动 · a 确认 · r 撤销 · e 编辑 · u 标记 unclear · d 删除 · A 全部确认 · Esc 返回 · q 退出'} />
+      <Footer keys={compact ? 'Enter 详情 · ↑↓ · a/r/e 确认/撤销/编辑\nu unclear · d 删除 · A 全确认 · Esc/q' : 'Enter 详情 · ↑↓ 移动 · a 确认 · r 撤销 · e 编辑 · u 标记 unclear · d 删除 · A 全部确认 · Esc 返回 · q 退出'} />
     </Box>
   );
 }
