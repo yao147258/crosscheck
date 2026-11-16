@@ -24,7 +24,15 @@ export function createOpener(
     try {
       const child = spawnFn(program, args, { detached: true, stdio: 'ignore', shell: false });
       child.once('error', fail);
-      child.once('spawn', () => { child.unref(); resolve(); });
+      if (platform === 'win32') {
+        // explorer 启动不代表关联程序实际打开成功。
+        child.once('spawn', () => { child.unref(); resolve(); });
+      } else {
+        child.once('close', (code: number | null, signal: NodeJS.Signals | null) => {
+          if (code === 0) resolve();
+          else fail(new Error(signal ? `打开命令被信号 ${signal} 终止` : `打开命令以退出码 ${code} 结束`));
+        });
+      }
     } catch (error) {
       fail(error instanceof Error ? error : new Error(String(error)));
     }

@@ -1,5 +1,5 @@
 import { mkdtemp, readdir, rm } from 'node:fs/promises';
-import { writeFileSync } from 'node:fs';
+import { unlinkSync, writeFileSync } from 'node:fs';
 import { EventEmitter } from 'node:events';
 import os from 'node:os';
 import path from 'node:path';
@@ -137,6 +137,47 @@ describe('编辑器', () => {
     await expect(createEditorHost(store, { EDITOR: 'ed' }, spawn).edit('x')).rejects.toThrow(error);
     expect(await readdir(store.resolve('.edit'))).toEqual([]);
   });
+  it('编辑器删除临时文件时明确报错，不能当作空内容保存', async () => {
+    const store = await artifacts();
+    const host = createEditorHost(store, { EDITOR: 'ed' }, (_program, args) => {
+      unlinkSync(args.at(-1)!);
+      return { status: 0 };
+    });
+    await expect(host.edit('原内容')).rejects.toThrow(/临时文件.*不存在/);
+  });
+  it('编辑器确实保存零字节文件时返回空串', async () => {
+    const store = await artifacts();
+    const host = createEditorHost(store, { EDITOR: 'ed' }, (_program, args) => {
+      writeFileSync(args.at(-1)!, '');
+      return { status: 0 };
+    });
+    expect(await host.edit('原内容')).toBe('');
+    expect(await store.list('.edit')).toEqual([]);
+  });
+  it.each([false, true])('清理失败报告残留路径，并保留原异常（编辑失败=%s）', async (editFails) => {
+    const store = await artifacts();
+    const cleanupError = new Error('拒绝删除');
+    const original = new Error('编辑器故障');
+    vi.spyOn(store, 'remove').mockRejectedValue(cleanupError);
+    let file = '';
+    const host = createEditorHost(store, { EDITOR: 'ed' }, (_program, args) => {
+      file = args.at(-1)!;
+      if (editFails) throw original;
+      return { status: 0 };
+    });
+    const error = await host.edit('原内容').then(() => undefined, (error: unknown) => error);
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toContain(file);
+    expect((error as Error).message).toContain('清理');
+    if (editFails) {
+      expect(error).toBeInstanceOf(AggregateError);
+      expect((error as AggregateError).errors).toContain(original);
+      expect((error as AggregateError).errors).toContain(cleanupError);
+    } else {
+      expect((error as Error).cause).toBe(cleanupError);
+    }
+    expect(await store.list('.edit')).toHaveLength(1);
+  });
   it('临时文件写入后报告失败也清理', async () => {
     const store = await artifacts();
     const writeBytes = store.writeBytes.bind(store);
@@ -160,6 +201,29 @@ describe('editValidated', () => {
   it('未修改即取消', async () => {
     expect(await editValidated(script([valid]), valid, parse)).toEqual({ status: 'cancelled' });
   });
+  it('原样关闭时保留用户原有 #! 注释并取消', async () => {
+    const initial = '#! 用户注释\n#! 第二行\n' + valid;
+    expect(await editValidated(script([]), initial, parse)).toEqual({ status: 'cancelled' });
+    expect(stripErrorHeader(initial)).toBe(initial);
+  });
+  it.each([false, true])('失败重开后仅去掉本轮诊断，保留连续用户注释（修正=%s）', async (fix) => {
+    const notes = '#! 用户注释\n#! 需要保留的第二行\n';
+    let calls = 0;
+    const editor: EditorHost = {
+      async edit(text) {
+        calls++;
+        if (calls === 1) return notes + valid.replace('M-AC-1', 'bad');
+        expect(text).toContain('#! 校验失败');
+        if (calls > 2) throw new Error('不应继续重新打开');
+        return fix ? text.replace('id: bad', 'id: M-AC-1') : text;
+      },
+    };
+    const outcome = await editValidated(editor, notes + valid, parse);
+    expect(outcome).toEqual(fix
+      ? { status: 'saved', value: ClauseSchema.parse({ id: 'M-AC-1', text: '条款', source: { file: 'a.md', line: 1, excerpt: '原' } }), text: notes + valid }
+      : { status: 'cancelled' });
+    expect(calls).toBe(2);
+  });
   it('校验失败时带错误头重新打开，修正后保存', async () => {
     const editor = script(['id: bad\n', valid.replace('条款', '新条款')]);
     const outcome = await editValidated(editor, valid, parse);
@@ -177,7 +241,7 @@ describe('editValidated', () => {
   });
   it('YAML 语法错误给出可读提示，错误头每行都是注释', () => {
     expect(parseYamlWith('a: [1,', ClauseSchema)).toMatchObject({ ok: false, error: expect.stringContaining('YAML 语法错误') });
-    expect(withErrorHeader('第一行\n第二行', 'body')).toBe('#! 校验失败，修正后保存；不做修改直接关闭即放弃：\n#! 第一行\n#! 第二行\nbody');
+    expect(withErrorHeader('第一行\n第二行', 'body')).toBe('#! 校验失败，修正后保存；不做修改直接关闭即放弃：\n#! 第一行\n#! 第二行\n#! 校验诊断结束\nbody');
   });
 });
 
@@ -198,7 +262,29 @@ describe('系统打开', () => {
   it('同步启动失败也报告无法打开证据', async () => {
     await expect(createOpener('linux', () => { throw new Error('同步失败'); })('/x.png')).rejects.toThrow(/无法打开证据/);
   });
-  it('启动成功后 unref 并完成，参数完整传递且明确禁用 shell', async () => {
+  it.each(['darwin', 'linux'] as const)('%s 启动后仍等待关闭，零退出才完成', async (platform) => {
+    const child = Object.assign(new EventEmitter(), { unref() {} });
+    const open = createOpener(platform, () => child);
+    let settled = false;
+    const pending = open('/x.png').then(() => { settled = true; });
+    child.emit('spawn');
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    child.emit('close', 0, null);
+    await pending;
+    expect(settled).toBe(true);
+  });
+  it.each([
+    ['darwin', 1, null], ['linux', 3, null], ['linux', null, 'SIGTERM'],
+  ] as const)('%s 启动后关闭异常（%s/%s）必须拒绝', async (platform, code, signal) => {
+    const child = Object.assign(new EventEmitter(), { unref() {} });
+    const pending = createOpener(platform, () => child)('/x.png');
+    const assertion = expect(pending).rejects.toThrow(/无法打开证据/);
+    child.emit('spawn');
+    child.emit('close', code, signal);
+    await assertion;
+  });
+  it('Windows 只确认启动并 unref，参数完整传递且明确禁用 shell', async () => {
     let unref = false;
     const open = createOpener('win32', (program, args, options) => {
       expect(program).toBe('explorer.exe');
