@@ -22,6 +22,13 @@ async function setup() {
   return { artifacts, run };
 }
 describe('运行提交点', () => {
+  it('生命周期状态更新持久化，结束状态生成结束时间', async () => {
+    const { artifacts, run } = await setup();
+    await run.updateStatus('running');
+    expect((await RunStore.load(artifacts, run.manifest.runId)).manifest.status).toBe('running');
+    await run.updateStatus('completed');
+    expect((await RunStore.load(artifacts, run.manifest.runId)).manifest.end).not.toBeNull();
+  });
   it('创建不同运行并保存脱敏输入', async () => {
     const { artifacts, run } = await setup();
     const other = await RunStore.create(artifacts, base, {});

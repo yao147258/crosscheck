@@ -77,7 +77,7 @@ describe('runAgent', () => {
       { toolCalls: [{ name: 'echo', input: { x: 7 } }] },
       { toolCalls: [{ name: 'finish', input: { answer: 'ok' } }] },
     ]);
-    const r = await runAgent({ ...options, onToolCall: (e) => events.push(e) });
+    const r = await runAgent({ ...options, onToolCall: (e) => { events.push(e); } });
     expect(r).toMatchObject({ status: 'done', output: { answer: 'ok' }, steps: 2, retried: false });
     expect(events[0]).toEqual({ name: 'echo', input: { x: 7 }, ok: true, output: { echoed: 7 } });
     expect(promptText(model, 1)).toContain('echoed');
@@ -347,7 +347,7 @@ describe('runAgent', () => {
   it('onToolCall 也为 finish 和 report_blocked 发事件', async () => {
     const events: Array<{ name: string; ok: boolean }> = [];
     const { options } = opts([{ toolCalls: [{ name: 'finish', input: { answer: 'ok' } }] }], {
-      onToolCall: (e) => events.push(e),
+      onToolCall: (e) => { events.push(e); },
     });
     await runAgent(options);
     expect(events).toContainEqual(expect.objectContaining({ name: 'finish', ok: true }));
@@ -368,7 +368,7 @@ describe('runAgent', () => {
     const events: Array<{ name: string; ok: boolean; error?: string }> = [];
     const { model, options } = opts(
       [{ toolCalls: [{ name: 'unserializable', input: {} }] }, { toolCalls: [{ name: 'finish', input: { answer: 'ok' } }] }],
-      { tools: [unserializable], onToolCall: (e) => events.push(e) },
+      { tools: [unserializable], onToolCall: (e) => { events.push(e); } },
     );
     await runAgent(options);
     expect(events[0]).toMatchObject({ name: 'unserializable', ok: true });

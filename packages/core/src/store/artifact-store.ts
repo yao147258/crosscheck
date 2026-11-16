@@ -95,6 +95,29 @@ export class ArtifactStore {
     } catch (err) { throw this.error('排他发布', err); }
     finally { if (tmp) await unlink(tmp).catch(() => {}); }
   }
+  /** 最后同步选择稳定内容后立即发起排他原子发布；选择与 link 调用之间没有 await。 */
+  async publishJsonSelected<T>(rel: string, select: () => T): Promise<T> {
+    let tmp: string | undefined;
+    try {
+      const abs = await this.checked(rel, true);
+      tmp = `${abs}.${process.pid}.${randomUUID()}.tmp`;
+      let chosen = select();
+      let text = `${JSON.stringify(chosen, null, 2)}\n`;
+      await writeFile(tmp, text, { flag: 'wx' });
+      for (;;) {
+        const latest = select();
+        const next = `${JSON.stringify(latest, null, 2)}\n`;
+        if (next === text) {
+          // 线性化边界：此次同步选择后开始 link，之后到达的取消不撤销已选择的提交。
+          await link(tmp, abs);
+          return latest;
+        }
+        chosen = latest; text = next;
+        await writeFile(tmp, text);
+      }
+    } catch (err) { throw this.error('排他发布', err); }
+    finally { if (tmp) await unlink(tmp).catch(() => {}); }
+  }
   async remove(rel: string): Promise<void> {
     try { await unlink(await this.checked(rel, false)); }
     catch (err) { throw this.error('删除', err); }

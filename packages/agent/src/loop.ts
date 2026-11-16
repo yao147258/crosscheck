@@ -3,13 +3,15 @@ import { callWithFallback, type ModelCandidate, type ResilienceOptions } from '@
 import { generateText, jsonSchema, tool, type ModelMessage, type ToolSet } from 'ai';
 import { z } from 'zod';
 import { grantTools, type Stage } from './grants';
-import type { AgentTool } from './tool';
+import { defineTool, type AgentTool } from './tool';
+import { prepareContext, type ContextPolicy, type EvidencePresenter } from './context';
 
 export const FINISH_TOOL = 'finish';
 export const REPORT_BLOCKED_TOOL = 'report_blocked';
 const ReportBlockedInput = z.object({ reason: z.string().min(1) });
 
 export type BlockReason = 'budget' | 'invalid-output' | 'reported' | 'interrupted' | 'model-error';
+export type OutputValidation = { ok: true } | { ok: false; error: string };
 
 export interface ToolCallEvent {
   name: string;
@@ -26,20 +28,36 @@ export interface RunAgentOptions<O> {
   system: string;
   messages: ModelMessage[];
   tools: AgentTool[];
-  /** 最终结果的结构，代理通过 finish 工具提交 */
+  /** 本地运行时校验，支持异步 refinement；不会代替宿主语义校验。 */
   output: z.ZodType<O>;
+  /** 可表示的基础结构，仅用于生成 SDK JSON Schema；省略时使用 output。 */
+  outputSchema?: z.ZodType;
+  /** 本地语义校验，与运行时结构校验共用累计 invalid 额度；异常直接传播。 */
+  validateOutput?: (value: O) => OutputValidation | Promise<OutputValidation>;
   budget: BudgetTracker;
   signal?: AbortSignal;
-  /** 累计多少次不合格输出后判为 BLOCKED，默认 3 */
+  evidencePresenter?: EvidencePresenter;
+  contextPolicy?: ContextPolicy;
+  /** 由宿主决定判定必需证据；默认所有已知证据都必须完整呈现。 */
+  requiredEvidenceIds?: readonly string[];
+  /** 可提前停止，但不能将累计额度放宽到三次以上。 */
   maxInvalidOutputs?: number;
   resilience?: ResilienceOptions;
-  onUsage?: (ref: string, usage: { inputTokens?: number; outputTokens?: number }) => void;
-  /** 每次工具调用的回调，计划 2 用它记录轨迹 */
-  onToolCall?: (e: ToolCallEvent) => void;
+  onUsage?: (ref: string, usage: { inputTokens?: number; outputTokens?: number }) => void | Promise<void>;
+  /** 每次真实 provider 调用终结后立即 await；宿主异常原样传播，不触发 provider 重试。 */
+  onModelAttempt?: (attempt: ModelAttempt) => void | Promise<void>;
+  /** 内存审计通知，未经清洗不能直接持久化为轨迹；异常传播，不允许继续 PASS。 */
+  onToolCall?: (e: ToolCallEvent) => void | Promise<void>;
 }
+
+export type ModelAttempt = { ref: string; status: 'error'; usage: null }
+  | { ref: string; status: 'success'; usage: { inputTokens?: number; outputTokens?: number } };
 
 interface RunInfo {
   steps: number;
+  /** 实际模型调用次数，独立于外层代理轮次；失败无 usage 时不推测 token。 */
+  attempts: number;
+  modelAttempts: ModelAttempt[];
   retried: boolean;
   messages: ModelMessage[];
 }
@@ -55,12 +73,12 @@ function toJsonValue(v: unknown): unknown {
 }
 
 function schemaOf(s: z.ZodType) {
-  // 只把 JSON Schema 交给 SDK，不让 SDK 校验；校验由我们用 zod 完成，便于把错误反馈给模型
+  // SDK 只接收可表示的 JSON Schema，所有运行时校验由宿主执行。
   return jsonSchema(z.toJSONSchema(s, { io: 'input' }) as Parameters<typeof jsonSchema>[0]);
 }
 
 function buildSdkTools(granted: AgentTool[], output: z.ZodType): ToolSet {
-  const set: ToolSet = {};
+  const set: ToolSet = Object.create(null);
   for (const t of granted) set[t.name] = tool({ description: t.description, inputSchema: schemaOf(t.input) });
   set[FINISH_TOOL] = tool({ description: '提交最终结果。参数必须完全符合给定结构。', inputSchema: schemaOf(output) });
   set[REPORT_BLOCKED_TOOL] = tool({
@@ -70,175 +88,207 @@ function buildSdkTools(granted: AgentTool[], output: z.ZodType): ToolSet {
   return set;
 }
 
-/**
- * 自研代理循环：每轮调用一次模型，由我们执行工具并校验输入输出。
- * 硬约束：只暴露本阶段授予的工具；必须通过 finish 提交合法结果；预算耗尽或中断即停止。
- */
+/** 自研代理循环：一轮一次生成；统一补齐调用结果，再检查终结条件。 */
 export async function runAgent<O>(opts: RunAgentOptions<O>): Promise<AgentResult<O>> {
-  const { stage, models, system, output, budget, signal, maxInvalidOutputs = 3, resilience, onUsage, onToolCall } = opts;
-
+  const { stage, models, system, output, budget, signal, resilience, onUsage, onToolCall } = opts;
+  const maxInvalidOutputs = Math.min(opts.maxInvalidOutputs ?? 3, 3);
+  if (!Number.isInteger(maxInvalidOutputs) || maxInvalidOutputs < 1) throw new Error('invalid 额度必须为 1 到 3');
+  const names = new Set<string>();
+  // 对全部工具预检，包括本阶段不授予的工具，拒绝发生在模型调用等副作用之前。
   for (const t of opts.tools) {
+    defineTool(t);
     if (t.name === FINISH_TOOL || t.name === REPORT_BLOCKED_TOOL) throw new Error(`工具名与内置工具冲突：${t.name}`);
+    if (names.has(t.name)) throw new Error(`工具名重复：${t.name}`);
+    names.add(t.name);
   }
   const { granted } = grantTools(stage, opts.tools);
   const toolMap = new Map(granted.map((t) => [t.name, t]));
-  const sdkTools = buildSdkTools(granted, output);
+  const sdkTools = buildSdkTools(granted, opts.outputSchema ?? output);
   const messages: ModelMessage[] = [...opts.messages];
   const abortSignal = signal ?? new AbortController().signal;
-
   let steps = 0;
+  let attempts = 0;
   let retried = false;
   let invalid = 0;
-  const info = (): RunInfo => ({ steps, retried, messages });
+  const modelAttempts: ModelAttempt[] = [];
+  const info = (): RunInfo => ({ steps, attempts, modelAttempts, retried, messages });
   const blocked = (reason: BlockReason, detail: string): AgentResult<O> => ({ status: 'blocked', reason, detail, ...info() });
-  // 外部信号与“剩余时长”超时信号的合并：任意一个触发都应中止当前这次模型调用 / 工具执行
   const boundedSignal = () => AbortSignal.any([abortSignal, AbortSignal.timeout(budget.remainingMs())]);
+  const stop = (bounded?: AbortSignal): { reason: 'interrupted' | 'budget'; detail: string } | undefined => {
+    if (abortSignal.aborted) return { reason: 'interrupted', detail: '执行被中断' };
+    const overrun = budget.overrun();
+    if (overrun || bounded?.aborted || budget.remainingMs() === 0) return { reason: 'budget', detail: overrun ?? '时长预算耗尽' };
+  };
 
   while (true) {
-    if (abortSignal.aborted) return blocked('interrupted', '执行被中断');
+    const stopped = stop();
+    if (stopped) return blocked(stopped.reason, stopped.detail);
     const exhausted = budget.exhausted();
     if (exhausted) return blocked('budget', exhausted);
 
     let res: Awaited<ReturnType<typeof generateText>>;
     let ref: string;
     const genSignal = boundedSignal();
+    let roundAttempts = 0;
+    let incompleteEvidenceIds: readonly string[] = [];
+    let hostError: unknown;
+    let hostFailed = false;
     try {
       const r = await callWithFallback(
         models,
-        (model) => generateText({ model, system, messages, tools: sdkTools, maxRetries: 0, abortSignal: genSignal }),
-        // 把本轮的合并信号（外部 signal + 预算超时）传给 callWithFallback：
-        // 超时属于中断类错误，不应被重试，也不应触发切换备用模型
+        async (model, ref) => {
+          // 宿主读取失败不是厂商错误，不得重试/备用后吞掉继续 PASS。
+          if (hostFailed) throw hostError;
+          const stopped = stop(genSignal);
+          if (stopped) throw Object.assign(new Error(stopped.detail), { name: 'AbortError' });
+          let prepared: Awaited<ReturnType<typeof prepareContext>>;
+          try {
+            prepared = await prepareContext(messages, { ...opts.contextPolicy, ref, signal: genSignal, presenter: opts.evidencePresenter, requiredEvidenceIds: opts.requiredEvidenceIds });
+          } catch (error) {
+            // 只识别明确取消来源；同时abort的真实磁盘/verify错误仍为宿主原错。
+            if (genSignal.aborted && (error === genSignal.reason || error instanceof Error && error.name === 'AbortError')) throw error;
+            hostError = error; hostFailed = true;
+            throw Object.assign(new Error('宿主证据装配失败'), { name: 'AbortError' });
+          }
+          incompleteEvidenceIds = prepared.incompleteEvidenceIds;
+          const afterPresentation = stop(genSignal);
+          if (afterPresentation) throw Object.assign(new Error(afterPresentation.detail), { name: 'AbortError' });
+          attempts++;
+          roundAttempts++;
+          if (roundAttempts > 1) retried = true;
+          const notify = async (attempt: ModelAttempt) => {
+            modelAttempts.push(attempt);
+            try { await opts.onModelAttempt?.(attempt); }
+            catch (error) {
+              hostError = error; hostFailed = true;
+              throw Object.assign(new Error('宿主模型审计失败'), { name: 'AbortError' });
+            }
+          };
+          let value: Awaited<ReturnType<typeof generateText>>;
+          try {
+            value = await generateText({ model, system, messages: prepared.messages, tools: sdkTools, maxRetries: 0, abortSignal: genSignal });
+          } catch (error) {
+            await notify({ ref, status: 'error', usage: null });
+            throw error;
+          }
+          // 回调位于 provider catch 之外，不能把宿主失败计成额外模型调用。
+          await notify({ ref, status: 'success', usage: { inputTokens: value.usage.inputTokens, outputTokens: value.usage.outputTokens } });
+          return value;
+        },
         { ...resilience, signal: genSignal },
       );
       res = r.value;
       ref = r.ref;
-      if (r.attempts > 1) retried = true;
     } catch (err) {
-      if (abortSignal.aborted) return blocked('interrupted', '执行被中断');
-      if (genSignal.aborted) return blocked('budget', budget.overrun() ?? '时长预算耗尽');
+      // 已确认的宿主故障优先于同时发生的取消/预算，保留原错误对象。
+      if (hostFailed) throw hostError;
+      const stopped = stop(genSignal);
+      if (stopped) return blocked(stopped.reason, stopped.detail);
       return blocked('model-error', err instanceof Error ? err.message : String(err));
     }
 
     steps++;
     budget.recordStep();
     budget.recordTokens((res.usage.inputTokens ?? 0) + (res.usage.outputTokens ?? 0));
-    onUsage?.(ref, { inputTokens: res.usage.inputTokens, outputTokens: res.usage.outputTokens });
-    // 只保留非 tool 角色的消息：tool 角色的结果一律由本循环统一生成（见下方），避免同一个
-    // toolCallId 既有 SDK 自动生成的（如未知工具触发的 tool-error），又有我们自己生成的两条结果
+    // 不接收 SDK 自动错误结果，保证每个调用恰有一条本地结果。
     messages.push(...res.responseMessages.filter((m) => m.role !== 'tool'));
-
-    const overrun = budget.overrun();
-    if (overrun) return blocked('budget', overrun);
-
-    if (res.toolCalls.length === 0) {
-      invalid++;
-      if (invalid >= maxInvalidOutputs) return blocked('invalid-output', `累计 ${invalid} 次没有按要求调用工具`);
-      messages.push({
-        role: 'user',
-        content: `你必须调用工具：完成时调用 ${FINISH_TOOL} 提交结果，无法继续时调用 ${REPORT_BLOCKED_TOOL}。`,
-      });
-      continue;
-    }
-
     const calls = res.toolCalls;
     const results: Array<{ type: 'tool-result'; toolCallId: string; toolName: string; output: ToolResultOutput }> = [];
     let finished: { value: O } | undefined;
     let reported: string | undefined;
-
-    // 硬约束：report_blocked 优先于一切；finish 必须单独调用（不能和其他调用同轮出现）
+    let terminal = stop(genSignal);
+    let invalidRound = false;
     const hasReportBlocked = calls.some((c) => c.toolName === REPORT_BLOCKED_TOOL);
     const finishMustBeAlone = !hasReportBlocked && calls.some((c) => c.toolName === FINISH_TOOL) && calls.length > 1;
 
-    for (const call of calls) {
-      if (abortSignal.aborted) return blocked('interrupted', '执行被中断');
-
-      const reply = (out: ToolResultOutput) =>
-        results.push({ type: 'tool-result', toolCallId: call.toolCallId, toolName: call.toolName, output: out });
-      const skip = (error: string) => {
-        onToolCall?.({ name: call.toolName, input: call.input, ok: false, error });
-        reply({ type: 'error-text', value: error });
-      };
-
-      if (hasReportBlocked && call.toolName !== REPORT_BLOCKED_TOOL) {
-        skip('未执行：本轮已上报障碍');
-        continue;
-      }
-      if (finishMustBeAlone && call.toolName !== FINISH_TOOL) {
-        skip('未执行：finish 必须单独调用');
-        continue;
-      }
-
-      if (call.toolName === FINISH_TOOL) {
+    try {
+      await onUsage?.(ref, { inputTokens: res.usage.inputTokens, outputTokens: res.usage.outputTokens });
+      terminal ??= stop(genSignal);
+      for (const call of calls) {
+        const reply = (out: ToolResultOutput) => results.push({ type: 'tool-result', toolCallId: call.toolCallId, toolName: call.toolName, output: out });
+        const fail = async (error: string) => {
+          reply({ type: 'error-text', value: error });
+          await onToolCall?.({ name: call.toolName, input: call.input, ok: false, error });
+        };
+        terminal ??= stop();
+        if (terminal) { await fail(`未执行：${terminal.detail}`); continue; }
+        if (hasReportBlocked && call.toolName !== REPORT_BLOCKED_TOOL) { await fail('未执行：本轮已上报障碍'); continue; }
         if (finishMustBeAlone) {
-          invalid++;
-          skip('finish 必须单独调用：请先观察本轮其他工具调用的结果，再单独调用 finish 提交。');
+          invalidRound = true;
+          await fail('finish 必须单独调用：请观察工具结果后再提交。');
           continue;
         }
-        const parsed = output.safeParse(call.input);
-        if (parsed.success) {
-          finished = { value: parsed.data };
-          onToolCall?.({ name: FINISH_TOOL, input: call.input, ok: true, output: parsed.data });
-          reply({ type: 'json', value: '已收到' });
-        } else {
-          invalid++;
-          const error = `结果不合格，请修正后重新调用 ${FINISH_TOOL}：\n${z.prettifyError(parsed.error)}`;
-          onToolCall?.({ name: FINISH_TOOL, input: call.input, ok: false, error });
-          reply({ type: 'error-text', value: error });
+        if (call.invalid && (toolMap.has(call.toolName) || call.toolName === FINISH_TOOL || call.toolName === REPORT_BLOCKED_TOOL)) {
+          invalidRound = true;
+          await fail('工具输入不合法：无法解析 JSON，请提交有效 JSON 参数。');
+          continue;
         }
-        continue;
-      }
-
-      if (call.toolName === REPORT_BLOCKED_TOOL) {
-        const parsed = ReportBlockedInput.safeParse(call.input);
-        const reason = parsed.success ? parsed.data.reason : '代理上报障碍但未说明原因';
-        if (reported === undefined) reported = reason;
-        onToolCall?.({ name: REPORT_BLOCKED_TOOL, input: call.input, ok: true, output: reason });
-        reply({ type: 'json', value: '已记录' });
-        continue;
-      }
-
-      const t = toolMap.get(call.toolName);
-      if (!t) {
-        const error = `工具 ${call.toolName} 在 ${stage} 阶段未授予`;
-        onToolCall?.({ name: call.toolName, input: call.input, ok: false, error });
-        reply({ type: 'error-text', value: error });
-        continue;
-      }
-      const parsed = t.input.safeParse(call.input);
-      if (!parsed.success) {
-        const error = `工具 ${t.name} 的输入不合法：\n${z.prettifyError(parsed.error)}`;
-        onToolCall?.({ name: t.name, input: call.input, ok: false, error });
-        reply({ type: 'error-text', value: error });
-        continue;
-      }
-
-      const execSignal = boundedSignal();
-      let raw: unknown;
-      try {
-        raw = await t.execute(parsed.data, { signal: execSignal });
-      } catch (err) {
-        if (abortSignal.aborted) return blocked('interrupted', '执行被中断');
-        if (execSignal.aborted) return blocked('budget', budget.overrun() ?? '时长预算耗尽');
-        const error = `工具 ${t.name} 执行失败：${err instanceof Error ? err.message : String(err)}`;
-        onToolCall?.({ name: t.name, input: parsed.data, ok: false, error });
-        reply({ type: 'error-text', value: error });
-        continue;
-      }
-      try {
-        const out = toJsonValue(raw);
-        onToolCall?.({ name: t.name, input: parsed.data, ok: true, output: out });
+        if (call.toolName === FINISH_TOOL) {
+          const parsed = await output.safeParseAsync(call.input);
+          const validation = incompleteEvidenceIds.length ? { ok: false as const, error: `必需证据未完整呈现（truncated 或缺失）：${incompleteEvidenceIds.join(',')}` }
+            : parsed.success ? await opts.validateOutput?.(parsed.data) : undefined;
+          if (parsed.success && (!validation || validation.ok)) {
+            finished = { value: parsed.data };
+            reply({ type: 'json', value: '已收到' });
+            await onToolCall?.({ name: FINISH_TOOL, input: call.input, ok: true, output: parsed.data });
+          } else {
+            invalidRound = true;
+            const error = parsed.success ? (validation as { ok: false; error: string }).error : z.prettifyError(parsed.error);
+            await fail(`结果不合格，请修正后重新调用 ${FINISH_TOOL}：\n${error}`);
+          }
+          terminal ??= stop();
+          continue;
+        }
+        if (call.toolName === REPORT_BLOCKED_TOOL) {
+          const parsed = ReportBlockedInput.safeParse(call.input);
+          reported ??= parsed.success ? parsed.data.reason : '代理上报障碍但未说明原因';
+          reply({ type: 'json', value: '已记录' });
+          await onToolCall?.({ name: REPORT_BLOCKED_TOOL, input: call.input, ok: true, output: reported });
+          continue;
+        }
+        const t = toolMap.get(call.toolName);
+        if (!t) { await fail(`工具 ${call.toolName} 在 ${stage} 阶段未授予`); continue; }
+        const parsed = await t.input.safeParseAsync(call.input);
+        if (!parsed.success) { await fail(`工具 ${t.name} 的输入不合法：\n${z.prettifyError(parsed.error)}`); continue; }
+        terminal ??= stop();
+        if (terminal) { await fail(`未执行：${terminal.detail}`); continue; }
+        const execSignal = boundedSignal();
+        let raw: unknown;
+        try {
+          raw = await t.execute(parsed.data, { signal: execSignal });
+        } catch (err) {
+          terminal ??= stop(execSignal);
+          await fail(`工具 ${t.name} 执行失败：${err instanceof Error ? err.message : String(err)}`);
+          continue;
+        }
+        // 真实工具完成后立即检查，不启动后续工具；不能通过只竞速 Promise 声称工具已停止。
+        terminal ??= stop(execSignal);
+        let out: unknown;
+        try { out = toJsonValue(raw); }
+        catch (err) {
+          const error = `工具 ${t.name} 已执行，但结果无法序列化：${err instanceof Error ? err.message : String(err)}`;
+          reply({ type: 'error-text', value: error });
+          await onToolCall?.({ name: t.name, input: parsed.data, ok: true, error });
+          continue;
+        }
         reply({ type: 'json', value: out });
-      } catch (err) {
-        const error = `工具 ${t.name} 已执行，但结果无法序列化：${err instanceof Error ? err.message : String(err)}`;
-        onToolCall?.({ name: t.name, input: parsed.data, ok: true, error });
-        reply({ type: 'error-text', value: error });
+        // 回调不放进序列化或 execute 的 catch，宿主异常不可伪装成普通工具错误后继续 PASS。
+        await onToolCall?.({ name: t.name, input: parsed.data, ok: true, output: out });
       }
+    } finally {
+      // 即使中断、预算或宿主回调抛错，也为已经追加的整轮 assistant 调用补齐结果。
+      for (const call of calls.slice(results.length)) results.push({ type: 'tool-result', toolCallId: call.toolCallId, toolName: call.toolName, output: { type: 'error-text', value: '未执行：本轮已停止' } });
+      if (results.length) messages.push({ role: 'tool', content: results });
     }
-
-    messages.push({ role: 'tool', content: results });
-
+    terminal ??= stop(genSignal);
+    if (terminal) return blocked(terminal.reason, terminal.detail);
     if (reported !== undefined) return blocked('reported', reported);
     if (finished) return { status: 'done', output: finished.value, ...info() };
+    if (!calls.length) {
+      invalidRound = true;
+      messages.push({ role: 'user', content: `你必须调用工具：完成时调用 ${FINISH_TOOL} 提交结果，无法继续时调用 ${REPORT_BLOCKED_TOOL}。` });
+    }
+    if (invalidRound) invalid++;
     if (invalid >= maxInvalidOutputs) return blocked('invalid-output', `结果累计 ${invalid} 次不合格`);
   }
 }

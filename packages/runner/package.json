@@ -4,5 +4,12 @@
   "private": true,
   "type": "module",
   "exports": { ".": "./src/index.ts" },
-  "dependencies": { "@crosscheck/core": "workspace:^" }
+  "dependencies": {
+    "@crosscheck/core": "workspace:^",
+    "@crosscheck/agent": "workspace:^",
+    "@crosscheck/models": "workspace:^",
+    "@crosscheck/tools": "workspace:^",
+    "ai": "^7.0.170",
+    "zod": "^4.6.7"
+  }
 }

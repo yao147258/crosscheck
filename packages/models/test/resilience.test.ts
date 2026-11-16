@@ -63,8 +63,8 @@ describe('callWithFallback', () => {
     const ac = new AbortController();
     ac.abort();
     const fn = vi.fn(async () => Promise.reject(new Error('503')));
-    await expect(callWithFallback(chain, fn, { sleep: async () => {}, signal: ac.signal })).rejects.toThrow('503');
-    expect(fn).toHaveBeenCalledTimes(1);
+    await expect(callWithFallback(chain, fn, { sleep: async () => {}, signal: ac.signal })).rejects.toThrow();
+    expect(fn).not.toHaveBeenCalled();
   });
 
   it('APICallError.isRetryable=false（如 401）在主模型上只调用一次就切到备用模型', async () => {

@@ -21,6 +21,32 @@ describe('可信证据出口', () => {
     expect(output).not.toContain('unknown');
     expect(output).toContain('omitted');
   });
+  it('最终修复 I2 展示JSON按叶子清洗转义的known secret且保留自然语言', () => {
+    const dynamic = 'late"secret\\value'; const r = createEvidenceRedactor([], [dynamic]);
+    const input = JSON.stringify({ ordinary: dynamic, nested: { url: '/reset?password=UNKNOWN_SECRET&mode=safe' }, password: 'JSON_SECRET', safe: '自然语言不是URL' });
+    const clean = JSON.parse(r.displayText(input));
+    expect(clean.ordinary).toBe('[REDACTED]'); expect(clean.password).toBe('[REDACTED]'); expect(clean.nested.url).not.toContain('UNKNOWN_SECRET'); expect(clean.nested.url).toContain('mode=safe'); expect(clean.safe).toBe('自然语言不是URL');
+    expect(r.displayText('自然语言不是URL')).toBe('自然语言不是URL');
+  });
+  it.each(["'", '"', '`', '<', '>', '(),;!$:+/?', '%27', '%22%60%3C%3E'])('残留I2 URL边界%s保持嵌套JSON/quoted URL语义和自然语言', boundary => {
+    const r = createEvidenceRedactor();
+    const url = `https://example.invalid/reset?password=before${boundary}AFTER_SECRET_918&mode=safe`;
+    const nested = JSON.parse(r.displayText(JSON.stringify({ url, nested: { note: `请检查 ${url} 然后继续`, encoded: JSON.stringify({ url, safe: '安全值' }) } })));
+    expect(JSON.stringify(nested)).not.toContain('AFTER_SECRET_918');
+    for (const clean of [nested.url, nested.nested.note, JSON.parse(nested.nested.encoded).url, r.displayText(`请检查 "${url}" 然后继续`), r.displayText(`请检查 '${url}' 然后继续`), r.displayText(`请检查 \`${url}\` 然后继续`)]) {
+      expect(clean).not.toContain('AFTER_SECRET_918'); expect(clean).toContain('/reset'); expect(clean).toContain('mode=safe');
+    }
+    expect(nested.nested.note).toContain('请检查'); expect(nested.nested.note).toContain('然后继续'); expect(JSON.parse(nested.nested.encoded).safe).toBe('安全值');
+    expect(r.displayText('仅自然语言，没有URL')).toBe('仅自然语言，没有URL');
+    expect(r.usage({ inputTokens: 12, outputTokens: 8, pricingKnown: true, cost: 0 })).toEqual({ inputTokens: 12, outputTokens: 8, pricingKnown: true, cost: 0 });
+  });
+  it('残留I2 URL token内的JSON形状标点不能拆成脱敏范围外的片段', () => {
+    const r = createEvidenceRedactor();
+    const input = '请检查 https://example.invalid/reset?password=before{"safe":"AFTER_SECRET_918"}&mode=safe 然后继续';
+    const clean = r.displayText(input);
+    expect(clean).not.toContain('AFTER_SECRET_918');
+    for (const safe of ['请检查', '/reset', 'mode=safe', '然后继续']) expect(clean).toContain(safe);
+  });
   it('遮蔽敏感 DOM 和不可验证区域', () => {
     const r = createEvidenceRedactor([], [secret]);
     const dom = sanitizeDom([{ tag: 'input', type: 'password', value: 'unknown' }, { tag: 'div', text: secret }, { tag: 'iframe', text: 'unseen' }, { tag: 'span', text: 'safe' }], r);

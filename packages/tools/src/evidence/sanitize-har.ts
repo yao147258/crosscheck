@@ -8,7 +8,7 @@ const num = (v: unknown): number => typeof v === 'number' && Number.isFinite(v) 
 const MAX_BODY = 256 * 1024;
 
 /** 仅接受内存中的 HAR 数据；未知扩展字段不复制。 */
-export function sanitizeHar(input: unknown, r: EvidenceRedactor): unknown {
+export function sanitizeHar(input: unknown, r: EvidenceRedactor) {
   const log = obj(obj(input).log);
   const pairs = (v: unknown, cookie = false) => arr(v).map(item => {
     const x = obj(item); const name = str(x.name);
@@ -22,6 +22,8 @@ export function sanitizeHar(input: unknown, r: EvidenceRedactor): unknown {
   const body = (v: unknown, response: boolean) => {
     const x = obj(v); const mimeType = r.text(str(x.mimeType));
     if (x.truncated === true) return { mimeType, ...(response ? { size: num(x.size) } : {}), text: '[omitted: truncated body]', omitted: true, truncated: true };
+    // 已登记的省略正文不可在重新清洗时恢复成完整；不再解析其占位文本。
+    if (x.omitted === true) return { mimeType, ...(response ? { size: num(x.size) } : {}), text: '[omitted: source body]', omitted: true, truncated: false };
     if (!response && x.text === undefined && Array.isArray(x.params)) {
       const safeForm = mimeType.toLowerCase().split(';', 1)[0]?.trim() === 'application/x-www-form-urlencoded';
       const valid = x.params.every(item => {

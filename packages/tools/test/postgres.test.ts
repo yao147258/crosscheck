@@ -42,7 +42,7 @@ async function setup(options: { maxRows?: number; maxBytes?: number; url?: strin
     const index = JSON.parse((await artifacts.readBytes('runs/run-db/cases/M-TC-1/attempts/1/evidence/index.json'))!.toString()) as { id: string; path: string }[];
     return Promise.all(ids.map(async id => JSON.parse((await artifacts.readBytes(index.find(x => x.id === id)!.path))!.toString())));
   };
-  return { reader, fake, evidence, created: () => created };
+  return { reader, fake, store, evidence, created: () => created };
 }
 afterEach(async () => { vi.unstubAllEnvs(); for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }); });
 describe('PostgreSQL 只读工具（假连接，真实守卫/采证）', () => {
@@ -135,6 +135,15 @@ describe('PostgreSQL 只读工具（假连接，真实守卫/采证）', () => {
     const { reader, fake } = await setup();
     await reader.query({ sql: 'SELECT $1, $2, $3, $4, $5, $6', params: [[1, 2], { a: 1 }, 'null', 2, false, null] }, meta, signal());
     expect(fake.calls[4]!.values).toEqual([[1, 2], { a: 1 }, 'null', 2, false, null]);
+  });
+  it.each(['blocked', 'connect', 'timeout', 'cancelled'] as const)('最终修复 I4 真实Reader的%s事件被可信读取判为不完整', async kind => {
+    const { reader, fake, store } = await setup(); const ac = new AbortController();
+    if (kind === 'connect') fake.connect = async () => { throw new Error('连接失败'); };
+    if (kind === 'timeout') fake.failure = Object.assign(new Error('服务端超时'), { code: '57014' });
+    if (kind === 'cancelled') ac.abort();
+    const error = await reader.query({ sql: kind === 'blocked' ? 'DROP TABLE items' : 'SELECT 1' }, meta, ac.signal).catch(error => error);
+    expect(error.kind).toBe(kind === 'connect' ? 'database' : kind);
+    expect((await store.readTextEvidence(error.evidenceIds[0])).sourceIncomplete).toBe(true);
   });
   it('数据库工具严格输入且转发取消信号与宿主元信息', async () => {
     const { reader } = await setup(); const [tool] = createDbTools(reader, () => meta);

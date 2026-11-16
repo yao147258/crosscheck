@@ -1,0 +1,12 @@
+{
+  "name": "@crosscheck/report",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": { ".": "./src/index.ts" },
+  "dependencies": {
+    "@crosscheck/core": "workspace:^",
+    "@crosscheck/runner": "workspace:^",
+    "zod": "^4.6.7"
+  }
+}

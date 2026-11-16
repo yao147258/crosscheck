@@ -50,6 +50,12 @@ function parseConnectionUrl(connectionString: string): pg.ClientConfig & { repli
   } catch { throw new Error('数据库连接必须是完整 TCP URL，仅支持显式账号、非空密码、数据库及 verify-full/disable SSL 模式'); }
 }
 
+/** 宿主准备适配器复用同一严格 URL 准入；不向模型暴露连接值。 */
+export function postgresConnectionIdentity(connectionString: string): { host: string; port: number; user: string; database: string } {
+  const config = parseConnectionUrl(connectionString);
+  return { host: config.host!.toLowerCase(), port: config.port!, user: config.user!, database: config.database! };
+}
+
 // 使用公开的 stream 工厂保留专属 socket，取消时不依赖 query_timeout 或 pg 私有字段。
 export function createPgConnection(connectionString: string): PgConnection {
   const config = parseConnectionUrl(connectionString);

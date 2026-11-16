@@ -33,20 +33,26 @@ export class RunStore {
     if (!manifest || manifest.runId !== runId) throw new ArtifactError('运行清单缺失或归属不一致');
     return new RunStore(artifacts, manifest);
   }
+  /** 调用方必须在同一 withLock 生命周期内更新状态。 */
+  async updateStatus(status: RunManifest['status']): Promise<void> {
+    const manifest = RunManifestSchema.parse({ ...this.manifest, status, end: status === 'completed' || status === 'aborted' ? new Date().toISOString() : null });
+    await this.artifacts.writeJson(`${this.root}/manifest.json`, manifest);
+    Object.assign(this.manifest, manifest);
+  }
   async nextAttempt(caseId: string): Promise<number> {
     const names = await this.artifacts.list(this.caseRoot(caseId));
     const attempts = names.filter(n => /^[1-9]\d*$/.test(n)).map(Number);
     if (attempts.some(n => !Number.isSafeInteger(n)) || Math.max(0, ...attempts) >= Number.MAX_SAFE_INTEGER) throw new ArtifactError('尝试次数超出范围');
     return Math.max(0, ...attempts) + 1;
   }
-  async commitCase(result: CaseResult, trace: TraceEvent[], evidence: EvidenceRecord[]): Promise<void> {
+  async commitCase(result: CaseResult, trace: TraceEvent[], evidence: EvidenceRecord[], signal?: AbortSignal): Promise<CaseResult> {
     const prefix = this.attemptRoot(result.caseId, result.attempt);
     if (result.runId !== this.manifest.runId) throw new ArtifactError('用例运行归属不一致');
     await validateCheckpoint(this.artifacts, result, trace, evidence, prefix);
     if (await this.artifacts.readBytes(`${prefix}/result.json`)) throw new ArtifactError('提交点已经存在');
     await this.artifacts.writeBytes(`${prefix}/trace.jsonl`, Buffer.from(trace.map(event => `${JSON.stringify(event)}\n`).join('')));
     await this.artifacts.writeJson(`${prefix}/evidence/index.json`, evidence);
-    await this.artifacts.writeJson(`${prefix}/result.json`, result);
+    return this.artifacts.publishJsonSelected(`${prefix}/result.json`, () => signal?.aborted ? CaseResultSchema.parse({ ...result, complete: false, status: 'BLOCKED', reason: '提交前执行被中断；已发生的业务与证据保留' }) : result);
   }
   private async readTrace(prefix: string): Promise<TraceEvent[] | undefined> {
     const bytes = await this.artifacts.readBytes(`${prefix}/trace.jsonl`);
@@ -96,15 +102,20 @@ export class RunStore {
     if (`sha256:${createHash('sha256').update(bytes).digest('hex')}` !== record.digest) throw new ArtifactError('证据摘要不匹配');
     return bytes;
   }
-  async rebuildSummary(): Promise<RunResult> {
+  /** 只读校验提交点并汇总，供离线报告在发布前核验历史数据。 */
+  async readSummary(): Promise<RunResult> {
     const cases = await this.committedResults();
     const known = cases.every(c => c.usage.pricingKnown);
     const parsed = RunResultSchema.safeParse({ version: 1, manifest: this.manifest, cases, status: worstStatus(cases.map(c => c.status)),
       usage: { inputTokens: cases.reduce((n, c) => n + c.usage.inputTokens, 0), outputTokens: cases.reduce((n, c) => n + c.usage.outputTokens, 0), pricingKnown: known, cost: known ? cases.reduce((n, c) => n + (c.usage.cost ?? 0), 0) : null },
       budget: { steps: cases.reduce((n, c) => n + c.budget.used.steps, 0), tokens: cases.reduce((n, c) => n + c.budget.used.tokens, 0), elapsedMs: cases.reduce((n, c) => n + c.budget.used.elapsedMs, 0) } });
     if (!parsed.success) throw new ArtifactError('无法从完整提交点重建运行汇总', { cause: parsed.error });
-    await this.artifacts.writeJson(`${this.root}/results.json`, parsed.data);
     return parsed.data;
+  }
+  async rebuildSummary(): Promise<RunResult> {
+    const result = await this.readSummary();
+    await this.artifacts.writeJson(`${this.root}/results.json`, result);
+    return result;
   }
   async withLock<T>(fn: () => Promise<T>): Promise<T> {
     const lock = `${this.root}/lock.json`;
