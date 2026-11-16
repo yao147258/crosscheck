@@ -3,7 +3,7 @@ import { Approvals } from '@crosscheck/core';
 import type { RenderOptions } from 'ink';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { runReview } from '../src/index';
-import { cleanupProjects, createProject } from './fixture';
+import { cleanupProjects, clause, createProject, testCase } from './fixture';
 import { deferred, KEYS, waitFor } from './helpers';
 
 const terminal = vi.hoisted(() => ({
@@ -58,6 +58,23 @@ const editor = { async edit() { throw new Error('本测试不使用编辑器'); 
 const open = async () => {};
 
 describe('runReview 真实 Ink 退出码', () => {
+  it.each(['clauses', 'cases'] as const)('%s 二次确认中的 Ctrl+C 直接中断，不执行删除或转为普通退出', async (view) => {
+    const { artifacts } = await createProject();
+    await artifacts.saveClauses('M', [clause(1)]);
+    await artifacts.saveCases('M', [testCase(1, ['M-AC-1'])]);
+    const io = createTerminal();
+    const result = runReview({ artifacts, reviewer: '退出码测试', editor, open, view, module: 'M' });
+    const id = view === 'clauses' ? 'M-AC-1' : 'M-TC-1';
+    await waitFor(() => io.output().includes(`› ${id}`));
+    io.stdin.write('d');
+    await waitFor(() => io.output().includes(`删除 ${id}？(y/N)`));
+    io.stdin.write('\u0003');
+    await expect(result).resolves.toBe(2);
+    expect(await artifacts.loadClauses('M')).toHaveLength(1);
+    expect(await artifacts.loadCases('M')).toHaveLength(1);
+    expect(io.output()).not.toContain('已取消');
+  });
+
   it.each([
     { name: 'q 正常退出', input: 'q', code: 0 },
     { name: 'Esc 从初始视图正常退出', input: KEYS.escape, code: 0 },

@@ -1,4 +1,4 @@
-import { Box, Text, type Key } from 'ink';
+import { Box, Text, useWindowSize, type Key } from 'ink';
 
 export interface Status { kind: 'info' | 'error'; text: string }
 export interface ListItem { key: string; label: string; color?: string; header?: boolean }
@@ -21,15 +21,30 @@ export function clampIndex(index: number, length: number): number {
   return Math.min(Math.max(index, 0), Math.max(length - 1, 0));
 }
 
-export function List({ items, index }: { items: ListItem[]; index: number }) {
-  if (!items.some((item) => !item.header)) return <Text dimColor>（空）</Text>;
+export function List({ items, index, maxRows }: { items: ListItem[]; index: number; maxRows?: number }) {
+  const { rows } = useWindowSize();
+  const limit = Math.max(2, maxRows ?? Math.floor(rows / 2));
   let selectable = -1;
+  let header: ListItem | undefined;
+  const entries = items.map((item) => {
+    if (item.header) header = item;
+    return { item, ordinal: item.header ? -1 : ++selectable, header };
+  });
+  if (selectable < 0) return <Text dimColor>（空）</Text>;
+  const activeIndex = entries.findIndex((entry) => entry.ordinal === clampIndex(index, selectable + 1));
+  const start = Math.max(0, activeIndex - Math.floor((limit - 2) / 2));
+  const visible = entries.slice(start, start + limit);
+  // 窗口从组内开始时补回组标题，且不挤掉选中项。
+  if (visible[0]?.header && !visible[0].item.header) {
+    visible.unshift({ item: visible[0].header, ordinal: -1, header: visible[0].header });
+    visible.splice(limit);
+  }
   return (
-    <Box flexDirection="column">
-      {items.map((item) => {
-        if (item.header) return <Text key={item.key} bold>{item.label}</Text>;
-        const active = ++selectable === index;
-        return <Text key={item.key} color={item.color} inverse={active}>{active ? '› ' : '  '}{item.label}</Text>;
+    <Box flexDirection="column" flexShrink={0}>
+      {visible.map(({ item, ordinal }) => {
+        if (item.header) return <Text key={item.key} bold color={item.color} wrap="truncate-end">{item.label}</Text>;
+        const active = ordinal === clampIndex(index, selectable + 1);
+        return <Text key={item.key} color={item.color} inverse={active} wrap="truncate-end">{active ? '› ' : '  '}{item.label}</Text>;
       })}
     </Box>
   );
