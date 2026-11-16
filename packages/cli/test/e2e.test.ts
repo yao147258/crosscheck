@@ -92,7 +92,8 @@ it('独立人工确认脚本使用真实approveCase恢复人工门禁，不在ru
 });
 it('真实redirect逐跳阻断，禁止终点0请求', async () => {
   const s = await setup(); const out = await launch(s, 'redirect'); expect(out.code).toBe(2); expect(s.counts().forbidden).toBe(0); expect((await result(s)).data.status).toBe('BLOCKED');
-});
+// 多轮阻断纠正、子进程冷启动及报告工件 I/O 均计入本项集成测试预算。
+}, 15000);
 it('完成case恢复不重放，输入变化/筛选未知与空交集不全绿', async () => {
   const s = await setup(); expect((await launch(s)).code).toBe(0); const saved = await result(s);
   expect((await launch(s, 'pass', ['--resume', saved.id])).code).toBe(0); expect(s.counts().actions).toBe(1);
