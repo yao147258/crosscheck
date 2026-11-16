@@ -5,3 +5,5 @@ export * from './io/opener';
 export * from './state/profile';
 export * from './state/clauses';
 export * from './state/cases';
+export * from './state/results';
+export * from './state/home';

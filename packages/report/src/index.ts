@@ -5,7 +5,7 @@ import { renderJunit } from './junit';
 import { renderHtml } from './html';
 export { renderJunit } from './junit';
 export { renderHtml } from './html';
-export type { ReportData, ReportEvidence } from './results';
+export { loadReportData, type ReportData, type ReportEvidence } from './results';
 
 export async function generateReport(artifacts: ArtifactStore, runId: string): Promise<{ result: RunResult; htmlPath: string }> {
   const run = await RunStore.load(artifacts, runId);

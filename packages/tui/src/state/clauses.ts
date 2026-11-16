@@ -39,9 +39,11 @@ export async function revokeClause(session: ReviewSession, module: string, id: s
   return `已撤销 ${id} 的确认`;
 }
 
-export async function markClauseUnclear(session: ReviewSession, module: string, id: string): Promise<string> {
+/** 历史结果调用时在同一次会话修改内校验快照，避免检查后再获取会话的竞态。 */
+export async function markClauseUnclear(session: ReviewSession, module: string, id: string, expected?: Clause): Promise<string> {
   await session.mutate(async (approvals) => {
-    const { clauses } = await find(session, module, id);
+    const { clauses, clause } = await find(session, module, id);
+    if (expected && contentHash(clause) !== contentHash(expected)) throw new Error(`${id} 与历史快照相比已变化，拒绝过时裁决`);
     await session.artifacts.saveClauses(module, clauses.map((clause) => clause.id === id ? { ...clause, status: 'unclear' as const } : clause));
     approvals.revoke('clause', id);
   });
