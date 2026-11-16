@@ -1,12 +1,15 @@
 import { Approvals } from '@crosscheck/core';
 import { Text, useInput } from 'ink';
 import { cleanup, render } from 'ink-testing-library';
+import { act, useState } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { App, initialRoute, type EditorHost } from '../src/index';
+import { App, ReviewSession, initialRoute, type EditorHost } from '../src/index';
 import { List, clampIndex, moveIndex } from '../src/components';
 import { useAction, useEditorPause, useLoader } from '../src/hooks';
 import { cleanupProjects, createProject } from './fixture';
 import { deferred, KEYS, waitFor } from './helpers';
+import { ActionContext, ReviewContext } from '../src/context';
+import { ProfileView } from '../src/views/profile';
 
 afterEach(async () => { cleanup(); vi.restoreAllMocks(); await cleanupProjects(); });
 const noEditor: EditorHost = { async edit() { throw new Error('请设置 VISUAL 或 EDITOR 环境变量后再编辑'); } };
@@ -114,6 +117,95 @@ describe('首页与画像视图', () => {
     if (index !== 3) expect(frame(ui)).toContain('（空）');
     ui.stdin.write(KEYS.escape);
     await waitFor(() => frame(ui).includes('画像审核（待处理 7）'));
+  });
+
+  it.each(['guardrails.yaml', 'auth.yaml', 'environments.yaml'] as const)('40×16 长确认人无编辑器可读 %s 完整审批载荷，详情只读且返回仍可确认', async (name) => {
+    const { artifacts } = await createProject();
+    const session = await ReviewSession.open(artifacts, '很长确认人'.repeat(30));
+    const tail = name === 'guardrails.yaml' ? 'host-tail.example:39999' : name === 'auth.yaml' ? 'ACTOR_TAIL' : 'COMMAND_TAIL';
+    const value = name === 'guardrails.yaml'
+      ? { allowedHosts: [...Array.from({ length: 30 }, (_, i) => `host-${i}.example:39999`), tail] }
+      : name === 'auth.yaml'
+        ? { version: 1, actors: { ...Object.fromEntries(Array.from({ length: 30 }, (_, i) => [`guest${i}`, { kind: 'anonymous' }])), last: { kind: 'token', env: tail, inject: { kind: 'header', name: 'Authorization' } } } }
+        : { version: 1, environments: { local: { baseURL: 'http://localhost:39999', healthcheck: 'http://localhost:39999/health', reset: null, start: { program: 'node', argv: [...Array.from({ length: 30 }, (_, i) => `argument-${i}`), tail] } } } };
+    await artifacts.writeYaml(`system/${name}`, value);
+    const before = await artifacts.readBytes(`system/${name}`);
+    const ui = render(<App env={{ session, editor: noEditor, open }} initial={{ name: 'profile' }} />);
+    Object.defineProperties(ui.stdout, { columns: { configurable: true, value: 40 }, rows: { configurable: true, value: 16 } });
+    ui.stdout.emit('resize');
+    await waitFor(() => frame(ui).includes('› environments.yaml'));
+    const names = ['environments.yaml', 'auth.yaml', 'api-catalog.yaml', 'pages.yaml', 'data-model.yaml', 'fixtures.yaml', 'guardrails.yaml'];
+    for (let i = 1; i <= names.indexOf(name); i++) {
+      ui.stdin.write(KEYS.down); await waitFor(() => frame(ui).includes(`› ${names[i]}`));
+    }
+    ui.stdin.write(KEYS.enter);
+    await waitFor(() => frame(ui).includes(`完整详情 · ${name}`));
+    expect(frame(ui).split('\n').length).toBeLessThanOrEqual(16);
+    let seen = frame(ui);
+    for (let i = 0; i < 100 && !seen.includes(tail); i++) {
+      const previous = frame(ui); ui.stdin.write(KEYS.down);
+      await waitFor(() => frame(ui) !== previous); seen += frame(ui);
+    }
+    expect(seen).toContain(tail);
+    if (name === 'environments.yaml') {
+      let found = frame(ui).includes('env: {}');
+      for (let i = 0; i < 10 && !found; i++) {
+        const previous = frame(ui); ui.stdin.write(KEYS.down);
+        await waitFor(() => frame(ui) !== previous); found = frame(ui).includes('env: {}');
+      }
+      expect(found).toBe(true);
+    }
+    ui.stdin.write('a'); ui.stdin.write('\u0001');
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(await artifacts.readBytes('approvals.json')).toBeUndefined();
+    expect(await artifacts.readBytes(`system/${name}`)).toEqual(before);
+    ui.stdin.write(KEYS.escape); await waitFor(() => frame(ui).includes(`› ${name}`));
+    ui.stdin.write('\u0001'); await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(await artifacts.readBytes('approvals.json')).toBeUndefined();
+    ui.stdin.write('a'); await waitFor(() => frame(ui).includes(`已确认 ${name}`));
+    expect((await Approvals.load(artifacts)).record('profile', name)?.by).toBe(session.reviewer);
+  });
+
+  it('非法 YAML 可安全阅读原文、Esc 返回并编辑修复，不误写审批', async () => {
+    const { session, artifacts } = await createProject();
+    await artifacts.writeBytes('system/environments.yaml', Buffer.from('broken: [\n终端控制: \u001b[31m原文末尾'));
+    const editor: EditorHost = { async edit() { return 'version: 1\nenvironments: {}\n'; } };
+    const ui = render(<App env={{ session, editor, open }} initial={{ name: 'profile' }} />);
+    await waitFor(() => frame(ui).includes('不合法'));
+    ui.stdin.write(KEYS.enter); await waitFor(() => frame(ui).includes('完整详情 · environments.yaml'));
+    expect(frame(ui)).toContain('broken: ['); expect(frame(ui)).toContain('原文末尾');
+    expect(frame(ui)).not.toContain('\u001b');
+    expect(await artifacts.readBytes('approvals.json')).toBeUndefined();
+    ui.stdin.write(KEYS.escape); await waitFor(() => frame(ui).includes('› environments.yaml'));
+    ui.stdin.write('e'); await waitFor(() => frame(ui).includes('已保存 environments.yaml') && frame(ui).includes('› environments.yaml') && !frame(ui).includes('不合法'));
+  });
+
+  it('画像旧行详情在重载读取失败后恢复列表监听，不会因无 row 输入死锁', async () => {
+    const { session, artifacts } = await createProject();
+    const gate = deferred<void>(); const entered = deferred<void>(); let reloading = false;
+    const read = artifacts.readBytes.bind(artifacts);
+    vi.spyOn(artifacts, 'readBytes').mockImplementation(async (rel) => {
+      if (reloading && rel === 'system/environments.yaml') { entered.resolve(); await gate.promise; throw new Error('画像重载故障'); }
+      return read(rel);
+    });
+    let ui: ReturnType<typeof render>;
+    const busy = { current: false };
+    const actions = { busy, changed() { if (!busy.current) { reloading = true; ui.stdin.write(KEYS.enter); } } };
+    function Probe() {
+      const [destination, setDestination] = useState('');
+      const nav = { push() {}, back() { setDestination('已返回'); }, quit() { setDestination('已退出'); } };
+      return <ReviewContext.Provider value={{ session, editor: noEditor, open }}><ActionContext.Provider value={actions}>
+        {destination ? <Text>{destination}</Text> : <ProfileView nav={nav} />}
+      </ActionContext.Provider></ReviewContext.Provider>;
+    }
+    ui = render(<Probe />); await waitFor(() => frame(ui).includes('› environments.yaml'));
+    ui.stdin.write('r'); await entered.promise;
+    const actEnv = globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean };
+    const previous = actEnv.IS_REACT_ACT_ENVIRONMENT; actEnv.IS_REACT_ACT_ENVIRONMENT = true;
+    try { await act(async () => { gate.resolve(); }); }
+    finally { actEnv.IS_REACT_ACT_ENVIRONMENT = previous; }
+    await waitFor(() => frame(ui).includes('画像重载故障') && !frame(ui).includes('加载中…'));
+    ui.stdin.write(KEYS.escape); await waitFor(() => frame(ui).includes('已返回'));
   });
 
   it('initialRoute 按视图与参数选择入口', () => {

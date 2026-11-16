@@ -29,10 +29,12 @@ export function App({ env, initial }: { env: ReviewEnv; initial: Route }) {
   const busy = useRef(false);
   const loading = useRef(0);
   const cancelError = useRef<Error | undefined>(undefined);
+  const cancellation = useMemo(() => new AbortController(), []);
+  const signal = cancellation.signal;
   const actions = useMemo(() => {
     const changed = (error?: unknown) => {
       setNotice(undefined);
-      if (!env.signal?.aborted) return;
+      if (!signal.aborted) return;
       if (error !== undefined && !cancelError.current) {
         cancelError.current = error instanceof Error ? error : new Error(String(error));
       }
@@ -42,20 +44,21 @@ export function App({ env, initial }: { env: ReviewEnv; initial: Route }) {
       loadStarted: () => { loading.current++; },
       loadFinished: (error?: unknown) => { loading.current--; changed(error); },
     };
-  }, [env.signal, exit]);
-  useEffect(() => {
+  }, [signal, exit]);
+  const interrupt = () => {
+    cancellation.abort();
     // 既等待动作写盘，也等待加载器释放运行锁；错误经 Ink 拒绝路径保留给 CLI。
-    const interrupt = () => {
-      if (busy.current || loading.current > 0) setNotice('执行被中断，等待当前操作完成');
-      else actions.changed();
-    };
+    if (busy.current || loading.current > 0) setNotice('执行被中断，等待当前操作完成');
+    else actions.changed();
+  };
+  useEffect(() => {
     env.signal?.addEventListener('abort', interrupt, { once: true });
     if (env.signal?.aborted) interrupt();
     return () => env.signal?.removeEventListener('abort', interrupt);
   }, [env.signal, actions]);
   const route = stack[stack.length - 1]!;
   const guard = (fn: () => void) => {
-    if (env.signal?.aborted) actions.changed();
+    if (signal.aborted || env.signal?.aborted) actions.changed();
     else if (busy.current) setNotice('请等待当前操作完成');
     else fn();
   };
@@ -64,9 +67,15 @@ export function App({ env, initial }: { env: ReviewEnv; initial: Route }) {
     back: () => guard(() => { if (stack.length > 1) setStack((s) => s.slice(0, -1)); else exit(0); }),
     quit: () => guard(() => exit(0)),
   };
-  useInput((input, key) => { if (key.ctrl && input === 'c') guard(() => exit(2)); });
+  useInput((input, key) => {
+    if (key.ctrl && input === 'c') {
+      // 写盘期间维持拒绝提前退出的约定；加载期间则记住取消并等待清理。
+      if (busy.current) setNotice('请等待当前操作完成');
+      else interrupt();
+    }
+  });
   return (
-    <ReviewContext.Provider value={env}>
+    <ReviewContext.Provider value={{ ...env, signal }}>
       <ActionContext.Provider value={actions}>
         <Box flexDirection="column">
           <Text bold color="cyan" wrap="truncate-end">Crosscheck 审核 · 确认人 {env.session.reviewer}</Text>

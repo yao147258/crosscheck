@@ -145,10 +145,10 @@ describe('runReview 真实 Ink 退出码（组件模拟流，不代表真实 TTY
     expect([process.listenerCount('SIGINT'), process.listenerCount('SIGTERM')]).toEqual(before);
   });
 
-  it.each([
-    { boundary: 'summary', fail: false }, { boundary: 'summary', fail: true },
-    { boundary: 'evidence', fail: false }, { boundary: 'evidence', fail: true },
-  ] as const)('结果加载 $boundary（失败=$fail）取消等待真实锁释放再返回，错误优先3', async ({ boundary, fail }) => {
+  it.each((['signal', 'raw'] as const).flatMap((interrupt) => [
+    { boundary: 'summary', fail: false, interrupt }, { boundary: 'summary', fail: true, interrupt },
+    { boundary: 'evidence', fail: false, interrupt }, { boundary: 'evidence', fail: true, interrupt },
+  ] as const))('结果加载 $boundary（失败=$fail，取消=$interrupt）等待真实锁释放再返回，错误优先3', async ({ boundary, fail, interrupt }) => {
     const { cliMain } = await import('../../cli/src/main');
     const { project, runId } = await createFailedRun();
     const gate = deferred<void>(); const entered = deferred<void>();
@@ -181,8 +181,10 @@ describe('runReview 真实 Ink 退出码（组件模拟流，不代表真实 TTY
     void result.then(() => { settled = true; });
     await entered.promise;
     expect(await project.artifacts.readBytes(`runs/${runId}/lock.json`)).toBeDefined();
-    controller.abort(); io.stdin.write('b');
+    if (interrupt === 'raw') io.stdin.write('\u0003');
+    else controller.abort();
     await new Promise((resolve) => setTimeout(resolve, 30));
+    io.stdin.write('b');
     const returnedBeforeRelease = settled;
     gate.resolve();
     const code = await result;
@@ -193,6 +195,38 @@ describe('runReview 真实 Ink 退出码（组件模拟流，不代表真实 TTY
     expect(await project.artifacts.readBytes(`runs/${runId}/lock.json`)).toBeUndefined();
     expect(await project.artifacts.readBytes(`runs/${runId}/dispositions.json`)).toBeUndefined();
     expect([process.listenerCount('SIGINT'), process.listenerCount('SIGTERM')]).toEqual(before);
+  });
+
+  it('画像 raw Ctrl+A/R/E/Q 不确认、不撤销、不编辑或退出，普通 a/r/e 保持且 Ctrl+C 返回2', async () => {
+    const { artifacts } = await createProject();
+    const io = createTerminal(); let edits = 0; let settled = false;
+    const result = runReview({ artifacts, reviewer: '快捷键测试', open, view: 'profile', editor: {
+      async edit(text) { edits++; return `${text}\n# 普通编辑\n`; },
+    } });
+    void result.then(() => { settled = true; });
+    await waitFor(() => io.output().includes('environments.yaml'));
+    const before = await artifacts.readBytes('system/environments.yaml');
+    io.stdin.write('\u0001');
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(await artifacts.readBytes('approvals.json')).toBeUndefined();
+    io.stdin.write('a');
+    await waitFor(() => io.output().includes('已确认 environments.yaml'));
+    const approved = await artifacts.readBytes('approvals.json');
+    for (const key of ['\u0012', '\u0005', '\u0011']) {
+      // 每次单独经过真实 readable 回合，避免多个控制字节被 Ink 合并为一次输入。
+      io.stdin.write(key);
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      expect(await artifacts.readBytes('approvals.json')).toEqual(approved);
+      expect(await artifacts.readBytes('system/environments.yaml')).toEqual(before);
+      expect(edits).toBe(0); expect(settled).toBe(false);
+    }
+    io.stdin.write('r'); await waitFor(() => io.output().includes('已撤销 environments.yaml'));
+    expect((await Approvals.load(artifacts)).record('profile', 'environments.yaml')).toBeUndefined();
+    // 成功提示早于 useLoader 的新帧，只在最新完整帧恢复选中行后发送编辑键。
+    await waitFor(() => io.output().slice(io.output().lastIndexOf('画像审核')).includes('› environments.yaml'));
+    io.stdin.write('e'); await waitFor(() => io.output().includes('已保存 environments.yaml'));
+    expect(edits).toBe(1);
+    io.stdin.write('\u0003'); await expect(result).resolves.toBe(2);
   });
 
   it('编辑暂停使用注入的 TTY 输入，等待 pause 的 nextTick 后交接，出错后仍能取消退出', async () => {
@@ -234,6 +268,15 @@ describe('runReview 真实 Ink 退出码（组件模拟流，不代表真实 TTY
     io.stdin.write('\u0003');
     await expect(result).resolves.toBe(2);
     expect(await project.artifacts.readBytes(`runs/${runId}/dispositions.json`)).toBeUndefined();
+  });
+
+  it('画像完整详情 raw Ctrl+C 返回2且不写审批', async () => {
+    const { artifacts } = await createProject(); const io = createTerminal();
+    const result = runReview({ artifacts, reviewer: '详情取消', editor, open, view: 'profile' });
+    await waitFor(() => io.output().includes('› environments.yaml'));
+    io.stdin.write(KEYS.enter); await waitFor(() => io.output().includes('完整详情 · environments.yaml'));
+    io.stdin.write('\u0003'); await expect(result).resolves.toBe(2);
+    expect(await artifacts.readBytes('approvals.json')).toBeUndefined();
   });
 
   it.each(['clauses', 'cases'] as const)('%s 完整详情中的 Ctrl+C 保持中断码 2', async (view) => {

@@ -2,7 +2,7 @@ import { mkdtemp, mkdir, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
-import { Approvals, ArtifactStore, ConfigSchema, readProfileFile } from '@crosscheck/core';
+import { Approvals, ArtifactError, ArtifactStore, ConfigSchema, readProfileFile } from '@crosscheck/core';
 import { scriptedModel, type ScriptStep } from '../../agent/src/testing/scripted-model';
 import { cliMain } from '../src/main';
 import { CONFIG_TEMPLATE } from '../src/init';
@@ -61,6 +61,36 @@ it('生成 7 份画像草稿且不写确认记录；重跑时保留已确认文�
   expect(await artifacts.readBytes('system/environments.yaml')).toEqual(envBytes);
   expect(await artifacts.readBytes('approvals.json')).toEqual(approvalBytes);
   expect(out.join('\n')).toContain('跳过（已确认）');
+});
+
+it.each([false, true])('七画像已确认时 auth 一次读取故障（并发取消=%s）退出3，零模型且字节全不变', async (cancel) => {
+  const { root, artifacts } = await project(true);
+  const approvals = Approvals.empty();
+  for (const [name, value] of Object.entries(FILES)) {
+    await artifacts.writeYaml(`system/${name}`, value);
+    const file = await readProfileFile(artifacts, name as keyof typeof FILES);
+    if (!file.present || !file.ok) throw new Error('画像应合法');
+    approvals.approve('profile', name, file.value, '人工');
+  }
+  await approvals.save(artifacts);
+  const paths = ['config.yaml', ...Object.keys(FILES).map((n) => `system/${n}`), 'approvals.json'];
+  const before = await Promise.all(paths.map((p) => artifacts.readBytes(p)));
+  const controller = new AbortController(); let failed = false;
+  const read = ArtifactStore.prototype.readBytes;
+  vi.spyOn(ArtifactStore.prototype, 'readBytes').mockImplementation(async function (this: ArtifactStore, rel) {
+    if (rel === 'system/auth.yaml' && !failed) {
+      failed = true;
+      if (cancel) controller.abort();
+      throw new ArtifactError('工件读取失败', { cause: Object.assign(new Error('auth 瞬时拒绝访问'), { code: 'EACCES' }) });
+    }
+    return read.call(this, rel);
+  });
+  const model = scriptedModel([{ toolCalls: [{ name: 'finish', input: { 'auth.yaml': { version: 1, actors: { replacement: { kind: 'anonymous' } } } } }] }]); const logs: string[] = [];
+  const code = await cliMain(['init', '--project', root], { log: (s) => logs.push(s), dependencies: deps(model), signal: controller.signal });
+  expect(code).toBe(3);
+  expect(model.doGenerateCalls).toHaveLength(0);
+  expect(await Promise.all(paths.map((p) => artifacts.readBytes(p)))).toEqual(before);
+  expect(logs.join('\n')).toContain('工件读取失败');
 });
 
 it('草稿、过期确认与无效画像不能作为已确认上下文跳过', async () => {
@@ -178,10 +208,10 @@ it('配置缺密钥是宿主错误，保留具体诊断', async () => {
 
 it('真实草稿写入失败即使信号同时取消也退出 3，保留已写文件', async () => {
   const { root, artifacts } = await project(true);
-  await mkdir(artifacts.resolve('system/auth.yaml'), { recursive: true });
   const controller = new AbortController();
   const original = ArtifactStore.prototype.writeYaml;
   vi.spyOn(ArtifactStore.prototype, 'writeYaml').mockImplementation(async function (this: ArtifactStore, rel, value) {
+    if (rel === 'system/auth.yaml') await mkdir(this.resolve(rel), { recursive: true });
     try { await original.call(this, rel, value); }
     catch (error) { controller.abort(); throw error; }
   });

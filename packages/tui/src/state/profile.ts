@@ -1,19 +1,28 @@
 import { PROFILE_SCHEMAS, loadProfile, readProfileFile, readProfileFiles, type ApprovalState, type ProfileFile } from '@crosscheck/core';
+import YAML from 'yaml';
 import type { z } from 'zod';
 import { editValidated, parseYamlWith } from '../io/edit-loop';
 import type { EditorHost } from '../io/editor';
 import type { ReviewSession } from '../io/session';
 
 export type ProfileRowStatus = ApprovalState | 'missing' | 'invalid';
-export interface ProfileRow { name: ProfileFile; status: ProfileRowStatus; error?: string }
+export interface ProfileRow { name: ProfileFile; status: ProfileRowStatus; error?: string; details: string[] }
 export interface ProfileOverview { rows: ProfileRow[]; crossCheck?: string }
 
 export async function loadProfileOverview(session: ReviewSession): Promise<ProfileOverview> {
-  const rows = (await readProfileFiles(session.artifacts)).map((file): ProfileRow => {
-    if (!file.present) return { name: file.name, status: 'missing' };
-    if (!file.ok) return { name: file.name, status: 'invalid', error: file.error };
-    return { name: file.name, status: session.approvals.state('profile', file.name, file.value) };
-  });
+  // 详情随已有受跟踪加载一起完成，Enter 不再发起后台读盘。
+  const rows: ProfileRow[] = [];
+  for (const file of await readProfileFiles(session.artifacts)) {
+    if (!file.present) { rows.push({ name: file.name, status: 'missing', details: ['文件不存在，请先编辑或运行 crosscheck init'] }); continue; }
+    if (!file.ok) {
+      const raw = (await session.artifacts.readBytes(`system/${file.name}`))?.toString('utf8') ?? '';
+      // 控制字符以可见转义呈现，避免非法原文被终端当成指令。
+      const safe = raw.replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
+      rows.push({ name: file.name, status: 'invalid', error: file.error, details: ['不合法，不能确认；以下为原文', file.error, ...safe.split(/\r?\n/)] });
+      continue;
+    }
+    rows.push({ name: file.name, status: session.approvals.state('profile', file.name, file.value), details: ['审批载荷（含 schema 默认值）', ...YAML.stringify(file.value, { lineWidth: 0 }).split('\n')] });
+  }
   let crossCheck: string | undefined;
   if (rows.every((row) => row.status === 'approved')) {
     try { await loadProfile(session.artifacts); }
