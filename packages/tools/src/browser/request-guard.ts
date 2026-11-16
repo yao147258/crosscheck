@@ -55,7 +55,7 @@ export interface GuardOptions {
   /** 守卫自身发出的 CDP 命令超时（毫秒） */
   commandTimeoutMs?: number;
   /** 发生不可恢复的守卫故障时调用；调用方必须终止浏览器进程 */
-  onFatal(reason: string): void;
+  onFatal(reason: string): void | Promise<void>;
   onEvent?(event: GuardEvent): void;
 }
 
@@ -102,6 +102,9 @@ export class GuardedCdpMux {
   private readonly hidden = new Set<string>();
   private queue: Promise<void> = Promise.resolve();
   private closed = false;
+  private shutdownPromise?: Promise<void>;
+  /** 终止未确认时不能主动断管道；仅暴露固定安全原因，不包含回调异常内容。 */
+  cleanupFailure?: string;
   private pwOnMessage?: (message: object) => void;
   private pwOnClose?: (reason?: string) => void;
   private readonly timeoutMs: number;
@@ -153,18 +156,30 @@ export class GuardedCdpMux {
     return transport;
   }
 
-  shutdown(reason: string, fatal = true): void {
-    if (this.closed) return;
+  shutdown(reason: string, fatal = true): Promise<void> {
+    if (this.shutdownPromise) return this.shutdownPromise;
     this.closed = true;
     for (const [, p] of this.pending) { clearTimeout(p.timer); p.reject(new Error(reason)); }
     this.pending.clear();
-    // 必须先终止浏览器进程再关闭连接：调试连接断开会释放仍在等待调试器的 target，
-    // 已实测（真实 Chromium）先断连会让暂停中的 worker 在被杀死前发出未受守卫的请求。
-    if (fatal) this.options.onFatal(reason);
-    try { this.channel.close(); } catch { /* 已关闭 */ }
-    const onclose = this.pwOnClose;
-    this.pwOnClose = undefined;
-    onclose?.(reason);
+    const disconnect = () => {
+      try { this.channel.close(); } catch { /* 已物理断开 */ }
+      const onclose = this.pwOnClose;
+      this.pwOnClose = undefined;
+      try { onclose?.(reason); } catch { /* 消费者异常不能逃逸清理 */ }
+    };
+    if (!fatal) { disconnect(); return this.shutdownPromise = Promise.resolve(); }
+    // 同步停止转发，但只有 session 确认受控终止后才能主动断 pipe。
+    // 回调失败意味着未能证明终止：保留 pipe，明确留下清理故障而非假成功。
+    try {
+      const confirmation = this.options.onFatal(reason);
+      this.shutdownPromise = Promise.resolve(confirmation).then(disconnect, () => {
+        this.cleanupFailure = '会话终止未确认，保留 CDP 管道';
+      });
+    } catch {
+      this.cleanupFailure = '会话终止未确认，保留 CDP 管道';
+      this.shutdownPromise = Promise.resolve();
+    }
+    return this.shutdownPromise;
   }
 
   private fatal(reason: string): void { this.shutdown(`请求守卫故障：${reason}`); }
@@ -308,7 +323,9 @@ export class GuardedCdpMux {
       try { decision = this.options.decide(paused); }
       catch { decision = { allow: false, reason: '策略检查异常' }; }
     }
-    this.options.onEvent?.({ kind: decision.allow ? 'allowed' : 'blocked', url: paused.url, method: paused.method, resourceType: paused.resourceType, targetType: paused.targetType, ...(decision.allow ? {} : { reason: decision.reason }) });
+    try {
+      this.options.onEvent?.({ kind: decision.allow ? 'allowed' : 'blocked', url: paused.url, method: paused.method, resourceType: paused.resourceType, targetType: paused.targetType, ...(decision.allow ? {} : { reason: decision.reason }) });
+    } catch { this.fatal('请求安全审计回调失败'); return; }
     const reply = decision.allow
       ? this.command('Fetch.continueRequest', { requestId: params.requestId }, sessionId)
       : this.command('Fetch.failRequest', { requestId: params.requestId, errorReason: 'BlockedByClient' }, sessionId);

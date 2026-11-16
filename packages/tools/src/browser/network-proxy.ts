@@ -12,7 +12,7 @@ export interface ProxyOptions {
   allowedHosts: string[];
   /** 只含主机端口，不包含路径、正文、凭证或原始请求。 */
   onEvent?(event: ProxyAuditEvent): void;
-  onFatal?(reason: string): void;
+  onFatal?(reason: string): void | Promise<void>;
 }
 interface Destination { hostname: string; port: string; authority: string; path: string }
 
@@ -54,6 +54,16 @@ export class LocalForwardProxy {
   private stopping?: Promise<void>;
   private starting?: Promise<number>;
   private readonly allowedHosts: string[];
+  private failure?: string;
+  get fatalReason(): string | undefined { return this.failure; }
+
+  private fail(reason: string): void {
+    if (this.failure) return;
+    this.failure = reason;
+    // 先使监听器与全部连接进入停止态，回调无论同步抛错或异步拒绝都不能阻止清理。
+    void this.stop();
+    try { Promise.resolve(this.options.onFatal?.(reason)).catch(() => {}); } catch { /* 固定故障已记录，清理已发起 */ }
+  }
   constructor(private readonly options: ProxyOptions) { this.allowedHosts = [...options.allowedHosts]; }
 
   start(): Promise<number> {
@@ -71,8 +81,8 @@ export class LocalForwardProxy {
         resolve((server.address() as { port: number }).port);
       });
     });
-    server.on('error', () => { this.options.onFatal?.('本地代理故障'); void this.stop(); });
-    server.on('close', () => { if (!this.stopping) this.options.onFatal?.('本地代理意外关闭'); });
+    server.on('error', () => this.fail('本地代理故障'));
+    server.on('close', () => { if (!this.stopping) this.fail('本地代理意外关闭'); });
     return this.starting;
   }
 
@@ -95,8 +105,10 @@ export class LocalForwardProxy {
     if (this.stopping) socket.destroy();
   }
   private allowed(target: { hostname: string; port: string }): boolean {
+    if (this.stopping || this.failure) return false;
     const allowed = hostPortAllowed(target.hostname, target.port, this.allowedHosts);
-    this.options.onEvent?.({ kind: allowed ? 'allowed' : 'blocked', hostname: target.hostname, port: target.port });
+    try { this.options.onEvent?.({ kind: allowed ? 'allowed' : 'blocked', hostname: target.hostname, port: target.port }); }
+    catch { this.fail('代理安全审计回调失败'); return false; }
     return allowed;
   }
   private reject(client: Duplex, status: number): void {
@@ -145,7 +157,7 @@ export class LocalForwardProxy {
     upstream.once('error', () => this.reject(client, 502));
     upstream.once('response', (res) => { res.resume(); this.reject(client, 502); });
     upstream.once('upgrade', (res, socket, upstreamHead) => {
-      client.write(`HTTP/1.1 101 Switching Protocols\r\n${Object.entries({ ...headers(res), connection: 'Upgrade', upgrade: 'websocket' }).map(([k, v]) => `${k}: ${v}`).join('\r\n')}\r\n\r\n`);
+      client.write(`HTTP/1.1 101 Switching Protocols\r\n${Object.entries({ ...headers(res), connection: 'Upgrade', upgrade: 'websocket' }).flatMap(([k, v]) => (Array.isArray(v) ? v : [v]).map((value) => `${k}: ${value}`)).join('\r\n')}\r\n\r\n`);
       if (head.length) socket.write(head);
       if (upstreamHead.length) client.write(upstreamHead);
       socket.pipe(client); client.pipe(socket);

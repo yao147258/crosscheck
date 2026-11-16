@@ -48,6 +48,7 @@ async function serve(host: string, handler: (req: IncomingMessage, body: string,
 let A: Svc, C: Svc, F: Svc, a: string, c: string, f: string, root: string;
 let session: GuardedBrowser;
 const events: GuardEvent[] = [];
+const proxyEvents: import('../src/browser/network-proxy').ProxyAuditEvent[] = [];
 const html = (res: import('node:http').ServerResponse, body: string) => { res.setHeader('content-type', 'text/html'); res.end(`<!doctype html><html><head><title>t</title></head><body>${body}</body></html>`); };
 
 beforeAll(async () => {
@@ -103,7 +104,7 @@ beforeAll(async () => {
   a = `http://127.0.0.1:${A.port}`;
   root = await mkdtemp(path.join(tmpdir(), 'cc-browser-'));
   const guardrails = GuardrailsSchema.parse({ allowedHosts: [`127.0.0.1:${A.port}`, `localhost:${C.port}`, `127.0.0.1:${C.port}`], forbidden: [{ method: 'POST', path: '/api/forbidden-write' }] });
-  session = await launchGuardedChromium({ allowedHosts: guardrails.allowedHosts, userDataDir: path.join(root, '.crosscheck', 'browser', 'profile'), guard: { decide: policyDecider(new RequestPolicy(guardrails)), onEvent: (e) => events.push(e) } });
+  session = await launchGuardedChromium({ allowedHosts: guardrails.allowedHosts, onProxyEvent: (event) => { proxyEvents.push(event); }, userDataDir: path.join(root, '.crosscheck', 'browser', 'profile'), guard: { decide: policyDecider(new RequestPolicy(guardrails)), onEvent: (e) => events.push(e) } });
 }, 60_000);
 
 afterAll(async () => {
@@ -235,6 +236,15 @@ describe.skipIf(skip)('真实 Chromium 发送前准入（loopback 计数）', { 
     await settle(2000);
     expect(A.hits.filter((h) => h.path === '/sw.js')).toHaveLength(0);
     expect(F.hits).toHaveLength(0);
+  });
+
+  it('实际 session 记录禁止 WS 的安全代理事件，不包含路径或请求头', async () => {
+    const p = await session.browser.newPage();
+    try {
+      await p.goto(`${a}/ws`); await settle(1000);
+      expect(proxyEvents).toContainEqual({ kind: 'blocked', hostname: '127.0.0.1', port: String(F.port) });
+      expect(proxyEvents.every((event) => Object.keys(event).sort().join(',') === 'hostname,kind,port')).toBe(true);
+    } finally { await p.close(); }
   });
 
   it('spawn 失败及时拒绝且清理代理，不等待不存在的 exit', async () => {

@@ -1,8 +1,8 @@
-import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
+import { spawn, execFile, type ChildProcess } from 'node:child_process';
 import { mkdir } from 'node:fs/promises';
 import type { Writable, Readable } from 'node:stream';
 import { chromium, type Browser } from 'playwright';
-import { LocalForwardProxy } from './network-proxy';
+import { LocalForwardProxy, type ProxyAuditEvent } from './network-proxy';
 import { GuardedCdpMux, type CdpChannel, type CdpMessage, type GuardOptions } from './request-guard';
 
 /** 与 Playwright 1.65 默认 Chromium 参数保持一致的子集，外加安全相关参数。 */
@@ -23,6 +23,8 @@ const BASE_ARGS = [
 
 export interface LaunchOptions {
   allowedHosts: string[];
+  /** 宿主安全审计，仅接收主机、端口和结果；回调抛错触发统一清理。 */
+  onProxyEvent?(event: ProxyAuditEvent): void;
   executablePath?: string;
   /** 必须位于本次 run 的 .crosscheck 临时子目录 */
   userDataDir: string;
@@ -67,10 +69,42 @@ function pipeChannel(proc: ChildProcess): CdpChannel {
   return channel;
 }
 
-function killTree(proc: ChildProcess): void {
-  if (proc.pid === undefined || proc.exitCode !== null || proc.signalCode !== null) return;
-  if (process.platform === 'win32') spawnSync('taskkill', ['/pid', String(proc.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true });
-  else { try { process.kill(-proc.pid, 'SIGKILL'); } catch { proc.kill('SIGKILL'); } }
+const CLEANUP_TIMEOUT_MS = 5000;
+
+function bounded<T>(operation: Promise<T>, reason: string): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(reason)), CLEANUP_TIMEOUT_MS);
+    operation.then((value) => { clearTimeout(timer); resolve(value); }, (error: unknown) => { clearTimeout(timer); reject(error); });
+  });
+}
+
+async function terminateTree(proc: ChildProcess): Promise<void> {
+  if (proc.pid === undefined) return; // spawn 未成功，没有受控进程。
+  if (process.platform === 'win32') {
+    // 已退出 PID 可能被重用；没有 Job Object 就无法可靠追踪后代，不能误杀或假报成功。
+    if (proc.exitCode !== null || proc.signalCode !== null) throw new Error('Windows 后代进程所有权未建立，无法确认清理');
+    await bounded(new Promise<void>((resolve, reject) => {
+      execFile('taskkill', ['/pid', String(proc.pid), '/T', '/F'], { timeout: CLEANUP_TIMEOUT_MS, windowsHide: true }, (error) => {
+        if (error) reject(new Error('浏览器进程树终止失败'));
+        else resolve();
+      });
+    }), '浏览器进程树终止超时');
+    return;
+  }
+  // detached 启动的进程组身份不依赖主进程是否已经退出，不能回退为仅杀根进程。
+  const group = -proc.pid;
+  try { process.kill(group, 'SIGKILL'); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw new Error('浏览器进程组终止失败'); }
+  await bounded(new Promise<void>((resolve, reject) => {
+    const deadline = Date.now() + CLEANUP_TIMEOUT_MS;
+    const probe = () => {
+      if (Date.now() >= deadline) { reject(new Error('浏览器进程组退出确认超时')); return; }
+      try { process.kill(group, 0); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code === 'ESRCH') { resolve(); return; } reject(new Error('无法核验浏览器进程组')); return; }
+      const timer = setTimeout(probe, 25); timer.unref();
+    };
+    probe();
+  }), '浏览器进程组退出确认超时');
 }
 
 export async function launchGuardedChromium(options: LaunchOptions): Promise<GuardedBrowser> {
@@ -81,23 +115,35 @@ export async function launchGuardedChromium(options: LaunchOptions): Promise<Gua
   let closing = false;
   let fatalReason: string | undefined;
   let closePromise: Promise<void> | undefined;
-  const proxy = new LocalForwardProxy({ allowedHosts: options.allowedHosts, onFatal(reason) {
-    if (!closing) fatalReason ??= reason;
-    if (proc) killTree(proc);
-    void close();
+  const proxy = new LocalForwardProxy({ allowedHosts: options.allowedHosts, onEvent: options.onProxyEvent, onFatal(reason) {
+    fatalReason ??= reason;
+    return close();
   } });
   let exited: Promise<void> = Promise.resolve();
+  let termination: Promise<void> | undefined;
+  const terminate = (): Promise<void> => termination ??= (async () => {
+    if (proc) await terminateTree(proc);
+    await bounded(exited, '浏览器退出等待超时');
+  })();
   const close = (): Promise<void> => {
     if (closePromise) return closePromise;
     closing = true;
     closePromise = (async () => {
-      // 保留守卫与调试 pipe 直到整个进程树终止，不能先断连释放暂停 target。
-      if (proc) killTree(proc);
-      await exited;
-      mux?.shutdown('会话关闭', false);
-      await proxy.stop();
+      try {
+        // 先停止转发但保留 pipe；mux 的回调只等待 terminate，不反向调用 close。
+        const shutting = mux?.shutdown('会话关闭');
+        await terminate();
+        await shutting;
+      } catch (error) {
+        fatalReason = '浏览器清理失败：' + (error instanceof Error ? error.message : '终止未确认');
+        throw error;
+      } finally { await proxy.stop(); }
     })();
     return closePromise;
+  };
+  const fault = (reason: string) => {
+    fatalReason ??= reason;
+    void close().catch(() => {}); // 失败通过 fatalReason、close 拒绝显式保留，事件回调不能逃逸。
   };
   try {
     const proxyPort = await proxy.start();
@@ -110,11 +156,17 @@ export async function launchGuardedChromium(options: LaunchOptions): Promise<Gua
     child.stderr?.resume();
     exited = new Promise<void>((resolve) => child.once('close', () => resolve()));
     await new Promise<void>((resolve, reject) => { child.once('spawn', resolve); child.once('error', reject); });
-    child.on('error', () => { if (!closing) { fatalReason ??= '浏览器进程故障'; void close(); } });
-    child.once('exit', () => { if (!closing) { fatalReason ??= '浏览器意外退出'; void close(); } });
+    child.on('error', () => { if (!closing) fault('浏览器进程故障'); });
+    child.once('exit', () => { if (!closing) fault('浏览器意外退出'); });
     mux = new GuardedCdpMux(pipeChannel(child), {
       ...options.guard,
-      onFatal(reason) { if (!closing) fatalReason ??= reason; killTree(child); void close(); },
+      async onFatal(reason) {
+        if (!closing) fatalReason ??= reason;
+        closing = true;
+        try { await terminate(); }
+        catch (error) { fatalReason = '浏览器清理失败：' + (error instanceof Error ? error.message : '终止未确认'); throw error; }
+        finally { await proxy.stop(); }
+      },
     });
     await mux.init();
     const browser = await chromium.connectOverCDP(mux.playwrightTransport());

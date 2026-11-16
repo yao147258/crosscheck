@@ -24,7 +24,7 @@ const policy = new RequestPolicy(GuardrailsSchema.parse({ allowedHosts: ['127.0.
 function setup(timeout = 1000) {
   const channel = new FakeChannel();
   const fatal: string[] = [];
-  const mux = new GuardedCdpMux(channel, { decide: policyDecider(policy), onFatal: (r) => fatal.push(r), commandTimeoutMs: timeout });
+  const mux = new GuardedCdpMux(channel, { decide: policyDecider(policy), onFatal: (r) => { fatal.push(r); }, commandTimeoutMs: timeout });
   const transport = mux.playwrightTransport();
   const toPw: CdpMessage[] = [];
   transport.onmessage = (m) => toPw.push(m as CdpMessage);
@@ -75,7 +75,7 @@ describe('GuardedCdpMux（假通道）', () => {
     transport.send({ id: 1, method: 'Runtime.runIfWaitingForDebugger', sessionId: 'unknown', params: {} });
     expect(channel.last('Runtime.runIfWaitingForDebugger')).toBeUndefined();
     expect(fatal).toHaveLength(1);
-    expect(channel.closed).toBe(true);
+    await tick(); expect(channel.closed).toBe(true);
   });
 
   it('Service Worker 等不受支持的 target 不交给 Playwright 且被关闭', async () => {
@@ -122,6 +122,36 @@ describe('GuardedCdpMux（假通道）', () => {
       transport.send({ id: 1, method: 'Network.setExtraHTTPHeaders', params: { headers: { authorization: 'secret-test' } } });
       expect(channel.last('Network.setExtraHTTPHeaders')).toBeDefined(); expect(log).not.toHaveBeenCalled();
     } finally { log.mockRestore(); vi.unstubAllEnvs(); }
+  });
+
+  it('fatal 等待会话确认终止，延迟期间停止转发但保持 pipe', async () => {
+    const channel = new FakeChannel(); let confirm!: () => void;
+    const mux = new GuardedCdpMux(channel, { decide: () => ({ allow: true }), onFatal: () => new Promise<void>((r) => { confirm = r; }) });
+    const transport = mux.playwrightTransport();
+    const closing = mux.shutdown('故障');
+    expect(mux.isClosed).toBe(true); expect(channel.closed).toBe(false);
+    transport.send({ id: 1, method: 'Runtime.runIfWaitingForDebugger', sessionId: 's' });
+    expect(channel.sent).toHaveLength(0);
+    confirm(); await closing; expect(channel.closed).toBe(true);
+  });
+
+  it.each(['同步抛错', '异步拒绝'])('fatal 回调%s时保留 pipe 并记录清理失败，不逃逸', async (mode) => {
+    const channel = new FakeChannel();
+    const mux = new GuardedCdpMux(channel, { decide: () => ({ allow: true }), onFatal: () => {
+      if (mode === '同步抛错') throw new Error('秘密不能写入故障原因');
+      return Promise.reject(new Error('秘密不能写入故障原因'));
+    } });
+    await expect(mux.shutdown('故障')).resolves.toBeUndefined();
+    expect(channel.closed).toBe(false); expect(mux.cleanupFailure).toBe('会话终止未确认，保留 CDP 管道');
+  });
+
+  it('Fetch 审计抛错不放行请求，进入统一 fatal', async () => {
+    const channel = new FakeChannel(); const fatal: string[] = [];
+    const mux = new GuardedCdpMux(channel, { decide: () => ({ allow: true }), onEvent() { throw new Error('秘密'); }, onFatal(r) { fatal.push(r); } });
+    channel.emit(attach('s')); await tick();
+    for (const method of ['Fetch.enable', 'Target.setAutoAttach']) { channel.reply(channel.last(method)); await tick(); }
+    expect(() => channel.emit({ method: 'Fetch.requestPaused', sessionId: 's', params: { requestId: 'r', resourceType: 'Fetch', request: { url: 'http://127.0.0.1:1/' } } })).not.toThrow();
+    await tick(); expect(channel.last('Fetch.continueRequest')).toBeUndefined(); expect(mux.isClosed).toBe(true); expect(fatal).toEqual(['请求守卫故障：请求安全审计回调失败']);
   });
 
   it('通道断开触发 fail-closed', () => {
