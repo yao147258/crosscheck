@@ -5,6 +5,7 @@ import { ArtifactError, ArtifactStore, CaseIdSchema, RuntimeIdSchema, EvidenceRe
 import type { EvidenceRedactor } from './redactor';
 import { sanitizeHar } from './sanitize-har';
 import { sanitizeDom, type DomNode } from './sanitize-dom';
+import { readTrustedCapture } from '../browser/capture';
 
 /** 载荷真实存在且验证通过，但响应本身不能提供完整 JSON 变量。 */
 export class HttpResponseUnavailableError extends Error {
@@ -16,9 +17,6 @@ type Meta = { actionId: string; phase: EvidenceRecord['phase'] };
 
 // 同进程共享索引队列；跨进程由宿主在整个运行期间持有 RunStore 锁。
 const queues = new Map<string, Promise<void>>();
-
-/** 截图生产者须在 Task5 证明所有敏感区域已遮蔽，当前不提供截图登记。 */
-export interface SafeCaptureProtocol { readonly kind: 'masked-capture'; readonly complete: true; }
 
 /** 同一进程按根目录和 attempt 串行登记；跨进程调用方须在采集至提交的整个期间持有 RunStore.withLock。 */
 export class EvidenceStore {
@@ -34,7 +32,7 @@ export class EvidenceStore {
   /** 仅宿主在认证成功且全部动态凭证已登记后调用，不回写先前省略记录。 */
   allowAuthenticatedPayloads(): void { this.payloadsOmitted = false; }
   get omittingPayloads(): boolean { return this.payloadsOmitted; }
-  private async save(type: EvidenceRecord['type'], mime: string, content: string, meta: Meta): Promise<EvidenceRecord> {
+  private async save(type: EvidenceRecord['type'], mime: string, content: string | Buffer, meta: Meta): Promise<EvidenceRecord> {
     if (this.payloadsOmitted) {
       if (type === 'network') content = JSON.stringify(sanitizeHar({ log: { entries: [{ request: { method: 'OMITTED', url: 'about:blank' }, response: { status: 0, content: { mimeType: 'text/plain', omitted: true } }, failure: { kind: 'omitted', message: '动态身份认证前载荷已省略，不能作为完整观察' } }] } }, this.redactor));
       else if (type === 'console') content = '[omitted: unauthenticated payload]';
@@ -55,8 +53,8 @@ export class EvidenceStore {
     });
     const settled = task.then(() => {}, () => {});
     queues.set(queueKey, settled);
-    void settled.then(() => { if (queues.get(queueKey) === settled) queues.delete(queueKey); });
-    return task;
+    try { return await task; }
+    finally { if (queues.get(queueKey) === settled) queues.delete(queueKey); }
   }
   async saveText(type: 'console' | 'db', text: string, meta: Meta): Promise<EvidenceRecord> {
     if (type === 'db') {
@@ -91,15 +89,16 @@ export class EvidenceStore {
     catch { throw new HttpResponseUnavailableError(); }
   }
   /** 仅宿主 presenter 使用：从当前归属索引按 ID 读取，不接受路径，不返回审计元数据。 */
-  async readTextEvidence(id: string): Promise<{ id: string; type: 'network' | 'console' | 'db'; text: string; sourceIncomplete: boolean }> {
+  async readTextEvidence(id: string): Promise<{ id: string; type: 'network' | 'console' | 'db' | 'dom'; text: string; sourceIncomplete: boolean }> {
     const index = await this.artifacts.readJson(`${this.prefix}/evidence/index.json`, EvidenceRecordSchema.array());
     const matches = index?.filter(record => record.id === id) ?? [];
     const record = matches[0];
-    if (matches.length !== 1 || !record || !['network', 'console', 'db'].includes(record.type)) throw new ArtifactError('文本证据不存在或类型不符');
+    if (matches.length !== 1 || !record || !['network', 'console', 'db', 'dom'].includes(record.type)) throw new ArtifactError('文本证据不存在或类型不符');
     const bytes = await this.verify(record);
     // 密钥可能在落盘后才登记；HAR 内嵌正文须按内容类型解析、清洗再序列化。
-    if (record.type === 'console') return { id, type: 'console', text: this.redactor.text(bytes.toString('utf8')), sourceIncomplete: bytes.toString('utf8') === '[omitted: unauthenticated payload]' };
+    if (record.type === 'console') return { id, type: 'console', text: this.redactor.text(bytes.toString('utf8')), sourceIncomplete: bytes.toString('utf8').includes('[omitted:') };
     const payload: unknown = JSON.parse(bytes.toString('utf8'));
+    if (record.type === 'dom') return { id, type: 'dom', text: JSON.stringify(sanitizeDom(payload as DomNode[], this.redactor)), sourceIncomplete: JSON.stringify(payload).includes('"incomplete":true') };
     if (record.type === 'network') {
       const har = sanitizeHar(payload, this.redactor);
       // 只读取可信 HAR 正文信封的状态，不递归猜业务 JSON 中同名字段。
@@ -112,7 +111,18 @@ export class EvidenceStore {
     const sourceIncomplete = !envelope || envelope.status !== 'success' || envelope.sent !== true || !Array.isArray(envelope.rows) || envelope.truncated !== false;
     return { id, type: 'db', text: JSON.stringify(this.redactor.value(payload)), sourceIncomplete };
   }
-  async saveScreenshot(_capture: unknown, _meta: Meta): Promise<never> { throw new ArtifactError('截图遮蔽尚未由可信采集器实现'); }
+  async saveScreenshot(capture: unknown, meta: Meta): Promise<EvidenceRecord> {
+    return this.save('screenshot', 'image/png', readTrustedCapture(capture, this.redactor), meta);
+  }
+  async readScreenshotEvidence(id: string): Promise<{ id: string; type: 'screenshot'; bytes: Buffer; mediaType: 'image/png' }> {
+    const index = await this.artifacts.readJson(`${this.prefix}/evidence/index.json`, EvidenceRecordSchema.array());
+    const matches = index?.filter(record => record.id === id) ?? [];
+    const record = matches[0];
+    if (matches.length !== 1 || !record || record.type !== 'screenshot' || record.mime !== 'image/png') throw new ArtifactError('截图证据不存在或类型不符');
+    const bytes = await this.verify(record);
+    if (!bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) throw new ArtifactError('截图格式不合法');
+    return { id, type: 'screenshot', bytes, mediaType: 'image/png' };
+  }
   sanitizeTrace(event: TraceEvent): TraceEvent { return this.redactor.trace(event); }
   async verify(record: EvidenceRecord): Promise<Buffer> {
     if (!EvidenceRecordSchema.safeParse(record).success || !record.redacted || record.runId !== this.context.runId || record.caseId !== this.context.caseId || record.attempt !== this.context.attempt || record.path !== evidencePath(this.prefix, record.id, record.mime)) throw new ArtifactError('证据归属或路径不合法');

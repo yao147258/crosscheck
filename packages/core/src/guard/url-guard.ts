@@ -51,22 +51,21 @@ export function isValidHostEntry(entry: string): boolean {
   return parseHostEntry(value.startsWith('*.') ? value.slice(2) : value) !== null;
 }
 
-/** 协议无关的唯一主机/端口匹配器；null 不推导默认端口。 */
-export function hostPortAllowed(hostname: string, port: string | null, entries: string[]): boolean {
-  if (!isValidHostEntry(hostname)) return false;
-  const actual = parseHostEntry(hostname);
-  if (!actual || actual.port !== null || hostname.startsWith('*.')) return false;
-  return entries.some((entry) => {
-    const trimmed = entry.trim();
-    if (!isValidHostEntry(trimmed)) return false;
-    if (trimmed.startsWith('*.')) return actual.hostname.endsWith(trimmed.slice(1).toLowerCase());
-    const parsed = parseHostEntry(trimmed);
-    return parsed !== null && actual.hostname === parsed.hostname && (parsed.port === null || port === parsed.port);
-  });
-}
-
 function hostAllowed(url: URL, entry: string): boolean {
-  return hostPortAllowed(url.hostname, url.port || (url.protocol === 'https:' ? '443' : '80'), [entry]);
+  const trimmed = entry.trim();
+  if (!isValidHostEntry(trimmed)) return false;
+  if (trimmed.toLowerCase().startsWith('*.')) {
+    const suffix = trimmed.slice(1).toLowerCase();
+    return url.hostname.toLowerCase().endsWith(suffix);
+  }
+  const parsed = parseHostEntry(trimmed);
+  if (!parsed) return false;
+  if (url.hostname.toLowerCase() !== parsed.hostname) return false;
+  if (parsed.port !== null) {
+    const actualPort = url.port || (url.protocol === 'https:' ? '443' : '80');
+    if (actualPort !== parsed.port) return false;
+  }
+  return true;
 }
 
 /**

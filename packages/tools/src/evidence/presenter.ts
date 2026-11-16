@@ -11,6 +11,7 @@ export function createEvidencePresenter(store: EvidenceStore, options: { maxText
       context.signal.throwIfAborted();
       const evidence = await store.readTextEvidence(id);
       context.signal.throwIfAborted();
+      if (evidence.type === 'dom') throw new Error('DOM 呈现须由浏览器证据适配器接入');
       const bounded = boundedText(evidence.text, maxTextChars);
       output.push({ id: evidence.id, type: evidence.type, text: bounded.text, truncated: evidence.sourceIncomplete || bounded.truncated });
     }

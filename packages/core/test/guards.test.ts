@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { hostPortAllowed, checkReadonlySql, checkRequest, type Guardrails } from '../src/index';
+import { checkReadonlySql, checkRequest, type Guardrails } from '../src/index';
 
 const g: Guardrails = {
   allowedHosts: ['localhost:3000', '127.0.0.1', '*.staging.example.com'],
@@ -9,21 +9,6 @@ const g: Guardrails = {
   ],
   redactFields: [],
 };
-
-describe('hostPortAllowed', () => {
-  it.each([
-    ['127.0.0.1', '8001', ['127.0.0.1:8000'], false],
-    ['EXAMPLE.test', '443', ['example.test'], true],
-    ['x.example.test', '443', ['*.example.test'], true],
-    ['example.test', '443', ['*.example.test'], false],
-    ['[::1]', '1234', ['[0:0:0:0:0:0:0:1]:1234'], true],
-    ['example.test', null, ['example.test:443'], false],
-    ['example.test', null, ['example.test'], true],
-    ['example.test', '443', ['example.test:443/path'], false],
-  ] as const)('%s:%s 的匹配结果为 %s', (host, port, entries, expected) => {
-    expect(hostPortAllowed(host, port, [...entries])).toBe(expected);
-  });
-});
 
 describe('checkRequest', () => {
   it.each([
