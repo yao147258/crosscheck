@@ -10,6 +10,7 @@
     "@crosscheck/agent": "workspace:^",
     "@crosscheck/core": "workspace:^",
     "pg": "8.23.1",
+    "playwright": "1.65.0",
     "zod": "^4.6.7"
   },
   "devDependencies": {
