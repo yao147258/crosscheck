@@ -106,8 +106,8 @@ export class EvidenceStore {
     if (record.type === 'console') return { id, type: 'console', text: this.redactor.text(bytes.toString('utf8')), sourceIncomplete: bytes.toString('utf8').includes('[omitted:') };
     const payload: unknown = JSON.parse(bytes.toString('utf8'));
     if (record.type === 'dom') {
-      const clean = sanitizeDom(payload as DomNode[], this.redactor);
-      const missing = (nodes: DomNode[]): boolean => nodes.some(node => node.omitted === true || node.incomplete === true || !!node.children && missing(node.children));
+      const clean = sanitizeDom(payload as DomNode[], this.redactor, true);
+      const missing = (nodes: DomNode[]): boolean => nodes.some(node => node.omitted === true && node.omissionReason !== 'redacted-value' || node.incomplete === true || !!node.children && missing(node.children));
       return { id, type: 'dom', text: JSON.stringify(clean), sourceIncomplete: missing(clean as DomNode[]) };
     }
     if (record.type === 'network') {

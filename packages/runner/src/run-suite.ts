@@ -1,6 +1,6 @@
 import { ArtifactError, GateError, exitCodeFor, loadVerifiedRunInputs, type ArtifactStore, type RunResult, type RunInputOptions } from '@crosscheck/core';
 import type { ResolveOptions, ResilienceOptions } from '@crosscheck/models';
-import { type HttpTransport, type PgConnection } from '@crosscheck/tools';
+import { type BrowserHostOptions, type HttpTransport, type PgConnection } from '@crosscheck/tools';
 import { RunStore } from './store/run-store';
 import { executeCase } from './run-case';
 import { executionFingerprint, findResume, snapshot, verifySnapshot } from './resume';
@@ -13,6 +13,7 @@ export interface RunSuiteOptions extends RunInputOptions {
   modelOptions?: ResolveOptions;
   resilience?: ResilienceOptions;
   transport?: HttpTransport;
+  launchBrowser?: BrowserHostOptions['launch'];
   env?: Record<string, string | undefined>;
   createConnection?: (url: string) => PgConnection;
 }

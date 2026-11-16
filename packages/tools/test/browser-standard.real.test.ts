@@ -120,6 +120,23 @@ describe.skipIf(skip)('标准 Playwright 真实表单与可信采证', () => {
       expect(pixel(png, 490, 5)).toEqual([255, 0, 255]); expect(pixel(png, 490, 45)).toEqual([0, 204, 0]);
     } finally { await s.host.close(); await rm(s.root, { recursive: true, force: true }); }
   });
+  it('控件只隐藏值并保留完整结构；业务区域、批准遮罩与超限仍不完整', async () => {
+    const s = await setup();
+    try {
+      const session = await s.host.getSession(s.signal);
+      for (const [tail, incomplete] of [['', false], ['<img src="/image">', true], ['<canvas></canvas>', true], ['<div id="mask">遮罩</div>', true], ['<div id="mask"><input value="ANCESTOR_SENTINEL"></div>', true], [`<p>${'x'.repeat(2100)}</p>`, true]] as const) {
+        await session.page.setContent(`<label>名称<input value="INPUT_VALUE_SENTINEL"></label><input type="password" name="password" value="PASSWORD_SENTINEL"><textarea>TEXTAREA_SENTINEL</textarea><select><option>OPTION_SENTINEL</option></select><p>保存成功</p>${tail}`);
+        const captured = await capturePage(session.page, tools.createEvidenceRedactor(), ['#mask']);
+        const record = await s.store.saveDom(captured.dom, s.meta());
+        const dom = await s.store.readTextEvidence(record.id);
+        expect(dom.sourceIncomplete).toBe(incomplete);
+        if (!incomplete) { expect(dom.text).toContain('redacted-value'); expect(dom.text).toContain('locator'); expect(dom.text).toContain('保存成功'); }
+        expect(dom.text).not.toMatch(/INPUT_VALUE_SENTINEL|PASSWORD_SENTINEL|TEXTAREA_SENTINEL|OPTION_SENTINEL/);
+      }
+      const forged = await s.store.saveDom([{ tag: 'div', sensitive: true, omissionReason: 'redacted-value' } as any, { tag: 'input', sensitive: true, omissionReason: 'redacted-value' } as any], s.meta());
+      expect((await s.store.readTextEvidence(forged.id)).sourceIncomplete).toBe(true);
+    } finally { await s.host.close(); await rm(s.root, { recursive: true, force: true }); }
+  });
   it('每个宿主的 context 独立，不共享 Cookie，禁止自动下载', async () => {
     const s = await setup(), t = await setup();
     try {

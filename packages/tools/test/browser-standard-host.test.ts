@@ -10,7 +10,7 @@ import * as capture from '../src/browser/capture';
 const meta = { actionId: 'a-1', phase: 'execution' as const };
 function gate<T = void>() { let resolve!: (value: T) => void; const promise = new Promise<T>(r => { resolve = r; }); return { promise, resolve }; }
 function fixture(close: () => Promise<void>) {
-  const context = Object.assign(new EventEmitter(), { setDefaultTimeout() {}, setDefaultNavigationTimeout() {} });
+  const context = Object.assign(new EventEmitter(), { setDefaultTimeout() {}, setDefaultNavigationTimeout() {}, cookies: async () => [] });
   const store = { saveHar: vi.fn(async () => ({ id: 'network' })), saveText: vi.fn(async () => ({ id: 'console' })), saveDom: vi.fn(async () => ({ id: 'dom' })), saveScreenshot: vi.fn(async () => ({ id: 'png' })) };
   const page = { isClosed: () => false, url: () => 'http://localhost/', locator: () => ({ click: async () => {} }) };
   const session = { context, page, close } as unknown as BrowserSession;

@@ -29,9 +29,9 @@ it.each([
  {kind:'form',environment:'dev',actions:[{kind:'click',selector:'button'}]},
  {kind:'replay',environment:'dev',actions:[{kind:'click',selector:'button'}]},
  {kind:'token',env:'TOKEN',inject:{kind:'storage',storage:'local',name:'token'}},
-])('浏览器暂缓的身份明确拒绝且零网络 %j',async actor=>{
+])('未注入浏览器适配器的身份明确拒绝且零网络 %j',async actor=>{
  const {host,requests}=await setup({TOKEN:'dynamic-secret'});
- await expect(host.authenticate(actor as any,meta,signal())).rejects.toMatchObject({kind:'blocked',message:expect.stringContaining('浏览器工具暂缓')});
+ await expect(host.authenticate(actor as any,meta,signal())).rejects.toMatchObject({kind:'blocked',message:expect.stringContaining('浏览器认证适配器')});
  expect(requests).toEqual([]);
 });
 it.each([

@@ -2,6 +2,9 @@
 import type { Page } from 'playwright';
 import { ArtifactError } from '@crosscheck/core';
 import type { DomNode } from '../evidence/sanitize-dom';
+
+const controls = new WeakSet<DomNode>();
+export function isCapturedControl(node: DomNode): boolean { return controls.has(node); }
 import type { EvidenceRedactor } from '../evidence/redactor';
 
 export interface MaskedCapture { readonly kind: 'masked-capture' }
@@ -66,8 +69,17 @@ export async function capturePage(page: Page, redactor: EvidenceRedactor, screen
     const text = aggregate(i);
     if (text.length > 64000 || sensitiveText(text)) omit(i);
   }
-  const dom: DomNode[] = nodes.flatMap((n, i) => hidden.has(i) && !roots.has(i) ? [] : [{ tag: n.tag, type: n.type, name: n.name, text: n.text.trim(), value: n.value,
-    locator: { strategy: 'css' as const, value: n.selector }, sensitive: hidden.has(i), ...(hidden.has(i) ? { omissionReason: n.incomplete ? 'limit' as const : 'masked-region' as const } : {}) }]);
+  const dom: DomNode[] = nodes.flatMap((n, i) => {
+    if (hidden.has(i) && !roots.has(i)) return [];
+    const control = ['input', 'textarea', 'select'].includes(n.tag) && roots.has(i) && !n.approved && !n.incomplete
+      && ![...roots].some(other => other !== i && n.selector.startsWith(nodes[other]!.selector + ' > '));
+    const node: DomNode = { tag: n.tag, type: n.type, name: n.name,
+      ...(control ? {} : { text: n.text.trim(), value: n.value }),
+      locator: { strategy: 'css', value: n.selector }, sensitive: hidden.has(i),
+      ...(hidden.has(i) ? { omissionReason: n.incomplete ? 'limit' : control ? 'redacted-value' : 'masked-region' } : {}) };
+    if (control) controls.add(node);
+    return [node];
+  });
   const masks = [...roots].filter(i => ![...roots].some(other => other !== i && nodes[i]!.selector.startsWith(nodes[other]!.selector + ' > '))).map(i => nodes[i]!.selector);
   if (snapshot.overflow) { masks.push('html'); dom.push({ tag: 'observation', incomplete: true, omissionReason: 'limit' }); }
   // mask 矩形不一定覆盖 overflow 字形；截图临时样式同时隐藏整个敏感子树，包含显式恢复 visible 的后代。

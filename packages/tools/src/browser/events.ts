@@ -24,6 +24,14 @@ export class BrowserEvents {
   }
   private requestData(req: Request) {
     const url = req.url();
+    for (const [name, value] of Object.entries(req.headers())) {
+      if (/^(?:authorization|proxy-authorization|x-api-key|x-auth-token)$/i.test(name)) {
+        this.redactor.addSecrets([value]);
+        const component = /^\S+\s+(.+)$/.exec(value)?.[1];
+        if (component) this.redactor.addSecrets([component]);
+      }
+      if (name.toLowerCase() === 'cookie') this.redactor.addSecrets(value.split(';').map(pair => pair.slice(pair.indexOf('=') + 1).trim()).filter(Boolean));
+    }
     return { method: req.method(), url: url.length <= TEXT_LIMIT ? this.redactor.url(url) : 'about:blank#omitted-url-limit',
       headers: [], cookies: [], queryString: [], ...(!['GET', 'HEAD'].includes(req.method()) ? { postData: { mimeType: req.headers()['content-type'] ?? '', omitted: true } } : {}) };
   }

@@ -10,6 +10,7 @@ export * from './db/postgres';
 export * from './db/tools';
 export * from './command/runner';
 export * from './auth/host';
+export * from './auth/browser';
 export * from './fixtures/host';
 export * from './fixtures/tools';
 export * from './profile/tools';

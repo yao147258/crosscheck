@@ -5,6 +5,7 @@ import { RequestPolicy, type HeaderPairs, type PolicyRequest } from './policy';
 
 export interface HttpRequest extends PolicyRequest { signal?: AbortSignal }
 export type HttpTransport = (url: string, init: RequestInit) => Promise<Response>;
+export type HttpIdentity = { headers: (url: string) => Promise<HeaderPairs>; names: string[] };
 export interface HttpClientOptions { maxBytes?: number; transport?: HttpTransport; authHeaderNames?: string[] }
 export type EvidenceMeta = { actionId: string; phase: EvidenceRecord['phase'] };
 export interface HttpResult { summary: { status: number; url: string }; evidenceIds: string[] }
@@ -28,7 +29,7 @@ export class HttpClient {
     const har = { log: { version: '1.2', creator: { name: 'crosscheck', version: '1' }, entries: [{ startedDateTime: new Date().toISOString(), time: 0, request: { method: '', url: '', headers: [], cookies: [], queryString: [] }, response: { status: 0, headers: [], cookies: [], content: { mimeType: '', truncated: true } }, failure: { kind: 'blocked', message: '模型输入未通过验证', stage: 'validation', sent: false } }] } };
     return [(await this.evidence.saveHar(har, meta)).id];
   }
-  async request(input: HttpRequest, meta: EvidenceMeta, authHeaders: HeaderPairs = []): Promise<HttpResult> {
+  async request(input: HttpRequest, meta: EvidenceMeta, authHeaders: HeaderPairs | HttpIdentity = []): Promise<HttpResult> {
     const controller = new AbortController();
     const abort = () => controller.abort();
     if (input.signal?.aborted) controller.abort();
@@ -38,13 +39,23 @@ export class HttpClient {
     let pending = false;
     let persisting = false;
     let failureKind: HttpOperationError['kind'] = 'blocked';
+    let resolvingIdentity = false;
     try {
       let url = input.url, method = currentMethod, body = input.body;
-      const authNames = new Set([...this.authNames, ...authHeaders.map(([name]) => name.trim().toLowerCase())]);
-      let headers: HeaderPairs = [...(input.headers ?? []), ...authHeaders].filter(([k]) => k.trim().toLowerCase() !== 'host');
+      const fixed = Array.isArray(authHeaders) ? authHeaders : [];
+      const identity = Array.isArray(authHeaders) ? undefined : authHeaders;
+      const identityNames = new Set(identity?.names.map(name => name.toLowerCase()) ?? []);
+      const authNames = new Set([...this.authNames, ...fixed.map(([name]) => name.trim().toLowerCase()), ...identityNames]);
+      let headers: HeaderPairs = [...(input.headers ?? []), ...fixed].filter(([k]) => k.trim().toLowerCase() !== 'host');
       const seen = new Set<string>();
       for (let hop = 0; hop <= 10; hop++) {
         currentUrl = url; currentMethod = method;
+        if (identity) {
+          resolvingIdentity = true;
+          const resolved = await identity.headers(url);
+          resolvingIdentity = false;
+          headers = [...headers.filter(([name]) => !identityNames.has(name.toLowerCase())), ...resolved];
+        }
         const checked = this.policy.check({ url, method, headers, ...(body !== undefined ? { body } : {}) });
         if (!checked.ok) throw new Error(this.redactor.text(checked.reason ?? '请求被拒绝'));
         const parsed = new URL(url);
@@ -92,7 +103,7 @@ export class HttpClient {
       }
       throw new Error('重定向次数超限');
     } catch (error) {
-      if (persisting) throw error;
+      if (persisting || resolvingIdentity) throw error;
       const kind = input.signal?.aborted ? 'cancelled' : failureKind;
       if (pending || kind === 'blocked') {
         const har = { log: { version: '1.2', creator: { name: 'crosscheck', version: '1' }, entries: [{ startedDateTime: new Date().toISOString(), time: 0, request: { method: currentMethod, url: currentUrl, headers: [], cookies: [], queryString: [] }, response: { status: 0, headers: [], cookies: [], content: { mimeType: '', truncated: true } }, failure: { kind, message: kind === 'cancelled' ? '请求已取消' : '网络请求失败' } }] } };

@@ -188,10 +188,10 @@ it('URL 不同用户名映射到相同实际账号也必须拒绝，两个专属
  await expect(host.execute('sql',meta,signal())).rejects.toMatchObject({kind:'blocked'});
  expect(pg.calls.some(c=>c.text.startsWith('INSERT'))).toBe(false);expect(pg.closed).toBe(true);expect(readPg.closed).toBe(true);
 });
-it.each(['form','replay','storage'])('不支持的身份在 reset 前拒绝，准备流程零网络 %s',async kind=>{
+it.each(['form','replay','storage'])('reset 和夹具先执行，无适配器的浏览器身份在 auth 明确拒绝 %s',async kind=>{
  const p=profile();p['auth.yaml'].actors.guest=kind==='storage'?{kind:'token',env:'TOKEN',inject:{kind:'storage',storage:'local',name:'token'}}:{kind:kind as 'form'|'replay',environment:'dev',actions:[{kind:'click',selector:'button'}]};
  const {host,events}=await setup(p);
- await expect(host.prepare(['seed'],'guest',()=>meta,signal())).rejects.toMatchObject({kind:'blocked',message:expect.stringContaining('浏览器工具暂缓')});expect(events).toEqual([]);
+ await expect(host.prepare(['seed'],'guest',()=>meta,signal())).rejects.toMatchObject({kind:'blocked',message:expect.stringContaining('浏览器认证适配器')});expect(events).toEqual(['/reset','/seed','auth']);
 });
 it('HTTP 缺失/损坏完成证据和磁盘失败不能伪装夹具业务失败',async()=>{
  const {host,store}=await setup();

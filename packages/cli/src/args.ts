@@ -6,7 +6,8 @@ export const HELP = `Crosscheck 本地验收 CLI（Node >=22.12）
   crosscheck --help
 重复 module/case 各自为集合，两类筛选取交集。未知/空选择不视为通过。
 report 仅读取历史快照与真实证据，离线重建 JSON/JUnit/HTML。
-不自动确认输入；浏览器工具暂缓。只有 --open 会打开系统默认浏览器。
+不自动确认输入；AI 可按需使用 Playwright Chromium 操作测试页面（需安装 Chromium）；HTTP-only 不启动浏览器。
+--open 仅打开系统默认浏览器查看报告；测试浏览器不提供网络隔离保证。
 退出码：0 全 PASS；1 含 FAIL（疑似 bug 待人工）；2 阻断/不确定/空/中断/参数错误；3 宿主错误优先。`;
 export function parseArgs(args: string[]): CliArgs {
   if (args.length === 1 && ['--help', '-h', 'help'].includes(args[0]!)) return { command: 'help', project: process.cwd(), open: false };
