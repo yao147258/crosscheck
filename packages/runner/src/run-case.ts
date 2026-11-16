@@ -31,7 +31,10 @@ export async function executeCase(artifacts: ArtifactStore, run: RunStore, input
   const client = new HttpClient(new RequestPolicy(input.profile['guardrails.yaml']), store, redactor, { transport: options.transport });
   const environment = input.profile['environments.yaml'].environments[input.environment]!;
   const browser = new BrowserHost({ baseURL: environment.baseURL, evidence: store, redactor, env, screenshotMasks: input.profile['guardrails.yaml'].screenshotMasks, launch: options.launchBrowser });
-  const browserAuth = new BrowserAuthenticationAdapter(browser, environment.baseURL, redactor, (action, _meta, actionSignal) => audit('browser_action', action, () => browser.perform(action, nextMeta(), actionSignal)));
+  const browserAuth = new BrowserAuthenticationAdapter(browser, environment.baseURL, redactor, (action, _meta, actionSignal) => audit('browser_action', action, () => {
+    budget.recordStep();
+    return browser.perform(action, nextMeta(), actionSignal);
+  }));
   const auth = new AuthenticationHost(environment.baseURL, client, commands, store, redactor, { env, browser: browserAuth });
   const fixtures = new FixtureHost(input.profile, input.environment, { client, commands, auth, store, redactor, env, createConnection: options.createConnection });
   const reader = new PostgresReader(input.profile['data-model.yaml'], store, redactor, { env, createConnection: options.createConnection });
@@ -129,7 +132,10 @@ export async function executeCase(artifacts: ArtifactStore, run: RunStore, input
   };
   const wrap = (tools: AgentTool[]): AgentTool[] => tools.map(tool => ({ ...tool, execute: async (value: unknown, ctx: { signal: AbortSignal }) => {
     try {
-      const out = await audit(tool.name, value, () => tool.execute(value, { signal: AbortSignal.any([signal, ctx.signal]) }));
+      const out = await audit(tool.name, value, () => {
+        if (phase === 'preparation' && tool.name === 'browser_action' && store.omittingPayloads) throw new PreparationBlocked('动态身份认证前不支持浏览器现场准备；不能采集未知身份载荷');
+        return tool.execute(value, { signal: AbortSignal.any([signal, ctx.signal]) });
+      });
       await refresh();
       if (phase === 'preparation' && tool.name === 'browser_action' && out && typeof out === 'object' && !('error' in out) && 'evidenceIds' in out && Array.isArray(out.evidenceIds)) for (const id of out.evidenceIds) successfulBrowserObservations.add(id);
       if (phase === 'execution' && tool.name === 'http_request' && value && typeof value === 'object' && 'url' in value && typeof value.url === 'string') {

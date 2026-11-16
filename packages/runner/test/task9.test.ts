@@ -80,6 +80,27 @@ describe('Task9真实编排边界', () => {
     expect(r.exitCode).toBe(2); expect(r.result?.status).toBe('UNCLEAR'); expect(r.result?.cases[0]?.reliability.errors).not.toContain('host-error');
     expect(JSON.stringify(model.doGenerateCalls)).toContain('浏览器启动失败');
   });
+  it.each([false, true])('浏览器启动失败不污染同源HTTP，header身份=%s', async header => {
+    const { artifacts } = await setup(header ? { actor: { kind: 'token', env: 'TOKEN', inject: { kind: 'header', name: 'X-Actor' } } } : {});
+    const requests: { url: string; actor: string | null }[] = [];
+    const model = scriptedModel([{ toolCalls: [{ name: 'browser_action', input: { kind: 'navigate', url: '/' } }] }, { toolCalls: [{ name: 'http_request', input: { url: 'http://localhost:39999/value' } }] }, finish('unclear'), finish('unclear')]);
+    const r = await runSuite({ artifacts, env: { TOKEN: 'header-secret' }, launchBrowser: async () => { throw new Error('缺少Chromium'); }, modelOptions: { factories: { ollama: () => model } }, transport: async (url, init) => { requests.push({ url, actor: new Headers(init.headers).get('x-actor') }); return new Response('{}', { headers: { 'content-type': 'application/json' } }); } });
+    expect(requests).toEqual([{ url: 'http://localhost:39999/health', actor: null }, { url: 'http://localhost:39999/value', actor: header ? 'header-secret' : null }]);
+    expect(r.result?.status).toBe('UNCLEAR'); expect(r.exitCode).toBe(2);
+  });
+  it.each(['form', 'replay'] as const)('浏览器启动失败时%s认证仍blocked而非匿名', async kind => {
+    const { artifacts } = await setup({ actor: { kind, environment: 'local', actions: [{ kind: 'goto', url: '/login' }] } }); const h = harness(artifacts);
+    const r = await runSuite({ ...h.options, launchBrowser: async () => { throw new Error('缺少Chromium'); } });
+    expect(r.result?.status).toBe('BLOCKED'); expect(r.exitCode).toBe(2); expect(h.requests).toEqual(['http://localhost:39999/health']); expect(h.executor.doGenerateCalls).toHaveLength(0);
+  });
+  it.each(['browser_action', 'http_request'] as const)('command认证前缺失夹具%s不误报host-error且保持载荷省略', async tool => {
+    const { artifacts } = await setup({ fixtures: ['missing'], actor: { kind: 'command', command: { program: process.execPath, argv: ['-e', 'console.log(JSON.stringify({headers:{}}))'], env: {} } } }); let launches = 0;
+    const model = scriptedModel([{ toolCalls: [{ name: tool, input: tool === 'browser_action' ? { kind: 'navigate', url: '/prepare' } : { url: 'http://localhost:39999/prepare' } }] }, { toolCalls: [{ name: 'report_blocked', input: { reason: '动态身份未解析，不能证明准备完成' } }] }]);
+    const r = await runSuite({ artifacts, launchBrowser: async () => { launches++; return { context: { setDefaultTimeout() {}, setDefaultNavigationTimeout() {}, on() {}, off() {}, cookies: async () => [] }, page: { evaluate: async () => ({ nodes: [], overflow: false }), screenshot: async () => Buffer.from('png'), locator: () => ({}) }, close: async () => {} } as any; }, modelOptions: { factories: { ollama: () => model } }, transport: async () => new Response('{}', { headers: { 'content-type': 'application/json' } }) });
+    expect(r.exitCode).toBe(2); expect(r.result?.cases[0]?.complete).toBe(true); expect(r.result?.cases[0]?.reliability.errors).not.toContain('host-error'); expect(launches).toBe(0);
+    const prefix = `runs/${r.result!.manifest.runId}/cases/M-TC-1/attempts/1`;
+    expect((await artifacts.readBytes(`${prefix}/trace.jsonl`))!.toString()).toContain('动态身份认证前动作载荷省略');
+  });
   it('未审批画像零网络/模型，未确认用例仍有可见BLOCKED结果', async () => {
     const { artifacts, approvals } = await setup({ approved: false }); const h = harness(artifacts);
     const r = await runSuite(h.options); expect(r.result?.cases).toHaveLength(1); expect(r.result?.cases[0]?.reason).toContain('未确认'); expect(h.requests).toEqual([]);

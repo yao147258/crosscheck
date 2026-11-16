@@ -49,6 +49,7 @@ function locate(page: Page, locator: TraceLocator): Locator {
 /** 宿主拥有惰性会话；动作串行，取消会关闭整个 case 会话，不自动重放业务动作。 */
 export class BrowserHost {
   private session?: Promise<BrowserSession>;
+  private established?: BrowserSession;
   private events?: BrowserEvents;
   private closing?: Promise<void>;
   private closed = false;
@@ -58,7 +59,7 @@ export class BrowserHost {
   private readonly initializers: ((session: BrowserSession) => Promise<void>)[] = [];
   private readonly beforeCapture: (() => Promise<void>)[] = [];
   private readonly cleanups: (() => Promise<void>)[] = [];
-  get currentSession(): Promise<BrowserSession> | undefined { return this.session; }
+  get currentSession(): Promise<BrowserSession> | undefined { return this.established ? this.session : undefined; }
   async onSession(work: (session: BrowserSession) => Promise<void>): Promise<void> {
     if (this.session) { await work(await this.session); return; }
     this.initializers.push(work);
@@ -89,6 +90,7 @@ export class BrowserHost {
       this.events = new BrowserEvents(session.context, this.options.redactor);
       try { for (const initialize of this.initializers) await initialize(session); }
       catch (error) { await closeSession(session); throw error; }
+      this.established = session;
       return session;
     });
     return this.session;

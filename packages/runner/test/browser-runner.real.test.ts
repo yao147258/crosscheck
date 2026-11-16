@@ -13,7 +13,7 @@ const skip = process.env.CROSSCHECK_REAL_BROWSER !== '1';
 const roots: string[] = [], servers: Server[] = [];
 afterEach(async () => { vi.restoreAllMocks(); await Promise.all(servers.splice(0).map(s => new Promise<void>(resolve => { s.closeAllConnections(); s.close(() => resolve()); }))); await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))); });
 const secret = 'RUNNER_FORM_SENTINEL_9282';
-async function setup(options: { verdict?: string; fallback?: boolean; steps?: number; fixtures?: boolean; failedPrepare?: boolean } = {}) {
+async function setup(options: { verdict?: string; fallback?: boolean; steps?: number; minutes?: number; authWait?: boolean; fixtures?: boolean; failedPrepare?: boolean } = {}) {
   const requests: string[] = [];
   const server = createServer((req, res) => {
     requests.push(req.url!);
@@ -26,11 +26,11 @@ async function setup(options: { verdict?: string; fallback?: boolean; steps?: nu
   }); servers.push(server); await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
   const baseURL = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
   const root = await mkdtemp(path.join(tmpdir(), 'browser-runner-')); roots.push(root); const artifacts = new ArtifactStore(root);
-  await artifacts.writeYaml('config.yaml', { models: { extractor: 'mock:x', planner: 'mock:p', executor: 'mock:e', reviewer: 'mock:r', ...(options.fallback ? { fallback: { reviewer: 'mock:f' } } : {}) }, providers: { mock: { type: 'ollama' } }, capabilities: { 'mock:e': { images: true }, 'mock:r': { images: true }, 'mock:f': { images: false } }, defaultEnvironment: 'local', budget: { perCase: { steps: options.steps ?? 30, tokens: 100000, minutes: 1 } } });
+  await artifacts.writeYaml('config.yaml', { models: { extractor: 'mock:x', planner: 'mock:p', executor: 'mock:e', reviewer: 'mock:r', ...(options.fallback ? { fallback: { reviewer: 'mock:f' } } : {}) }, providers: { mock: { type: 'ollama' } }, capabilities: { 'mock:e': { images: true }, 'mock:r': { images: true }, 'mock:f': { images: false } }, defaultEnvironment: 'local', budget: { perCase: { steps: options.steps ?? 30, tokens: 100000, minutes: options.minutes ?? 1 } } });
   const source = { file: '需求.md', line: 1, excerpt: '保存后显示成功' };
   const clause = ClauseSchema.parse({ id: 'M-AC-1', text: '填写并保存后显示成功', source });
   const tc = TestCaseSchema.parse({ id: 'M-TC-1', covers: [clause.id], actor: 'member', fixtures: options.fixtures ? ['known', 'reset', 'missing'] : [], steps: ['保存表单'], expectations: [{ id: 'E1', text: '保存后页面显示保存成功', evidence: ['dom', 'screenshot'] }] });
-  const files = { 'environments.yaml': { version: 1, environments: { local: { baseURL, healthcheck: `${baseURL}/health`, reset: options.fixtures ? 'reset' : null } } }, 'auth.yaml': { version: 1, actors: { member: { kind: 'form', environment: 'local', actions: [{ kind: 'goto', url: '/login' }, { kind: 'fill', selector: 'input', env: 'PASSWORD' }, { kind: 'click', selector: 'button' }, { kind: 'waitFor', selector: '#ready' }] } } }, 'api-catalog.yaml': { version: 1, operations: options.fixtures ? Object.fromEntries(['reset', 'known'].map(name => [name, { environment: 'local', method: 'POST', path: `/${name}`, description: name, sources: [source] }])) : {} }, 'pages.yaml': { version: 1, pages: {} }, 'data-model.yaml': { version: 1, queries: {} }, 'fixtures.yaml': { version: 1, fixtures: options.fixtures ? { reset: { kind: 'http', operation: 'reset' }, known: { kind: 'http', operation: 'known' } } : {} }, 'guardrails.yaml': { allowedHosts: [new URL(baseURL).host] } };
+  const files = { 'environments.yaml': { version: 1, environments: { local: { baseURL, healthcheck: `${baseURL}/health`, reset: options.fixtures ? 'reset' : null } } }, 'auth.yaml': { version: 1, actors: { member: { kind: 'form', environment: 'local', actions: [{ kind: 'goto', url: '/login' }, ...(options.authWait ? [{ kind: 'waitFor', selector: '#never' }] : [{ kind: 'fill', selector: 'input', env: 'PASSWORD' }, { kind: 'click', selector: 'button' }, { kind: 'waitFor', selector: '#ready' }])] } } }, 'api-catalog.yaml': { version: 1, operations: options.fixtures ? Object.fromEntries(['reset', 'known'].map(name => [name, { environment: 'local', method: 'POST', path: `/${name}`, description: name, sources: [source] }])) : {} }, 'pages.yaml': { version: 1, pages: {} }, 'data-model.yaml': { version: 1, queries: {} }, 'fixtures.yaml': { version: 1, fixtures: options.fixtures ? { reset: { kind: 'http', operation: 'reset' }, known: { kind: 'http', operation: 'known' } } : {} }, 'guardrails.yaml': { allowedHosts: [new URL(baseURL).host] } };
   for (const [name, data] of Object.entries(files)) await artifacts.writeYaml(`system/${name}`, data);
   await artifacts.saveClauses('M', [clause]); await artifacts.saveCases('M', [tc]); const approvals = Approvals.empty();
   for (const [name, data] of Object.entries(await loadProfile(artifacts))) approvals.approve('profile', name, data, '人工');
@@ -104,6 +104,32 @@ describe.skipIf(skip)('runner 真实浏览器与脚本模型', () => {
     }
     const result = await runSuite({ ...s.options, artifacts: new BrokenStore(path.dirname(s.artifacts.root)), launchBrowser: async opts => { const session = await launchBrowserSession(opts); return { ...session, close: async () => { await session.close(); closed = true; } }; } });
     expect(result.exitCode).toBe(3); expect(result.result?.cases[0]?.complete).toBe(false); expect(committed).toBe(true);
+  }, 30000);
+  it('认证和执行模型共享步数，模型工具不重复计步', async () => {
+    const s = await setup(); const result = await runSuite(s.options);
+    expect(result.result?.status).toBe('PASS'); expect(result.result?.cases[0]?.budget.used.steps).toBe(10);
+    expect(result.result?.cases[0]?.reliability.attempts).toBe(6);
+  }, 30000);
+  it.each(['deadline', 'cancel'] as const)('批准认证wait共享%s并关闭会话，不进入执行模型', async kind => {
+    const s = await setup({ authWait: true, minutes: kind === 'deadline' ? 0.05 : 1 });
+    const controller = new AbortController(); let closed = false;
+    const result = await runSuite({ ...s.options, signal: controller.signal, launchBrowser: async opts => {
+      const session = await launchBrowserSession(opts);
+      if (kind === 'cancel') session.page.on('domcontentloaded', () => { if (session.page.url().endsWith('/login')) controller.abort(); });
+      return { ...session, close: async () => { await session.close(); closed = true; } };
+    } });
+    expect(result.exitCode).toBe(2); expect(closed).toBe(true); expect(s.executor.doGenerateCalls).toHaveLength(0); expect(s.reviewer.doGenerateCalls).toHaveLength(0);
+    if (kind === 'deadline') { expect(result.result?.cases[0]?.budget.exhausted).toBe(true); expect(result.result?.cases[0]?.budget.reason).toContain('时长'); }
+    else { expect(result.interrupted).toBe(true); expect(result.result?.cases[0]?.complete).toBe(false); }
+  }, 30000);
+  it('认证预算steps=1仅执行首个批准动作，第二步fill不发生', async () => {
+    const s = await setup({ steps: 1 }); const result = await runSuite(s.options);
+    expect(result.exitCode).toBe(2); expect(result.result?.cases[0]?.budget.used.steps).toBe(1);
+    expect(result.result?.cases[0]?.budget.exhausted).toBe(true); expect(s.executor.doGenerateCalls).toHaveLength(0);
+    expect(s.requests).toContain('/login'); expect(s.requests).not.toContain('/logged');
+    const trace = (await s.artifacts.readBytes(`runs/${result.result!.manifest.runId}/cases/M-TC-1/attempts/1/trace.jsonl`))!.toString().trim().split('\n').map(line => JSON.parse(line));
+    const actions = trace.filter(e => e.action.type === 'browser_action');
+    expect(actions).toHaveLength(1); expect(actions[0].action.input.value.kind).toBe('navigate');
   }, 30000);
   it('共享步数耗尽后不启动 reviewer，仍 await 关闭', async () => {
     const s = await setup({ steps: 1 }); let closed = false;
