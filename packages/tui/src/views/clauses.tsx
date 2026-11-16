@@ -40,7 +40,7 @@ export function ClausesView({ nav, module }: { nav: Nav; module: string }) {
     if (input === 'u') void run(() => markClauseUnclear(session, module, id));
     if (input === 'e') void run(() => pause(() => editClause(session, editor, module, id)));
     if (input === 'd') setPending({ text: `删除 ${id}？(y/N)`, action: () => deleteClause(session, module, id) });
-  }, { isActive: !details });
+  }, { isActive: !(details && row) });
   if (details && row) return (
     <ReviewDetails title={row.clause.id} close={() => setDetails(false)} quit={nav.quit} lines={[
       `${row.clause.id} [${row.clause.status}] ${APPROVAL_LABEL[row.approval]}`,

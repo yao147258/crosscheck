@@ -43,7 +43,7 @@ export function App({ env, initial }: { env: ReviewEnv; initial: Route }) {
     <ReviewContext.Provider value={env}>
       <ActionContext.Provider value={actions}>
         <Box flexDirection="column">
-          <Text bold color="cyan">Crosscheck 审核 · 确认人 {env.session.reviewer}</Text>
+          <Text bold color="cyan" wrap="truncate-end">Crosscheck 审核 · 确认人 {env.session.reviewer}</Text>
           <RouteView key={`${stack.length}:${JSON.stringify(route)}`} route={route} nav={nav} />
           {notice && <Text color="yellow">{notice}</Text>}
         </Box>

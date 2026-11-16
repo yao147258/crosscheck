@@ -54,7 +54,7 @@ export function CasesView({ nav, module }: { nav: Nav; module: string }) {
     if (input === 'r') void run(() => revokeCase(session, module, id));
     if (input === 'e') void run(() => pause(() => editCase(session, editor, module, id)));
     if (input === 'd') setPending({ text: `删除 ${id}？(y/N)`, action: () => deleteCase(session, module, id) });
-  }, { isActive: !details });
+  }, { isActive: !(details && row) });
   if (details && row) return (
     <ReviewDetails title={row.testCase.id} close={() => setDetails(false)} quit={nav.quit} lines={[
       `${row.testCase.id} ${APPROVAL_LABEL[row.approval]}`,

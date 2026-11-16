@@ -1,7 +1,12 @@
 import { Approvals } from '@crosscheck/core';
+import { Text } from 'ink';
 import { cleanup, render } from 'ink-testing-library';
+import { useState } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { App, approveClause, type EditorHost } from '../src/index';
+import { App, ReviewSession, approveClause, type EditorHost } from '../src/index';
+import { ActionContext, ReviewContext } from '../src/context';
+import { ClausesView } from '../src/views/clauses';
+import { CasesView } from '../src/views/cases';
 import { List } from '../src/components';
 import { cleanupProjects, clause, createProject, testCase } from './fixture';
 import { deferred, KEYS, waitFor } from './helpers';
@@ -206,6 +211,72 @@ describe('审核边界与终端可用性', () => {
     expect(seen.replaceAll('\n', '')).toContain(target);
     return seen;
   }
+
+  it.each([
+    { name: 'clauses', outcome: 'empty' }, { name: 'clauses', outcome: 'error' },
+    { name: 'cases', outcome: 'empty' }, { name: 'cases', outcome: 'error' },
+  ] as const)('$name 动作释放后 Enter 打开旧行，延迟重载得到 $outcome 时仍能返回或退出', async ({ name, outcome }) => {
+    const { session, artifacts } = await createProject();
+    await artifacts.saveClauses('M', [clause(1)]);
+    await artifacts.saveCases('M', [testCase(1, ['M-AC-1'])]);
+    const gate = deferred<void>();
+    const entered = deferred<void>();
+    let reloading = false;
+    const delayed = <T,>(load: (module: string) => Promise<T[]>) => async (module: string): Promise<T[]> => {
+      if (!reloading) return load(module);
+      entered.resolve();
+      await gate.promise;
+      if (outcome === 'error') throw new Error('延迟重载失败');
+      return [];
+    };
+    const loadClauses = artifacts.loadClauses.bind(artifacts);
+    const loadCases = artifacts.loadCases.bind(artifacts);
+    if (name === 'clauses') vi.spyOn(artifacts, 'loadClauses').mockImplementation(delayed(loadClauses));
+    else vi.spyOn(artifacts, 'loadCases').mockImplementation(delayed(loadCases));
+    let ui: ReturnType<typeof render>;
+    const busy = { current: false };
+    const actions = { busy, changed() {
+      if (!busy.current) {
+        reloading = true;
+        // 在真实 useAction 释放锁、调用 reload 前同步发送 Enter，固定复现竞态。
+        ui.stdin.write(KEYS.enter);
+      }
+    } };
+    function Probe() {
+      const [destination, setDestination] = useState('');
+      const nav = { push() {}, back() { setDestination('已返回'); }, quit() { setDestination('已退出'); } };
+      return <ReviewContext.Provider value={{ session, editor: noEditor, open }}><ActionContext.Provider value={actions}>
+        {destination ? <Text>{destination}</Text> : name === 'clauses' ? <ClausesView nav={nav} module="M" /> : <CasesView nav={nav} module="M" />}
+      </ActionContext.Provider></ReviewContext.Provider>;
+    }
+    ui = render(<Probe />);
+    await waitFor(() => frame(ui).includes(name === 'clauses' ? '› M-AC-1' : '› M-TC-1'));
+    ui.stdin.write('r');
+    await entered.promise;
+    gate.resolve();
+    await waitFor(() => frame(ui).includes(outcome === 'empty' ? '（空）' : '延迟重载失败') && !frame(ui).includes('加载中…'));
+    ui.stdin.write(outcome === 'empty' ? KEYS.escape : 'q');
+    await waitFor(() => frame(ui).includes(outcome === 'empty' ? '已返回' : '已退出'));
+  });
+
+  it.each(['clauses', 'cases'] as const)('%s 长确认人在 40×16 完整详情不挤出正文和页脚，滚动返回仍可操作', async (name) => {
+    const { artifacts } = await createProject();
+    const session = await ReviewSession.open(artifacts, '一二三四五六七八');
+    await artifacts.saveClauses('M', [clause(1, { text: `正文开头\n${'很长正文'.repeat(100)}\n正文末尾` })]);
+    await artifacts.saveCases('M', [testCase(1, ['M-AC-1'], { steps: [`步骤开头\n${'很长步骤'.repeat(100)}\n步骤末尾`] })]);
+    const ui = render(<App env={{ session, editor: noEditor, open }} initial={{ name, module: 'M' }} />);
+    resize(ui, 40, 16);
+    const id = name === 'clauses' ? 'M-AC-1' : 'M-TC-1';
+    await waitFor(() => frame(ui).includes(`› ${id}`));
+    ui.stdin.write(KEYS.enter);
+    await waitFor(() => frame(ui).includes(`完整详情 · ${id}`));
+    expect(frame(ui)).toContain('PageUp/PageDown');
+    expect(frame(ui)).toContain('Esc 返回列表');
+    expect(frame(ui).split('\n').length).toBeLessThanOrEqual(16);
+    await scrollUntil(ui, name === 'clauses' ? '正文末尾' : '步骤末尾', pageDown);
+    ui.stdin.write(KEYS.escape);
+    await waitFor(() => frame(ui).includes(`› ${id}`));
+  });
 
   it('40×16 无 EDITOR 的单用例可 Enter 读取基本预期与证据，Esc 返回原选中项', async () => {
     const { session, artifacts } = await createProject();
