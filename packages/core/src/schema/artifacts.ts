@@ -51,3 +51,10 @@ export type TestCase = z.infer<typeof TestCaseSchema>;
 
 export const ModuleClausesSchema = z.array(ClauseSchema).superRefine(uniqueIds);
 export const ModuleCasesSchema = z.array(TestCaseSchema).superRefine(uniqueIds);
+
+/** 从条款或用例 ID 推断模块名，例如 M09-AC-003 → M09 */
+export function moduleOfId(id: string): string {
+  const match = /^([A-Za-z0-9_]+)-(?:AC|TC)-\d+$/.exec(id);
+  if (!match) throw new Error(`无法从标识推断模块：${id}`);
+  return match[1]!;
+}
