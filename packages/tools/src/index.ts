@@ -13,3 +13,4 @@ export * from './auth/host';
 export * from './fixtures/host';
 export * from './fixtures/tools';
 export * from './profile/tools';
+export * from './requirements/tools';
