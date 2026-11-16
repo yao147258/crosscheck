@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { ArtifactStore, EvidenceRecordSchema } from '@crosscheck/core';
 import * as tools from '../src/index';
+import { capturePage } from '../src/browser/capture';
 
 // 独立解码 PNG 像素，不能把压缩字节不含明文当作遮罩证明。
 function pixel(png: Buffer, x: number, y: number): number[] {
@@ -57,6 +58,44 @@ async function setup() {
   return { root, artifacts, store, host, signal: new AbortController().signal, meta: () => ({ actionId: `a-${++n}`, phase: 'execution' as const }), index: () => artifacts.readJson('runs/run-1/cases/M-TC-1/attempts/1/evidence/index.json', EvidenceRecordSchema.array()) };
 }
 describe.skipIf(skip)('标准 Playwright 真实表单与可信采证', () => {
+  it('R1–R3 子树秘密、无盒子宿主、私密后代和语义字段共同遮罩且不遮安全区域', async () => {
+    const s = await setup();
+    try {
+      const session = await s.host.getSession(s.signal);
+      await session.page.setContent(`<style>body{margin:0}section{height:40px;width:500px;background:#00cc00}x-private{display:contents}</style>
+<section><span>BROWSER_</span><span>SENTINEL_7368</span></section>
+<section><span style="display:contents">${secret}</span></section>
+<section><svg width="400" height="35"><text x="0" y="20">SVG_PRIVATE</text></svg></section>
+<section><x-private><span>CUSTOM_PRIVATE</span></x-private></section>
+<section>https://example.test/?token=DYNAMIC_PRIVATE</section>
+<section><span>{"password":"</span><span>JSON_PRIVATE"}</span></section>
+<section id="safe">可见安全内容</section>`);
+      const observed = await capturePage(session.page, tools.createEvidenceRedactor([], [secret]));
+      const clean = JSON.stringify(tools.sanitizeDom(observed.dom, tools.createEvidenceRedactor([], [secret])));
+      expect(clean).not.toMatch(/BROWSER_|SENTINEL_7368|SVG_PRIVATE|CUSTOM_PRIVATE|DYNAMIC_PRIVATE|JSON_PRIVATE/);
+      expect(clean).toContain('可见安全内容');
+      const r = tools.createEvidenceRedactor([], [secret]);
+      const evidence = new tools.EvidenceStore(s.artifacts, { runId: 'run-1', caseId: 'M-TC-1', attempt: 1 }, r);
+      const captured = await capturePage(session.page, r);
+      const record = await evidence.saveScreenshot(captured.screenshot, s.meta());
+      const png = (await evidence.readScreenshotEvidence(record.id)).bytes;
+      for (const y of [5, 45, 85, 125, 165, 205]) expect(pixel(png, 5, y)).toEqual([255, 0, 255]);
+      expect(pixel(png, 490, 265)).toEqual([0, 204, 0]);
+    } finally { await s.host.close(); await rm(s.root, { recursive: true, force: true }); }
+  });
+  it('R9 局部文本超限仅省略对应区域，证据明确不完整', async () => {
+    const s = await setup();
+    try {
+      const session = await s.host.getSession(s.signal);
+      await session.page.setContent(`<style>body{margin:0}div{height:40px;width:500px;background:#00cc00;overflow:hidden}</style><div>${'x'.repeat(2100)}</div><div>安全尾部</div>`);
+      const r = tools.createEvidenceRedactor(), store = new tools.EvidenceStore(s.artifacts, { runId: 'run-1', caseId: 'M-TC-1', attempt: 1 }, r);
+      const captured = await capturePage(session.page, r);
+      const dom = await store.readTextEvidence((await store.saveDom(captured.dom, s.meta())).id);
+      expect(dom.sourceIncomplete).toBe(true); expect(dom.text).toContain('limit'); expect(dom.text).toContain('安全尾部'); expect(dom.text).not.toContain('x'.repeat(50));
+      const png = (await store.readScreenshotEvidence((await store.saveScreenshot(captured.screenshot, s.meta())).id)).bytes;
+      expect(pixel(png, 490, 5)).toEqual([255, 0, 255]); expect(pixel(png, 490, 45)).toEqual([0, 204, 0]);
+    } finally { await s.host.close(); await rm(s.root, { recursive: true, force: true }); }
+  });
   it('每个宿主的 context 独立，不共享 Cookie，禁止自动下载', async () => {
     const s = await setup(), t = await setup();
     try {

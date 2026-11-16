@@ -39,6 +39,18 @@ describe('标准浏览器动作入口', () => {
       expect((await store.readTextEvidence(record.id)).sourceIncomplete).toBe(true);
     } finally { await rm(root, { recursive: true, force: true }); }
   });
+  it('R9 DOM omitted 与局部超限表示观察缺失，单纯已知值替换不是缺失', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'cc-dom-completeness-'));
+    try {
+      const store = new tools.EvidenceStore(new ArtifactStore(root), { runId: 'run-1', caseId: 'M-TC-1', attempt: 1 }, tools.createEvidenceRedactor());
+      for (const node of [{ tag: 'input', omitted: true }, { tag: 'section', incomplete: true }, { tag: 'div', children: [{ tag: 'canvas', omitted: true }] }]) {
+        const record = await store.saveDom([node], meta);
+        expect((await store.readTextEvidence(record.id)).sourceIncomplete).toBe(true);
+      }
+      const record = await store.saveDom([{ tag: 'span', text: '[REDACTED]' }], meta);
+      expect((await store.readTextEvidence(record.id)).sourceIncomplete).toBe(false);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
   it('DOM 可按归属 ID 读取，拒绝伪造截图能力和跨 case 读取', async () => {
     const root = await mkdtemp(path.join(tmpdir(), 'cc-browser-store-'));
     try {

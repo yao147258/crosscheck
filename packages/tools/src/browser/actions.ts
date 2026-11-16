@@ -4,7 +4,7 @@ import { EnvRefSchema, TraceLocatorSchema } from '@crosscheck/core';
 import type { EvidenceStore } from '../evidence/store';
 import type { EvidenceRedactor } from '../evidence/redactor';
 import type { EvidenceMeta } from '../network/http-client';
-import { launchBrowserSession, type BrowserSession } from './session';
+import { BrowserCleanupError, launchBrowserSession, type BrowserSession } from './session';
 import { capturePage } from './capture';
 import { BrowserEvents } from './events';
 
@@ -33,6 +33,10 @@ export interface BrowserHostOptions {
   env?: Record<string, string | undefined>;
   launch?: typeof launchBrowserSession;
 }
+async function closeSession(session: BrowserSession): Promise<void> {
+  try { await session.close(); }
+  catch (error) { throw error instanceof BrowserCleanupError ? error : new BrowserCleanupError([error]); }
+}
 function locate(page: Page, locator: TraceLocator): Locator {
   switch (locator.strategy) {
     case 'css': return page.locator(`css=${locator.value}`);
@@ -60,14 +64,14 @@ export class BrowserHost {
   }
   async getSession(signal: AbortSignal): Promise<BrowserSession> {
     if (signal.aborted) {
-      if (this.session) { const session = await this.session; await session.close(); }
+      if (this.session) { const session = await this.session; await closeSession(session); }
       this.closed = true;
       throw new BrowserOperationError('cancelled', '浏览器会话已取消', []);
     }
     if (this.closed) throw new BrowserOperationError('cancelled', '浏览器会话已关闭', []);
     this.bind(signal);
     this.session ??= (this.options.launch ?? launchBrowserSession)({ signal }).then(async session => {
-      if (this.closed || signal.aborted) { await session.close(); throw new BrowserOperationError('cancelled', '浏览器会话已取消', []); }
+      if (this.closed || signal.aborted) { await closeSession(session); throw new BrowserOperationError('cancelled', '浏览器会话已取消', []); }
       session.context.setDefaultTimeout(5000); session.context.setDefaultNavigationTimeout(10000);
       this.events = new BrowserEvents(session.context, this.options.redactor);
       return session;
@@ -99,7 +103,10 @@ export class BrowserHost {
     }
     let session: BrowserSession;
     try { session = await this.getSession(signal); }
-    catch { throw new BrowserOperationError(signal.aborted ? 'cancelled' : 'browser', '浏览器启动失败或已取消（原始诊断已省略）', evidenceIds); }
+    catch (error) {
+      if (error instanceof BrowserCleanupError) throw error;
+      throw new BrowserOperationError(signal.aborted ? 'cancelled' : 'browser', '浏览器启动失败或已取消（原始诊断已省略）', evidenceIds);
+    }
     this.lastMeta = { ...meta };
     const capture = async () => {
       let observed: Awaited<ReturnType<typeof capturePage>>;
@@ -110,7 +117,11 @@ export class BrowserHost {
     };
     let failure: unknown;
     try { await capture(); }
-    catch (error) { await this.events!.flush(this.options.evidence, meta); throw error; }
+    catch (error) {
+      try { evidenceIds.push(...await this.events!.flush(this.options.evidence, meta)); }
+      finally { if (signal.aborted) await closeSession(session); }
+      throw error;
+    }
     try {
       signal.throwIfAborted();
       switch (action.kind) {
@@ -125,11 +136,16 @@ export class BrowserHost {
     } catch (error) { failure = error; }
     try { if (!session.page.isClosed()) await capture(); }
     catch (error) {
-      if (!signal.aborted || !(error instanceof BrowserOperationError)) { await this.events!.flush(this.options.evidence, meta); throw error; }
+      if (!signal.aborted || !(error instanceof BrowserOperationError)) {
+        try { evidenceIds.push(...await this.events!.flush(this.options.evidence, meta)); }
+        finally { if (signal.aborted) await closeSession(session); }
+        throw error;
+      }
       failure ??= error;
     }
-    evidenceIds.push(...await this.events!.flush(this.options.evidence, meta));
-    if (signal.aborted) { await session.close(); throw new BrowserOperationError('cancelled', '浏览器操作已取消', evidenceIds); }
+    try { evidenceIds.push(...await this.events!.flush(this.options.evidence, meta)); }
+    finally { if (signal.aborted) await closeSession(session); }
+    if (signal.aborted) throw new BrowserOperationError('cancelled', '浏览器操作已取消', evidenceIds);
     if (failure) throw new BrowserOperationError('browser', `浏览器 ${action.kind} 操作或采证失败（原始诊断已省略）`, evidenceIds);
     return { evidenceIds, summary: { kind: action.kind, url: this.options.redactor.url(session.page.url()), status: 'success' } };
   }
@@ -140,12 +156,17 @@ export class BrowserHost {
       for (const [signal, abort] of this.signals) signal.removeEventListener('abort', abort);
       this.signals.clear();
       let session: BrowserSession | undefined;
+      const failures: unknown[] = [];
       try {
-        try { session = await this.session; } catch { /* 启动失败路径自行清理部分资源。 */ }
-        await session?.close();
+        try { session = await this.session; }
+        catch (error) { if (error instanceof BrowserCleanupError) failures.push(error); }
+        try { await session?.close(); } catch (error) { failures.push(error); }
         await this.tail;
-        if (this.events && this.lastMeta) await this.events.flush(this.options.evidence, this.lastMeta);
+        try { if (this.events && this.lastMeta) await this.events.flush(this.options.evidence, this.lastMeta); }
+        catch (error) { failures.push(error); }
       } finally { this.events?.close(); }
+      if (failures.length === 1) throw failures[0];
+      if (failures.length > 1) throw new AggregateError(failures, '浏览器关闭及证据收尾失败');
     })();
     return this.closing;
   }

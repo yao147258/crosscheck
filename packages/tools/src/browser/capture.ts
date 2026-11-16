@@ -6,54 +6,69 @@ import type { EvidenceRedactor } from '../evidence/redactor';
 
 export interface MaskedCapture { readonly kind: 'masked-capture' }
 const trusted = new WeakMap<object, { bytes: Buffer; redactor: EvidenceRedactor }>();
-
-/** 只有本模块的真实采集结果能兑换 PNG；不接受结构相同的对象或调用者提供的 bytes。 */
 export function readTrustedCapture(value: unknown, redactor: EvidenceRedactor): Buffer {
   const capture = value && typeof value === 'object' ? trusted.get(value) : undefined;
   if (!capture || capture.redactor !== redactor) throw new ArtifactError('截图不是当前可信采集器的产物');
   return Buffer.from(capture.bytes);
 }
 
-/** 仅宿主执行固定采集脚本，模型不能传脚本；可视快照有界，未知可视载荷保守遮罩。 */
+/** 固定宿主脚本保留文本顺序和祖先关系；零盒子不是不可见子树。 */
 export async function capturePage(page: Page, redactor: EvidenceRedactor, screenshotMasks: string[] = []): Promise<{ dom: DomNode[]; screenshot: MaskedCapture }> {
-  const snapshot = await page.evaluate(() => {
-    const nodes: { tag: string; type?: string; name?: string; text?: string; value?: string; selector: string; attributes: string[]; opaque: boolean }[] = [];
-    const selector = (element: Element): string => {
-      const parts: string[] = []; let current: Element | null = element;
-      while (current) {
-        const tag = current.localName;
-        const siblings: Element[] = current.parentElement ? [...current.parentElement.children].filter(e => e.localName === tag) : [current];
-        parts.unshift(`${CSS.escape(tag)}:nth-of-type(${siblings.indexOf(current) + 1})`);
-        current = current.parentElement;
-      }
-      return parts.join(' > ');
-    };
+  const snapshot = await page.evaluate(selectors => {
+    const nodes: { tag: string; type?: string; name?: string; text: string; value?: string; selector: string; attributes: string[]; opaque: boolean; approved: boolean; box: boolean; parent: number; parts: (string | number)[]; incomplete: boolean }[] = [];
     let overflow = false;
-    for (const element of document.querySelectorAll('*')) {
-      if (nodes.length >= 2000) { overflow = true; break; }
-      if (['script', 'style', 'head', 'meta', 'link', 'title'].includes(element.localName)) continue;
-      const rect = element.getBoundingClientRect(), style = getComputedStyle(element);
-      if (!rect.width || !rect.height || style.visibility === 'hidden' || style.display === 'none') continue;
+    function visit(element: Element, parent: number, selector: string): number | undefined {
+      if (['script', 'style', 'head', 'meta', 'link', 'title'].includes(element.localName)) return;
+      if (nodes.length >= 2000) { overflow = true; return; }
+      const style = getComputedStyle(element), rect = element.getBoundingClientRect();
+      if (style.display === 'none' || style.visibility === 'hidden') return;
       const input = element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement || element instanceof HTMLSelectElement;
-      const directText = [...element.childNodes].filter(n => n.nodeType === Node.TEXT_NODE).map(n => n.textContent ?? '').join(' ').trim();
-      const pseudo = ['::before', '::after'].map(p => getComputedStyle(element, p).content).join(' ');
-      nodes.push({ tag: element.localName, type: input && 'type' in element ? String(element.type) : undefined, name: element.getAttribute('name') ?? undefined,
-        text: directText.slice(0, 2000), value: input ? element.value.slice(0, 2000) : undefined, selector: selector(element),
-        attributes: [...element.attributes].map(a => `${a.name}=${a.value}`).concat(directText, input ? element.value : '', pseudo),
-        opaque: input || element.localName.includes('-') || !!element.shadowRoot || ['iframe', 'frame', 'canvas', 'svg', 'object', 'embed', 'img', 'video', 'audio'].includes(element.localName) || style.backgroundImage !== 'none' || directText.length > 2000 });
+      const text = [...element.childNodes].filter(n => n.nodeType === Node.TEXT_NODE).map(n => n.textContent ?? '').join('');
+      const i = nodes.length;
+      const node = { tag: element.localName, type: input && 'type' in element ? String(element.type) : undefined, name: element.getAttribute('name') ?? undefined,
+        text: text.length <= 2000 ? text : '', value: input && element.value.length <= 2000 ? element.value : undefined, selector,
+        attributes: [...element.attributes].map(a => a.value).concat(input ? element.value : '', ['::before', '::after'].map(p => getComputedStyle(element, p).content)),
+        opaque: input || element.localName.includes('-') || !!element.shadowRoot || ['iframe', 'frame', 'canvas', 'svg', 'object', 'embed', 'img', 'video', 'audio'].includes(element.localName) || style.backgroundImage !== 'none',
+        approved: selectors.some(s => element.matches(s)), box: rect.width > 0 && rect.height > 0, parent, parts: [] as (string | number)[], incomplete: text.length > 2000 || input && element.value.length > 2000 };
+      nodes.push(node);
+      for (const child of element.childNodes) {
+        if (child.nodeType === Node.TEXT_NODE) node.parts.push((child.textContent ?? '').slice(0, 64001));
+        else if (child instanceof Element) {
+          const siblings = [...element.children].filter(e => e.localName === child.localName);
+          const id = visit(child, i, `${selector} > ${CSS.escape(child.localName)}:nth-of-type(${siblings.indexOf(child) + 1})`);
+          if (id !== undefined) node.parts.push(id);
+        }
+      }
+      return i;
     }
+    visit(document.documentElement, -1, 'html');
     return { nodes, overflow };
-  });
-  const maskSelectors = new Set<string>(['input', 'textarea', 'select', 'iframe', 'frame', 'canvas', 'svg', 'object', 'embed', 'img', 'video', 'audio', ...screenshotMasks]);
-  const dom: DomNode[] = [];
-  for (const node of snapshot.nodes) {
-    const approved = screenshotMasks.length > 0 && await page.locator(node.selector).evaluate((element, selectors) => selectors.some(s => element.matches(s) || !!element.closest(s)), screenshotMasks);
-    const sensitive = node.opaque || approved || node.attributes.some(value => redactor.text(value) !== value) || !!node.name && JSON.stringify(redactor.value({ [node.name]: 'probe' })).includes('[REDACTED]');
-    if (sensitive) maskSelectors.add(node.selector);
-    dom.push({ tag: node.tag, type: node.type, name: node.name, text: node.text, value: node.value, locator: { strategy: 'css', value: node.selector }, sensitive });
+  }, screenshotMasks);
+  const { nodes } = snapshot, hidden = new Set<number>(), roots = new Set<number>();
+  const sensitiveText = (text: string) => redactor.displayText(text) !== text;
+  const aggregate = (id: number): string => hidden.has(id) ? '' : nodes[id]!.parts.map(p => typeof p === 'string' ? p : aggregate(p)).join('').slice(0, 64001);
+  const omit = (id: number) => {
+    let mask = id;
+    while (!nodes[mask]!.box && nodes[mask]!.parent >= 0) mask = nodes[mask]!.parent;
+    roots.add(mask);
+    const descendants = (n: number) => { hidden.add(n); for (const p of nodes[n]!.parts) if (typeof p === 'number') descendants(p); };
+    descendants(mask);
+  };
+  // 不透明/批准区域先整体省略，后代不能重新成为扁平文本；随后从叶向根聚合余下文本。
+  for (let i = 0; i < nodes.length; i++) {
+    const n = nodes[i]!;
+    if (!hidden.has(i) && (n.opaque || n.approved || n.incomplete || n.attributes.some(sensitiveText) || !!n.name && JSON.stringify(redactor.value({ [n.name]: 'probe' })).includes('[REDACTED]'))) omit(i);
   }
-  if (snapshot.overflow) { maskSelectors.add('html'); dom.push({ tag: 'observation', text: '[omitted: DOM node limit]', incomplete: true }); }
-  const bytes = await page.screenshot({ type: 'png', mask: [...maskSelectors].map(s => page.locator(s)), maskColor: '#FF00FF', animations: 'disabled', caret: 'hide', timeout: 5000 });
+  for (let i = nodes.length - 1; i >= 0; i--) {
+    if (hidden.has(i)) continue;
+    const text = aggregate(i);
+    if (text.length > 64000 || sensitiveText(text)) omit(i);
+  }
+  const dom: DomNode[] = nodes.flatMap((n, i) => hidden.has(i) && !roots.has(i) ? [] : [{ tag: n.tag, type: n.type, name: n.name, text: n.text.trim(), value: n.value,
+    locator: { strategy: 'css' as const, value: n.selector }, sensitive: hidden.has(i), ...(hidden.has(i) ? { omissionReason: n.incomplete ? 'limit' as const : 'masked-region' as const } : {}) }]);
+  const masks = [...roots].filter(i => ![...roots].some(other => other !== i && nodes[i]!.selector.startsWith(nodes[other]!.selector + ' > '))).map(i => nodes[i]!.selector);
+  if (snapshot.overflow) { masks.push('html'); dom.push({ tag: 'observation', incomplete: true, omissionReason: 'limit' }); }
+  const bytes = await page.screenshot({ type: 'png', mask: masks.map(s => page.locator(s)), maskColor: '#FF00FF', animations: 'disabled', caret: 'hide', timeout: 5000 });
   const screenshot = Object.freeze({ kind: 'masked-capture' as const });
   trusted.set(screenshot, { bytes: Buffer.from(bytes), redactor });
   return { dom, screenshot };

@@ -78,3 +78,34 @@
 - DOM 探测与截图不是页面脚本暂停后的原子事务，信任测试页面的稳定性；不承诺对恶意持续变换 DOM、隐藏 shadow 内容或未知字体像素编码实现数学意义的全秘密识别。动态密钥必须在采集前登记，后登记不能回溯清洗已落盘 PNG。
 - 截图真实哈希与归属读取已交付，但模型 image part、共享认证、runner 审计/预算接线由后续任务实现，本次不声称其已完成。
 - 未执行真实 PostgreSQL、最低 Node 版本矩阵、真实厂商模型联调；默认 15 个跳过中包括新增 8 项真实浏览器测试与既有 7 项数据库测试；8 项浏览器已用显式开关另行通过。
+
+## 修复轮 1（BASE 4916840，R1–R9）
+
+本节更新并覆盖上文首轮实现中的不完整声明；未恢复页面网络隔离，未修改 agent/auth/runner、用户 `.gitignore`，没有派代理或调用 fork 审查技能。
+
+### RED 与修改
+
+- R1–R3：新增真实 Chromium 静态页面测试，实际观察拆分 span、display:contents、非空 SVG/custom、分段敏感 JSON 与动态 token URL 原文泄漏，RED 失败。采集脚本现保留父子关系和文本顺序，从叶到根聚合普通文本，复用 `redactor.displayText` 语义判断；无盒子节点命中时使用最近有盒子祖先遮罩。opaque/批准/敏感子树后代不再独立进入 DOM。真实 PNG 解码验证各私密区域为粉色，安全尾部保持绿色，没有无谓整页遮罩。
+- R9：新增 DOM omitted/嵌套 omitted/局部超限完整性测试，RED 失败。明确语义：`[REDACTED]` 是已知值替换，不自动等于观察缺失；`omitted:true`、`incomplete:true` 以及局部/总量限额均代表源观察缺失。读取按清洗后的结构递归判定，而非搜字符串。局部超限新增真实像素测试，仅遮该区域并保留安全邻居，保存 `omissionReason:limit`；因此上文“节点文本超限整页遮罩”修正为局部有盒子区域遮罩，只有总节点限额整页遮罩。
+- R6：newContext/newPage 挂起取消与 launch 迟到资源的边界测试先 RED；启动前即安装取消处理，立即关闭已得资源，launch 显式 timeout 为 10000ms，迟到 browser/context 仍登记并等待关闭。关闭优先 context 再 browser；真实回归发现并修正同时关闭两者导致的 context 销毁错误。没有新增进程管理架构。
+- R4/R8：前后采证失败丢 flush ID、前置取消提前返回的可控闸门测试 3 项先 RED；现两条失败路径合并全部成功 flush ID，取消等待会话级关闭，不等待自身 host.tail。
+- R5：启动半成品清理失败贯通测试先 RED；新增 `BrowserCleanupError`，与普通启动失败分开；getSession/perform/host.close 保留清理失败，不能包装成普通业务错误或最终假成功。session 部分资源失败测试验证 failures 中保留原始失败（不作为模型输出）。
+- R7：关闭失败提前返回及丢最终 flush 的可控尾部闸门测试先 RED；现关闭、tail、最终 flush、解绑分别等待执行，末尾传播单一或聚合错误；没有自等待。
+
+### 验证命令与结果
+
+```powershell
+$env:CROSSCHECK_REAL_BROWSER='1'; pnpm vitest run packages/tools/test/browser-standard.real.test.ts packages/tools/test/browser-standard-host.test.ts packages/tools/test/browser-standard-session.test.ts packages/tools/test/browser-standard.test.ts packages/tools/test/evidence.test.ts packages/tools/test/evidence-review.test.ts packages/tools/test/task8-presenter.test.ts packages/core/test/guards.test.ts
+pnpm typecheck
+git diff --check
+```
+
+结果：8 个测试文件、143 项通过，包含 10 项真实 Chromium 测试；typecheck 和 diff 检查通过。修复轮按要求只执行定向回归，未重复默认全量，不把首轮 820 项当作本轮新执行结果。
+
+### 自审与剩余边界
+
+- 已逐项对应 R1–R9，未遗留已知未修的重要项；待协调者独立复核，不自称独立批准。
+- 保留首轮网络元数据/正文省略语义；存在 omitted 不能据此断言响应业务字段。原始网络/console 事件有界，存储失败不自动重放业务操作。
+- 普通可信项目的稳定 DOM 截图，不承诺抵御恶意像素编码；动态 URL/JSON 敏感字段已走语义规则，不再用“未登记动态秘密”解释这些漏遮。
+- 超限聚合文本 64000 字符保守省略其最小可用区域；截图仍是当前视口。动态密钥后登记不能回溯清洗 PNG。
+- 取消发生在尚无 browser 的 launch 阶段时，Playwright 不提供 launch 的 AbortSignal；等待明确的最长 10 秒启动期限，若迟到取得资源则关闭后才结束启动。newContext/newPage 阶段已得资源会立即关闭。

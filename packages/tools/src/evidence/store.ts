@@ -98,7 +98,11 @@ export class EvidenceStore {
     // 密钥可能在落盘后才登记；HAR 内嵌正文须按内容类型解析、清洗再序列化。
     if (record.type === 'console') return { id, type: 'console', text: this.redactor.text(bytes.toString('utf8')), sourceIncomplete: bytes.toString('utf8').includes('[omitted:') };
     const payload: unknown = JSON.parse(bytes.toString('utf8'));
-    if (record.type === 'dom') return { id, type: 'dom', text: JSON.stringify(sanitizeDom(payload as DomNode[], this.redactor)), sourceIncomplete: JSON.stringify(payload).includes('"incomplete":true') };
+    if (record.type === 'dom') {
+      const clean = sanitizeDom(payload as DomNode[], this.redactor);
+      const missing = (nodes: DomNode[]): boolean => nodes.some(node => node.omitted === true || node.incomplete === true || !!node.children && missing(node.children));
+      return { id, type: 'dom', text: JSON.stringify(clean), sourceIncomplete: missing(clean as DomNode[]) };
+    }
     if (record.type === 'network') {
       const har = sanitizeHar(payload, this.redactor);
       // 只读取可信 HAR 正文信封的状态，不递归猜业务 JSON 中同名字段。
