@@ -106,4 +106,36 @@ describe('extractRequirements', () => {
     await expect(extractRequirements({ ...options, models: [] })).rejects.toThrow();
     expect(model.doGenerateCalls).toHaveLength(0);
   });
+
+  it('已确认条款随用户消息发送，ID 冲突会被反馈后修正', async () => {
+    const known = [{ ...clause }];
+    const fresh = { id: 'M01-AC-002', text: '禁止匿名', source: { file: 'req.md', line: 2, excerpt: '禁止匿名' } };
+    const { model, options } = setup([finish([clause]), finish([fresh])]);
+    const result = await extractRequirements({ ...options, known });
+    expect(result).toMatchObject({ status: 'done', steps: 2, output: [{ ...fresh, status: 'active' }] });
+    const prompt = model.doGenerateCalls[0]?.prompt ?? [];
+    const message = prompt.find((item) => item.role === 'user');
+    const text = message?.content.find((part) => part.type === 'text');
+    expect(JSON.parse(text?.text ?? 'null')).toEqual({
+      module: 'M01', documents: [{ file: 'req.md', text: '必须登录\n禁止匿名' }], known,
+    });
+    expect(JSON.stringify(prompt)).toContain('已经人工确认');
+    expect(JSON.stringify(model.doGenerateCalls[1]?.prompt)).toContain('与已确认条款冲突：M01-AC-001');
+    expect(known).toEqual([clause]);
+  });
+
+  it('known 为空时消息不包含 known 字段', async () => {
+    const { model, options } = setup([finish([clause])]);
+    expect(await extractRequirements({ ...options, known: [] })).toMatchObject({ status: 'done', steps: 1 });
+    expect(JSON.stringify(model.doGenerateCalls[0]?.prompt)).not.toContain('known');
+  });
+
+  it('连续三次输出已确认的 ID 后返回 invalid-output', async () => {
+    const bad = finish([clause]);
+    const { model, options } = setup([bad, bad, bad]);
+    expect(await extractRequirements({ ...options, known: [clause] })).toMatchObject({
+      status: 'blocked', reason: 'invalid-output', steps: 3,
+    });
+    expect(model.doGenerateCalls).toHaveLength(3);
+  });
 });
