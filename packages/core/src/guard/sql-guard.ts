@@ -32,7 +32,8 @@ type ScanResult = { ok: true; body: string } | { ok: false; reason: string };
  *   与注释同理，不尝试兼容方言，一律拒绝（代价：PG 数组下标 `arr[1]` 会被误拒）。
  * 任何未闭合的字符串/标识符都直接判定失败。
  */
-function scanSql(sql: string): ScanResult {
+function scanSql(sql: string, parameterCount?: number): ScanResult {
+  const parameters = new Set<number>();
   let out = '';
   let i = 0;
   const n = sql.length;
@@ -90,11 +91,21 @@ function scanSql(sql: string): ScanResult {
       return { ok: false, reason: '不允许在字符串/引号标识符之外使用方括号（[ 或 ]）' };
     }
     if (ch === '$') {
-      return { ok: false, reason: '不允许在字符串/标识符/注释之外出现美元符号' };
+      if (parameterCount === undefined) return { ok: false, reason: '不允许在字符串/标识符/注释之外出现美元符号' };
+      const match = /^\$([1-9][0-9]*)/.exec(sql.slice(i));
+      const before = sql[i - 1] ?? '';
+      const after = sql[i + (match?.[0].length ?? 1)] ?? '';
+      const index = Number(match?.[1]);
+      if (!match || /[\p{L}\p{N}_$]/u.test(before) || /[\p{L}\p{N}_$]/u.test(after) || !Number.isSafeInteger(index) || index > parameterCount) return { ok: false, reason: 'PostgreSQL 参数占位符不合法或越界' };
+      parameters.add(index);
+      out += '?';
+      i += match[0].length;
+      continue;
     }
     out += ch;
     i += 1;
   }
+  if (parameterCount !== undefined && parameters.size !== parameterCount) return { ok: false, reason: '参数声明与占位符不匹配或存在缺号' };
   return { ok: true, body: out };
 }
 
@@ -102,14 +113,15 @@ function scanSql(sql: string): ScanResult {
  * 只读 SQL 校验（保守策略，宁可误拒）。
  * 这是第一道防线；数据库工具还会在只读事务/只读账号中执行（计划 2）。
  */
-export function checkReadonlySql(sql: string): GuardResult {
+export function checkReadonlySql(sql: string, options?: { parameterCount: number }): GuardResult {
+  if (options && (!Number.isSafeInteger(options.parameterCount) || options.parameterCount < 0)) return { ok: false, reason: '参数计数必须是非负安全整数' };
   if (DISALLOWED_CONTROL_CHARS.test(sql)) return { ok: false, reason: '包含不允许的控制字符' };
   if (sql.includes('\r')) return { ok: false, reason: '不允许出现 \\r（回车符）' };
   if (sql.includes('\\')) return { ok: false, reason: '不允许使用反斜杠转义' };
   if (sql.includes('#')) return { ok: false, reason: '不允许使用 # 注释' };
   if (UNICODE_ESCAPE_QUOTE.test(sql)) return { ok: false, reason: '不允许使用 Unicode 转义标识符/字符串（U&）' };
   if (UESCAPE_CLAUSE.test(sql)) return { ok: false, reason: '不允许使用 UESCAPE 子句' };
-  const scanned = scanSql(sql);
+  const scanned = scanSql(sql, options?.parameterCount);
   if (!scanned.ok) return scanned;
   let body = scanned.body.trim();
   if (body.endsWith(';')) body = body.slice(0, -1).trim();

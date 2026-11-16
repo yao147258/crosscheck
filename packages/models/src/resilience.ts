@@ -19,15 +19,13 @@ const defaultSleep = (ms: number, signal?: AbortSignal): Promise<void> =>
       resolve();
       return;
     }
-    const timer = setTimeout(() => resolve(), ms);
-    signal?.addEventListener(
-      'abort',
-      () => {
-        clearTimeout(timer);
-        resolve();
-      },
-      { once: true },
-    );
+    const finish = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', finish);
+      resolve();
+    };
+    const timer = setTimeout(finish, ms);
+    signal?.addEventListener('abort', finish, { once: true });
   });
 
 type ErrorClass = 'abort' | 'non-retryable' | 'retryable';
@@ -58,6 +56,7 @@ export async function callWithFallback<T>(
   for (let c = 0; c < chain.length; c++) {
     const { ref, model } = chain[c]!;
     for (let i = 0; i <= retries; i++) {
+      signal?.throwIfAborted();
       attempts++;
       try {
         return { value: await fn(model, ref), ref, attempts };

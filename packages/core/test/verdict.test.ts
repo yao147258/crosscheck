@@ -10,10 +10,15 @@ import {
 } from '../src/index';
 
 const exp: Expectation = { id: 'E1', text: '列出身份', evidence: ['screenshot', 'dom'] };
+const record = (id: string, type: EvidenceRecord['type']): EvidenceRecord => ({
+  id, type, runId: 'run-1', caseId: 'M-TC-1', attempt: 1, actionId: 'a-1',
+  phase: 'execution', time: '2026-11-13T00:00:00.000Z', mime: 'text/plain',
+  path: `runs/run-1/${id}.txt`, digest: `sha256:${'a'.repeat(64)}`, redacted: true,
+});
 const index = new Map<string, EvidenceRecord>([
-  ['ev-1', { id: 'ev-1', type: 'screenshot' }],
-  ['ev-2', { id: 'ev-2', type: 'dom' }],
-  ['ev-3', { id: 'ev-3', type: 'network' }],
+  ['ev-1', record('ev-1', 'screenshot')],
+  ['ev-2', record('ev-2', 'dom')],
+  ['ev-3', record('ev-3', 'network')],
 ]);
 const j = (over: Partial<Judgement> = {}): Judgement => ({
   expectationId: 'E1',

@@ -13,7 +13,7 @@ export interface ExtractRequirementsOptions {
 
 export async function extractRequirements(options: ExtractRequirementsOptions): Promise<AgentResult<Clause[]>> {
   if (options.signal?.aborted) {
-    return { status: 'blocked', reason: 'interrupted', detail: '执行被中断', steps: 0, retried: false, messages: [] };
+    return { status: 'blocked', reason: 'interrupted', detail: '执行被中断', steps: 0, attempts: 0, modelAttempts: [], retried: false, messages: [] };
   }
   const { module, models, budget, signal, resilience } = options;
   const documents = prepareDocuments(module, options.documents);

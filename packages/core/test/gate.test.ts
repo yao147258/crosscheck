@@ -3,6 +3,7 @@ import {
   Approvals,
   assertProfileApproved,
   GateError,
+  PROFILE_FILES,
   selectExecutableCases,
   selectPlannableClauses,
   type Clause,
@@ -61,8 +62,8 @@ describe('selectExecutableCases', () => {
     const t1 = mkCase('M-TC-1', ['M-AC-1']);
     const t2 = mkCase('M-TC-2', ['M-AC-1', 'M-AC-2']);
     const t3 = mkCase('M-TC-3', ['M-AC-1']);
-    a.approve('case', t1.id, t1, 'u');
-    a.approve('case', t2.id, t2, 'u');
+    a.approveCase(t1, [c1], 'u');
+    a.approveCase(t2, [c1, c2], 'u');
     const sel = selectExecutableCases([t1, t2, t3], [c1, c2], a);
     expect(sel.ready.map((t) => t.id)).toEqual(['M-TC-1']);
     expect(sel.blocked).toEqual([
@@ -76,7 +77,7 @@ describe('selectExecutableCases', () => {
     const c1 = mkClause('M-AC-1');
     a.approve('clause', c1.id, c1, 'u');
     const t1 = mkCase('M-TC-1', ['M-AC-1']);
-    a.approve('case', t1.id, t1, 'u');
+    a.approveCase(t1, [c1], 'u');
     const sel = selectExecutableCases([{ ...t1, steps: ['别的步骤'] }], [c1], a);
     expect(sel.ready).toEqual([]);
   });
@@ -85,15 +86,17 @@ describe('selectExecutableCases', () => {
 describe('assertProfileApproved', () => {
   it('全部画像文件已确认时通过', () => {
     const a = Approvals.empty();
-    a.approve('profile', 'auth.yaml', { x: 1 }, 'u');
-    expect(() => assertProfileApproved({ 'auth.yaml': { x: 1 } }, a)).not.toThrow();
+    const files = Object.fromEntries(PROFILE_FILES.map((name) => [name, { x: 1 }]));
+    for (const [name, content] of Object.entries(files)) a.approve('profile', name, content, 'u');
+    expect(() => assertProfileApproved(files, a)).not.toThrow();
   });
 
   it('有未确认或失效的文件时抛出 GateError 并列出原因', () => {
     const a = Approvals.empty();
-    a.approve('profile', 'auth.yaml', { x: 1 }, 'u');
+    const files = Object.fromEntries(PROFILE_FILES.map((name) => [name, { x: 1 }]));
+    for (const [name, content] of Object.entries(files)) if (name !== 'pages.yaml') a.approve('profile', name, content, 'u');
     try {
-      assertProfileApproved({ 'auth.yaml': { x: 2 }, 'pages.yaml': {} }, a);
+      assertProfileApproved({ ...files, 'auth.yaml': { x: 2 } }, a);
       expect.unreachable();
     } catch (err) {
       expect(err).toBeInstanceOf(GateError);

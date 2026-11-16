@@ -94,7 +94,7 @@ describe('extractRequirements', () => {
     };
     expect(await extractRequirements(input)).toEqual({
       status: 'blocked', reason: 'interrupted', detail: '执行被中断',
-      steps: 0, retried: false, messages: [],
+      steps: 0, attempts: 0, modelAttempts: [], retried: false, messages: [],
     });
     expect(model.doGenerateCalls).toHaveLength(0);
   });

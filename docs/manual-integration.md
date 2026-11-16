@@ -1,0 +1,241 @@
+# 手工接入与本地验收
+
+本阶段只面向**已经启动、已准备测试数据、手工配置且经人确认**的项目。不是自动初始化器：没有 init、需求提取、用例生成、TUI、发布到 npm 或 npx 可用承诺。不要把生产环境作为首次接入目标。真实模型调用必须由用户提供环境变量、目标测试环境与授权后自行运行。
+
+## 1. 安装与构建
+
+在 Crosscheck 仓库根目录执行，需要 Node >=22.12、pnpm 9。内部 workspace 被 bundle，真实第三方运行依赖仍由 pnpm 安装；不能单独拷贝一个 JS 就声称独立分发。
+
+```powershell
+pnpm install
+pnpm typecheck
+pnpm test
+pnpm build
+pnpm crosscheck --help
+pnpm --filter @crosscheck/cli exec crosscheck --help
+node packages/cli/dist/index.js --help
+```
+
+浏览器报告测试使用开发依赖 Playwright 的本地 Chromium。若本机尚无浏览器，可显式安装开发工具 `pnpm --filter @crosscheck/cli exec playwright install chromium`。这仅验证报告 file 页面，不代表交付被测网页操作能力。
+
+以下示例假设用户自己启动了 `http://127.0.0.1:3000` 测试应用，`GET /health` 返回成功，`POST /api/action` 改变状态，`GET /api/item` 返回完整 JSON `{ "status": "done" }`。服务不存在时必须先人工提供适配，Crosscheck 不会替用户启动未知系统。
+
+## 2. 手填配置、全部七画像
+
+在被测项目创建 `.crosscheck/system`、`.crosscheck/requirements`、`.crosscheck/cases`。以下各代码块分别保存为标注文件。密钥值只在环境变量，不写 YAML、条款、用例或命令参数。
+
+`.crosscheck/config.yaml`（模型 ID 是示例，用户应替换成自己账户可用、已授权的型号；不保证厂商长期可用）
+
+```yaml
+models:
+  extractor: openai:your-extractor-model
+  planner: openai:your-planner-model
+  executor: openai:your-executor-model
+  reviewer: google:your-reviewer-model
+providers: {}
+defaultEnvironment: local
+budget:
+  perCase: { steps: 30, tokens: 100000, minutes: 5 }
+capabilities: {}
+pricing: {}
+requirementsDocs: []
+```
+
+未登记模型价格时 cost 为 null，显示“未知”，不是 0；失败尝试没有 usage 也不能推算费用。推荐执行/复核使用不同厂商；同源会记录独立性低可靠提示，假模型测试不证明厂商质量。
+
+`.crosscheck/system/environments.yaml`
+
+```yaml
+version: 1
+environments:
+  local:
+    baseURL: http://127.0.0.1:3000
+    healthcheck: http://127.0.0.1:3000/health
+    reset: null
+```
+
+`.crosscheck/system/auth.yaml`
+
+```yaml
+version: 1
+actors:
+  guest: { kind: anonymous }
+  apiUser:
+    kind: token
+    env: TEST_API_TOKEN
+    inject: { kind: header, name: Authorization }
+```
+
+`TEST_API_TOKEN` 值需含服务所需完整前缀（例如 `Bearer ...`）。也可声明 token cookie 注入；**storage 注入不支持**。form/replay 虽能解析为画像，但运行会 BLOCKED，不能当已支持功能。
+
+`.crosscheck/system/api-catalog.yaml`
+
+```yaml
+version: 1
+operations:
+  action:
+    environment: local
+    method: POST
+    path: /api/action
+    description: 将测试条目状态置为完成
+    knowledge: [仅用于已授权隔离测试条目]
+    sources:
+      - { file: 需求.md, line: 1, excerpt: 操作后接口返回完成状态 }
+  item:
+    environment: local
+    method: GET
+    path: /api/item
+    description: 查询测试条目的状态
+    knowledge: []
+    sources:
+      - { file: 需求.md, line: 1, excerpt: 操作后接口返回完成状态 }
+```
+
+`.crosscheck/system/pages.yaml`
+
+```yaml
+version: 1
+pages: {}
+```
+
+`.crosscheck/system/data-model.yaml`
+
+```yaml
+version: 1
+queries: {}
+```
+
+`.crosscheck/system/fixtures.yaml`
+
+```yaml
+version: 1
+fixtures: {}
+```
+
+`.crosscheck/system/guardrails.yaml`
+
+```yaml
+allowedHosts: ["127.0.0.1:3000"]
+forbidden:
+  - { method: DELETE, path: "/**" }
+redactFields: [phone, email]
+```
+
+允许主机精确含端口；禁止终点在重定向每跳发送前检查。允许的业务 POST 仍会真实修改测试状态，网络策略不是业务回滚器，也不是 OS 沙箱。
+
+## 3. 条款与用例
+
+`.crosscheck/requirements/M.yaml`
+
+```yaml
+- id: M-AC-1
+  text: 对测试条目调用操作接口后，查询接口返回 status 为 done。
+  source: { file: 需求.md, line: 1, excerpt: 操作后接口返回完成状态 }
+  status: active
+  notes: 仅隔离测试数据；不覆盖页面交互。
+```
+
+`.crosscheck/cases/M.yaml`
+
+```yaml
+- id: M-TC-1
+  covers: [M-AC-1]
+  fixtures: []
+  actor: guest
+  steps:
+    - POST /api/action 执行已授权测试操作
+    - GET /api/item 查询状态
+  expectations:
+    - id: E1
+      text: 操作接口返回成功状态
+      evidence: [network]
+    - id: E2
+      text: 查询接口 JSON 中 status 为 done
+      evidence: [network]
+```
+
+用例需显式声明 network/db 证据。screenshot/dom 证据会在 start/reset/网络/模型前 BLOCKED。计划 2 **不含浏览器工具**：WebSocket 无法在发送前可靠阻断，故不交付页面导航、点击、表单、replay、storage 或截图采集；不能宣称支持页面操作验收。HTML 保留已保存 PNG 的静态渲染接口，run 没有截图时显示“无截图证据”，不放占位图。
+
+## 4. 人工审阅与独立确认
+
+先逐项核对七画像全部内容、主机端口、禁止规则、模型与预算、条款原文出处、用例副作用、预期和证据。确认不是 run 的行为，也不能靠重新确认条款恢复旧 case 绑定。
+
+仓库提供独立、可阅读脚本 `scripts/manual-approve.ts`。它调用 `loadProfile` 得到解析后七画像，再 `Approvals.approve('profile', ...)`、`approve('clause', ...)`，最后对每个用例调用 **`approveCase(tc, clauses, by)`** 绑定 covers 条款内容，而不是直接 approve 原始用例。不要将脚本加入 run、CI 自动确认或绕过人工审查。该示例批量确认当前全部输入；若只同意部分，应修改/另写脚本按 ID 选择，不确认其他项。
+
+```powershell
+# 构建独立人工脚本，不进入生产 CLI bundle
+node scripts/build.mjs --approval
+# 只有人工实际逐项审阅后才执行；参数是人工明确确认，不是自动审核
+node packages/cli/dist/manual-approve.js E:/my-test-project 审核人 我已逐项审阅并确认
+```
+
+脚本不访问服务、不调用模型。修改条款/用例/画像后原确认失效；改条款后需重新审阅相关用例并再次 approveCase。执行中输入固定内存快照，下一次 resume 重新验证所有来源和执行策略 fingerprint；不兼容即拒绝。
+
+## 5. 用户授权后的真实运行
+
+以下环境变量需要用户自行提供，不要把命令带真实密钥提交。离线 report 不需要任何模型 key。
+
+```powershell
+$env:OPENAI_API_KEY = '<用户本地提供>'
+$env:GOOGLE_GENERATIVE_AI_API_KEY = '<用户本地提供>'
+# 只有使用 apiUser 时需要；完整值由测试环境决定
+$env:TEST_API_TOKEN = 'Bearer <用户本地提供>'
+pnpm crosscheck run --project E:/my-test-project --environment local --module M --case M-TC-1
+# 多次 module/case 各自取集合，两类筛选取交集；未知或空选择不是通过
+pnpm crosscheck run --project E:/my-test-project --module M --case M-TC-1 --resume
+pnpm crosscheck run --project E:/my-test-project --resume <runId>
+```
+
+`--resume` 不带值选择最新兼容的未完成运行，带 runId 指定历史运行。complete 的 PASS/FAIL/DISPUTED/UNCLEAR/业务 BLOCKED 都不会重放。incomplete 使用新 attempt；先前业务动作可能已经发生，不能声称取消会回滚，reset/fixture 幂等性由接入者审查。
+
+Ctrl+C/SIGTERM 只触发 AbortController；CLI await 工具清理、trace/index/result/summary 与报告后设置 exitCode，不强制 process.exit。Windows CI 使用 IPC 验证等价取消；原生终端 Ctrl+C/控制台事件传递仍依实际启动器而异。
+
+退出码：0 全 PASS；1 含 FAIL（疑似 bug，待人工复核）；2 其余、空、阻断、恢复拒绝、中断或参数错误；3 宿主存储/锁/工具/清理/报告错误，优先于业务结果。无 result 的失败不伪造 PASS。report 成功退出0只表示离线报告重建成功，不重写原业务状态。
+
+## 6. 离线报告
+
+```powershell
+pnpm crosscheck report <runId> --project E:/my-test-project
+# 只有显式 --open 才尝试打开系统默认浏览器
+pnpm crosscheck report <runId> --project E:/my-test-project --open
+```
+
+工件在 `.crosscheck/runs/<runId>/`：`input.json`（来源/策略 fingerprint 与脱敏展示快照/digest）、`manifest.json`、`cases/<caseId>/attempts/<n>/`（证据、trace.jsonl、models.json、result.json）、`results.json`、`junit.xml`、`report/index.html`。报告可直接 file 打开，无 fetch/CDN/脚本；采集 HTML/SVG 仅转义显示，PNG 验 hash 后静态内嵌。路径、归属、引用、结果 schema、快照 digest 与真实文件 hash 损坏则拒绝，不用模型修补。
+
+报告不读当前 requirements/cases/system/config；删除这些文件也能解释历史快照。不要删除旧 run 的 input、manifest、证据、trace 和结果。复制离线报告可单独分享 HTML 的已嵌入内容；JSON/JUnit 另行提供。分享前人工检查其中的业务敏感内容，自动脱敏不等同绝对无泄漏。
+
+JUnit FAIL 为 failure，其余非 PASS 为 skipped，并保留原状态属性；不能把 DISPUTED 看作测试通过。预算、双方判断、低可靠、夹具建议和漂移保留，漂移不改业务结论。
+
+## 7. 可选 PostgreSQL 与准备适配
+
+无需数据库时保留上述 `queries: {}`，不设置连接变量。只有得到用户指定数据库与授权后才启用，例如替换 data-model：
+
+```yaml
+version: 1
+connection: { kind: postgres, env: READ_DB_URL }
+queries:
+  item:
+    sql: SELECT status FROM acceptance_items WHERE id = $1
+    parameters:
+      - { name: itemId, type: string, nullable: false }
+```
+
+`READ_DB_URL` 必须完整 TCP URL：`postgresql://reader:非空密码@指定主机:5432/数据库?sslmode=verify-full`（需正确 URL 编码密码）。默认 verify-full；显式 `sslmode=disable` 仅限人工接受的隔离环境。不支持省略账号/密码/库、Unix socket、文件证书 query、其他 query、PG 环境回退或 multi-host URL。服务端账号必须只读且无超级用户/建库/建角色/复制/bypassrls 等特权；执行器用只读事务与保守 SELECT 验证，业务数据库写入禁止。本轮真实 PG 未执行，不能视为已经部署验证。
+
+HTTP fixture 仅引用已批准 operation、固定 JSON body；返回需成功且为完整、未截断 JSON，非 JSON/省略或截断直接 BLOCKED，不 fall back 造数。fixture 所引用 operation 不能依赖 actor，准备发生在认证前。不把 preparation 证据当业务通过依据。
+
+reset 是显式 fixture 名或 null。准备阶段 SQL fixture 只能用独立准备连接和已批准具名 SQL/固定参数，绝不能复用只读连接身份；只在宿主准备阶段可达，执行模型无准备连接或写工具。首次接入推荐 reset:null 和无 fixture，由用户手工准备已知数据；缺失普通 fixture 的现场造数会记录低可靠和补充夹具建议，需人工审查。
+
+start/stop 是可选的批准**一次性 JSON 适配命令**：`{ program: '<可执行文件>', argv: ['参数'], env: { CHILD_ENV: 'HOST_ENV' } }`，无 shell，限时、退出0且 stdout 为合法 JSON（可 `{}`）。不是启动/管理前台常驻服务的接口。只有本 case start 成功才配对一次 stop；stop 用独立有界 signal，失败宿主错误3。可信适配器自己脱离进程树无法保证回收，不提供 OS 沙箱/Job Object 承诺。
+
+## 准备证据与动态身份安全边界
+
+- `command` actor 的动态凭证在认证前尚未知晓。此阶段（含 start、health、reset、已知/现场夹具、认证日志）**所有证据载荷在写入前省略**，只保存宿主生成的 ID/归属及固定省略信封；不写原载荷或原文临时文件。相关动作轨迹也省略输入/输出。认证成功且秘密登记完成后才开放正常业务采证；不会回填旧证据，旧信封明确不完整，digest 始终对应实际保存字节。认证失败、取消或已知夹具失败同样不保存未知载荷。
+- 这是保守能力收窄：`command` actor 依赖准备期 HTTP 响应 JSON 变量的已知 fixture 会 **BLOCKED**，因为省略信封不能供变量提取；需要普通 missing fixture 的 HTTP 现场准备也会因证据不完整而 **BLOCKED**，不会提前认证或静默宣称准备成功。可改用已批准且不依赖响应载荷的 command/SQL fixture，或使用可预登记凭证的 token actor；不得为了绕过门禁把秘密写入画像。
+- 普通 missing fixture 的准备 `finish` 输出为 `{ "prepared": true, "evidenceIds": ["宿主HTTP证据ID"] }`。必须引用本次现场准备窗口内、当前 attempt、hash 已核验且来源完整/响应成功的真实 HTTP 观察；health、已知 fixture 日志、业务证据或模型陈述均不能替代。缺失/无效凭据在同一个 agent 循环累计最多三次修正后 BLOCKED，不认证、不执行业务。凭据只证明前置状态声明有真实观察，不是条款判定，不送独立 review。
+- DB 业务依据必须是生产顶层 `status: success`、`sent: true`、`rows` 数组且 `truncated: false` 的完整查询信封。blocked/连接失败/timeout/cancelled 等事件仍保留审计，但以来源不完整呈现并排除 required 业务查询集合，不能满足 pass/fail 业务证据门禁；不解释 rows 内同名业务字段。unclear 可无证据，有引用仍核验归属/hash/呈现完整性。
+- 最终 reasoning/reason/建议/漂移/可靠性错误统一按 JSON 与明确 URL 语义清洗，再清洗已知秘密；可信 usage/budget 数字不作通用 token 键脱敏。证据读取后的正常取消返回中断/预算，不标记宿主故障；真实读取/verify 异常即使同时取消仍为宿主错误，不 retry/fallback。
+
+## 当前验证边界
+
+HTTP loopback、SDK scripted 模型、实际构建 CLI、静态 HTML file 浏览器检查与 Node 22.12 冒烟有自动验证；不是三厂商质量、召回率/误报率或真实环境验收。真实厂商和真实 PG 未执行。浏览器执行工具为暂缓（未交付），不是“未测但支持”。
