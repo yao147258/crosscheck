@@ -2,6 +2,18 @@
 
 > 本文件是设计说明（spec），不是实施计划。实施任务拆分见后续由 writing-plans 产出的计划文档。
 
+## 当前有效裁定：标准浏览器自动测试（用户后续确认）
+
+用户明确要求“先不要这层安全防护”“只要 AI 能自动执行浏览器操作完成测试就行了”。本节覆盖下文旧的严格网络准入方案；下文保留为研究历史，不再作为交付前置条件。
+
+- 使用标准 Playwright Chromium，每用例独立 BrowserContext，宿主惰性启动并负责超时、取消和关闭。删除本分支未交付的强制代理/CDP 多路复用研究实现及其特定验收测试；历史保留在 Git 提交中，不新增可选模式或开关。
+- 不拦截浏览器页面自身的请求、重定向、WebSocket、WebTransport、WebRTC，不再要求禁用这些 API。此功能用于用户信任的测试项目，不提供浏览器网络隔离保证。
+- AI 使用受限 navigate/click/fill/select/press/wait/observe 操作，支持定位器、页面状态、前后截图/DOM/网络/console 证据。模型不获得任意 evaluate、shell、宿主文件或落盘路径能力；navigate 只接收 HTTP(S) 或相对测试站点 URL。
+- 凭证环境变量引用、证据先脱敏后落盘、人工确认、共享预算、执行/复核隔离及资源清理仍然有效；HTTP/数据库工具原有守卫不变。
+- 截图为内存 PNG：遮罩密码、敏感输入、已知敏感文本、批准的 screenshotMasks，以及无法验证的 iframe/canvas 等区域。PNG 经可信采集器交证据仓库，不启用原始 Playwright trace/HAR/storageState 文件。
+- HTTP 与浏览器共享同一 actor 的同源身份；form/replay 消费批准动作，不实现录制。图片按实际候选模型能力呈现，无图候选不得伪造看过截图。
+- 验收以真实 loopback 应用+Chromium+假模型完整操作、采证、双判、报告为准，不消耗外部模型 token。网页请求正常运行应纳入测试，不再运行已放弃的严格准入断言。
+
 ## 1. 背景与裁定历史
 
 计划 2 Task 5（`docs/superpowers/plans/2026-11-13-plan2-execution.md` 第125–134行）要求浏览器工具在发送前对所有受支持 target 的请求做准入拦截，未覆盖的能力不得开放。
