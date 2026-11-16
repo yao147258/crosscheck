@@ -14,7 +14,7 @@ export const DispositionSchema = z.strictObject({
   clauseId: ClauseIdSchema.optional(),
   note: z.string().default(''),
   by: z.string().min(1),
-  at: z.string().datetime(),
+  at: z.iso.datetime(),
 }).superRefine((value, ctx) => {
   if ((value.decision === 'clause_issue') !== (value.clauseId !== undefined)) {
     ctx.addIssue({ code: 'custom', path: ['clauseId'], message: '只有"条款有问题"需要且必须指定条款' });
