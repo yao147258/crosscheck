@@ -2,7 +2,7 @@
  * 假 CDP 通道测试（mock，非真实浏览器）：只验证多路复用器的消息顺序、ID 隔离与 fail-closed 逻辑，
  * 不能作为“请求在发送前被阻断”的安全证据；该证据见 browser-admission.real.test.ts。
  */
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { GuardrailsSchema } from '../../core/src/index';
 import { RequestPolicy } from '../src/network/policy';
 import { GuardedCdpMux, policyDecider, type CdpChannel, type CdpMessage } from '../src/browser/request-guard';
@@ -107,6 +107,21 @@ describe('GuardedCdpMux（假通道）', () => {
     expect(fatal[0]).toMatch(/守卫安装失败/);
     expect(channel.closed).toBe(true);
     expect(closedReason).toBeDefined();
+  });
+
+  it('正常停止不报告 fatal，但仍关闭通道且幂等', () => {
+    const { mux, channel, fatal } = setup();
+    mux.shutdown('正常关闭', false); mux.shutdown('重复关闭', false);
+    expect(channel.closed).toBe(true); expect(fatal).toHaveLength(0);
+  });
+
+  it('调试环境不能输出含凭证的原始 CDP 参数', () => {
+    const { transport, channel } = setup();
+    vi.stubEnv('CC_CDP_DEBUG', '1'); const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      transport.send({ id: 1, method: 'Network.setExtraHTTPHeaders', params: { headers: { authorization: 'secret-test' } } });
+      expect(channel.last('Network.setExtraHTTPHeaders')).toBeDefined(); expect(log).not.toHaveBeenCalled();
+    } finally { log.mockRestore(); vi.unstubAllEnvs(); }
   });
 
   it('通道断开触发 fail-closed', () => {

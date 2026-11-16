@@ -5,9 +5,9 @@
  * - C（localhost，允许）：跨站 iframe（OOPIF）与跨站跳转目标；
  * - F（127.0.0.1 另一端口，禁止）：任何请求或 WebSocket upgrade 计数都必须保持 0。
  *
- * 浏览器工具已按用户裁定暂缓（WebSocket 无法发送前阻断，见 task-5-report.md），
- * 本文件只作为准入研究记录，需显式设置 CROSSCHECK_REAL_BROWSER=1 才运行。
- * 两项 WebSocket 测试按裁定保持失败、不标记为预期失败；开启后会如实报红。
+ * Task 1 将 WebSocket 改为 host:port 准入；普通 HTTP(S) 仍执行完整 Fetch 策略。
+ * 需显式设置 CROSSCHECK_REAL_BROWSER=1；WT/RTC 未禁用时保持真实失败，不标记预期失败。
+ * 失败意味着安全准入阻塞，不能据此导出或接入浏览器工具。
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createServer, request as httpRequest, type IncomingMessage, type Server } from 'node:http';
@@ -16,6 +16,8 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { createSocket } from 'node:dgram';
+import { createServer as tcpServer, type Socket } from 'node:net';
 import { chromium, type Page } from 'playwright';
 import { GuardrailsSchema } from '../../core/src/index';
 import { RequestPolicy } from '../src/network/policy';
@@ -26,7 +28,7 @@ import { launchGuardedChromium, type GuardedBrowser } from '../src/browser/sessi
 const skip = process.env.CROSSCHECK_REAL_BROWSER !== '1';
 
 interface Hit { path: string; method: string; headers: IncomingMessage['headers']; body: string }
-interface Svc { server: Server; port: number; hits: Hit[]; upgrades: string[] }
+interface Svc { server: Server; port: number; hits: Hit[]; upgrades: string[]; connections: number }
 
 async function serve(host: string, handler: (req: IncomingMessage, body: string, res: import('node:http').ServerResponse, svc: Svc) => void): Promise<Svc> {
   const svc = { hits: [] as Hit[], upgrades: [] as string[] } as Svc;
@@ -35,6 +37,8 @@ async function serve(host: string, handler: (req: IncomingMessage, body: string,
     req.on('data', (c: Buffer) => { body += c.toString(); });
     req.on('end', () => { svc.hits.push({ path: req.url ?? '', method: req.method ?? '', headers: req.headers, body }); handler(req, body, res, svc); });
   });
+  svc.connections = 0;
+  svc.server.on('connection', () => svc.connections++);
   svc.server.on('upgrade', (req, socket) => { svc.upgrades.push(req.url ?? ''); socket.destroy(); });
   await new Promise<void>((r) => svc.server.listen(0, host, r));
   svc.port = (svc.server.address() as { port: number }).port;
@@ -99,7 +103,7 @@ beforeAll(async () => {
   a = `http://127.0.0.1:${A.port}`;
   root = await mkdtemp(path.join(tmpdir(), 'cc-browser-'));
   const guardrails = GuardrailsSchema.parse({ allowedHosts: [`127.0.0.1:${A.port}`, `localhost:${C.port}`, `127.0.0.1:${C.port}`], forbidden: [{ method: 'POST', path: '/api/forbidden-write' }] });
-  session = await launchGuardedChromium({ userDataDir: path.join(root, '.crosscheck', 'browser', 'profile'), guard: { decide: policyDecider(new RequestPolicy(guardrails)), onEvent: (e) => events.push(e) } });
+  session = await launchGuardedChromium({ allowedHosts: guardrails.allowedHosts, userDataDir: path.join(root, '.crosscheck', 'browser', 'profile'), guard: { decide: policyDecider(new RequestPolicy(guardrails)), onEvent: (e) => events.push(e) } });
 }, 60_000);
 
 afterAll(async () => {
@@ -151,7 +155,8 @@ describe.skipIf(skip)('真实 Chromium 发送前准入（loopback 计数）', { 
       req.on('error', () => resolve()); req.on('upgrade', () => resolve()); req.on('close', () => resolve()); req.end();
     });
     expect(F.upgrades).toContain('/ws-control');
-    F.hits.length = 0; F.upgrades.length = 0;
+    expect(F.connections).toBeGreaterThan(0);
+    F.hits.length = 0; F.upgrades.length = 0; F.connections = 0;
   });
 
   let page: Page;
@@ -232,11 +237,80 @@ describe.skipIf(skip)('真实 Chromium 发送前准入（loopback 计数）', { 
     expect(F.hits).toHaveLength(0);
   });
 
-  it('WebSocket（禁止与允许主机）在握手前被拒绝：upgrade 计数 0', async () => {
+  it('spawn 失败及时拒绝且清理代理，不等待不存在的 exit', async () => {
+    await expect(launchGuardedChromium({ allowedHosts: [], userDataDir: path.join(root, 'missing-profile'), executablePath: path.join(root, '不存在.exe'), guard: { decide: () => ({ allow: false, reason: '测试' }) } })).rejects.toThrow();
+  }, 4000);
+
+  it.each(['--disable-features=WebTransport', '--disable-blink-features=WebTransport'])('WebTransport 开关对照：%s 必须不可用或同步拒绝', async (flag) => {
+    const b = await chromium.launch({ headless: true, args: [flag] });
+    try {
+      const p = await b.newPage(); await p.goto(a);
+      expect(await p.evaluate('isSecureContext')).toBe(true);
+      const state = await p.evaluate(`(() => {
+        if (typeof WebTransport === 'undefined') return '不可用';
+        try { const t = new WebTransport('https://127.0.0.1:4443/'); t.ready.catch(() => {}); t.closed.catch(() => {}); t.close(); return '仍可构造'; }
+        catch { return '同步拒绝'; }
+      })()`);
+      console.log('[WT 开关对照]', flag, state); expect(state).not.toBe('仍可构造');
+    } finally { await b.close(); }
+  });
+
+  it('安全 loopback 上 WebTransport 不可用或构造同步拒绝', async () => {
+    const p = await session.browser.newPage();
+    try {
+      await p.goto(a);
+      expect(await p.evaluate('isSecureContext')).toBe(true);
+      const result = await p.evaluate(`(() => {
+        if (typeof WebTransport === 'undefined') return '不可用';
+        try { const t = new WebTransport('https://127.0.0.1:4443/'); t.ready.catch(() => {}); t.closed.catch(() => {}); t.close(); return '仍可构造'; }
+        catch { return '同步拒绝'; }
+      })()`);
+      console.log('[WT 实测]', session.browser.version(), result);
+      expect(result).not.toBe('仍可构造');
+    } finally { await p.close(); }
+  });
+
+  it('WebRTC 无防护对照有效；受控浏览器 UDP/STUN 与 TCP/TURN 均零到达', async () => {
+    const udp = createSocket('udp4'); let udpCount = 0, tcpCount = 0;
+    udp.on('message', () => udpCount++);
+    await new Promise<void>((r) => udp.bind(0, '127.0.0.1', r));
+    const sockets = new Set<Socket>();
+    const tcp = tcpServer((s) => { tcpCount++; sockets.add(s); s.on('data', () => {}); s.on('close', () => sockets.delete(s)); });
+    await new Promise<void>((r) => tcp.listen(0, '127.0.0.1', r));
+    const ports = { udp: udp.address().port, tcp: (tcp.address() as { port: number }).port };
+    const attempt = async (p: Page) => p.evaluate(`(async ({ udp, tcp }) => {
+      const pcs = [];
+      try {
+        for (const server of [{ urls: 'stun:127.0.0.1:' + udp }, { urls: 'turn:127.0.0.1:' + tcp + '?transport=tcp', username: 'test', credential: 'test' }]) {
+          const pc = new RTCPeerConnection({ iceServers: [server] }); pcs.push(pc); pc.createDataChannel('test'); await pc.setLocalDescription(await pc.createOffer());
+        }
+        await new Promise((r) => setTimeout(r, 2500)); return '已尝试';
+      } catch { return '不可用或拒绝'; }
+      finally { pcs.forEach((pc) => pc.close()); }
+    })(${JSON.stringify(ports)})`);
+    const control = await chromium.launch({ headless: true });
+    try {
+      const p = await control.newPage(); await p.goto(a); await attempt(p);
+      console.log('[RTC 对照]', JSON.stringify({ udpCount, tcpCount }));
+      expect(udpCount).toBeGreaterThan(0); expect(tcpCount).toBeGreaterThan(0);
+      await control.close(); udpCount = 0; tcpCount = 0;
+      const guarded = await session.browser.newPage();
+      try { await guarded.goto(a); const state = await attempt(guarded); console.log('[RTC 受控]', JSON.stringify({ state, udpCount, tcpCount })); }
+      finally { await guarded.close(); }
+      expect(udpCount).toBe(0); expect(tcpCount).toBe(0);
+    } finally {
+      await control.close(); for (const s of sockets) s.destroy();
+      await new Promise<void>((r) => tcp.close(() => r())); await new Promise<void>((r) => udp.close(r));
+    }
+  });
+
+  it('WebSocket 按 host:port 准入：禁止主机零握手，允许主机确实到达', async () => {
     await page.goto(`${a}/ws`);
     await settle(2000);
     expect(F.upgrades).toHaveLength(0);
-    expect(A.upgrades).toHaveLength(0);
+    expect(A.upgrades).toContain('/ws-allowed-host');
+    expect(F.connections).toBe(0);
+    console.log('[WS 实测]', JSON.stringify({ forbiddenTcp: F.connections, forbiddenUpgrades: F.upgrades.length, allowedUpgrades: A.upgrades.length }));
   });
 
   it('noopener 弹窗首屏立即发起 WebSocket：upgrade 计数 0', async () => {
@@ -282,7 +356,8 @@ describe.skipIf(skip)('真实 Chromium 发送前准入（loopback 计数）', { 
 
   it('关闭后浏览器进程树退出，无残留 Chromium 进程使用本次 profile', async () => {
     const pid = session.process.pid!;
-    await session.close();
+    await Promise.all([session.close(), session.close()]);
+    expect(session.fatalReason).toBeUndefined();
     expect(session.process.exitCode !== null || session.process.signalCode !== null).toBe(true);
     if (process.platform === 'win32') {
       const out = spawnSync('powershell', ['-NoProfile', '-Command', `Get-CimInstance Win32_Process -Filter \"Name='chrome.exe'\" | Where-Object { $_.CommandLine -like '*${root.replace(/'/g, "''")}*' } | Measure-Object | Select-Object -ExpandProperty Count`], { encoding: 'utf8' }).stdout.trim();

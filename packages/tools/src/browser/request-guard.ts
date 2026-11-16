@@ -153,14 +153,14 @@ export class GuardedCdpMux {
     return transport;
   }
 
-  shutdown(reason: string): void {
+  shutdown(reason: string, fatal = true): void {
     if (this.closed) return;
     this.closed = true;
     for (const [, p] of this.pending) { clearTimeout(p.timer); p.reject(new Error(reason)); }
     this.pending.clear();
     // 必须先终止浏览器进程再关闭连接：调试连接断开会释放仍在等待调试器的 target，
     // 已实测（真实 Chromium）先断连会让暂停中的 worker 在被杀死前发出未受守卫的请求。
-    this.options.onFatal(reason);
+    if (fatal) this.options.onFatal(reason);
     try { this.channel.close(); } catch { /* 已关闭 */ }
     const onclose = this.pwOnClose;
     this.pwOnClose = undefined;
@@ -171,7 +171,6 @@ export class GuardedCdpMux {
 
   private fromPlaywright(message: CdpMessage): void {
     if (this.closed) return;
-    if (process.env.CC_CDP_DEBUG) console.log('PW>', message.method, message.sessionId ?? '', JSON.stringify(message.params ?? {}).slice(0, 160));
     const replyError = (text: string) => this.enqueue(() => this.toPlaywright({ id: message.id, error: { code: -32000, message: text }, ...(message.sessionId ? { sessionId: message.sessionId } : {}) }));
     if (message.sessionId && this.hidden.has(message.sessionId)) return replyError('target 不受支持');
     let params = message.params ?? {};
@@ -250,7 +249,6 @@ export class GuardedCdpMux {
     const params = message.params as { sessionId: string; targetInfo: { targetId: string; type: string }; waitingForDebugger: boolean };
     const { sessionId, targetInfo, waitingForDebugger } = params;
     const type = targetInfo.type;
-    if (process.env.CC_CDP_DEBUG) console.log('ATTACH', type, waitingForDebugger, JSON.stringify(targetInfo).slice(0, 300));
     if (!GUARDED_TYPES.has(type) || !waitingForDebugger) {
       // 不受支持的 target（service_worker、shared_worker 等），或已在运行、无法证明守卫先于请求：不交给 Playwright，并关闭
       this.hidden.add(sessionId);
@@ -267,11 +265,12 @@ export class GuardedCdpMux {
     try {
       await this.command('Fetch.enable', { patterns: [{ urlPattern: '*', requestStage: 'Request' }] }, sessionId).catch((error: unknown) => {
         // dedicated worker 无 Fetch 域：其请求是否经父页面拦截须由真实计数测试证明（待验证，不预设）
-        if (type === 'worker' && error instanceof Error && /wasn't found/.test(error.message)) { if (process.env.CC_CDP_DEBUG) console.log('WORKER no Fetch domain'); return; }
+        if (type === 'worker' && error instanceof Error && /wasn't found/.test(error.message)) return;
         throw error;
       });
       // 注意：不安装 Network.setBlockedURLs。已用真实 Chromium 158 验证其 urls/urlPatterns 均不能阻止
-      // WebSocket 握手（禁止服务仍收到 upgrade），且在 noopener 弹窗上只在恢复后才应答。WebSocket 目前不受保护。
+      // WebSocket 握手（禁止服务仍收到 upgrade），且在 noopener 弹窗上只在恢复后才应答。
+      // WebSocket 仅由强制代理按 host:port 准入，不执行本层的方法/路径/正文策略。
       await this.command('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: true, flatten: true }, sessionId).catch((error: unknown) => {
         // dedicated worker 等可能不支持子级自动附着，但它们的子 worker 也无法绕过父级附着
         if (type === 'page' || type === 'iframe') throw error;
