@@ -100,7 +100,7 @@ describe('首页与画像视图', () => {
     expect((await Approvals.load(artifacts)).record('profile', 'environments.yaml')).toBeUndefined();
   });
 
-  it.each([1, 2, 3])('第 %i 个入口显示模块选择或结果占位且 Esc 返回首页', async (index) => {
+  it.each([1, 2, 3])('第 %i 个入口显示模块或运行选择且 Esc 返回首页', async (index) => {
     const { session } = await createProject();
     const ui = render(<App env={{ session, editor: noEditor, open }} initial={{ name: 'home' }} />);
     await waitFor(() => frame(ui).includes('待处理 7'));
@@ -110,7 +110,7 @@ describe('首页与画像视图', () => {
       await waitFor(() => frame(ui).includes(`› ${label}`));
     }
     ui.stdin.write(KEYS.enter);
-    await waitFor(() => frame(ui).includes(index === 3 ? '尚未实现' : '选择模块'));
+    await waitFor(() => frame(ui).includes(index === 3 ? '选择运行' : '选择模块'));
     if (index !== 3) expect(frame(ui)).toContain('（空）');
     ui.stdin.write(KEYS.escape);
     await waitFor(() => frame(ui).includes('画像审核（待处理 7）'));

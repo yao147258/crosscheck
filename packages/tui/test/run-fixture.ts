@@ -11,10 +11,10 @@ const judgements = (verdicts: Record<string, string>, evidenceIds: string[], rea
 });
 
 /** 真实运行器、假模型及受控传输：不访问网络，E1 FAIL、E2 DISPUTED、E3 PASS。 */
-export async function createFailedRun() {
+export async function createFailedRun(clauseCount = 2) {
   const project = await createProject();
   const { artifacts } = project;
-  const clauses = [clause(1), clause(2)];
+  const clauses = Array.from({ length: clauseCount }, (_, i) => clause(i + 1));
   const tc = TestCaseSchema.parse({
     id: 'M-TC-1', covers: clauses.map((c) => c.id), actor: 'guest', steps: ['GET /value'],
     expectations: [

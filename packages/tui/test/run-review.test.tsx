@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { runReview } from '../src/index';
 import { cleanupProjects, clause, createProject, testCase } from './fixture';
 import { deferred, KEYS, waitFor } from './helpers';
+import { createFailedRun } from './run-fixture';
 
 const terminal = vi.hoisted(() => ({
   options: {} as RenderOptions,
@@ -58,6 +59,18 @@ const editor = { async edit() { throw new Error('本测试不使用编辑器'); 
 const open = async () => {};
 
 describe('runReview 真实 Ink 退出码', () => {
+  it.each(['备注', '条款选择', '详情'] as const)('结果%s中的 Ctrl+C 返回 2 且不提交裁决', async (mode) => {
+    const { project, runId } = await createFailedRun();
+    const io = createTerminal();
+    const result = runReview({ artifacts: project.artifacts, reviewer: '退出码测试', editor, open, view: 'results', runId });
+    await waitFor(() => io.output().includes('› M-TC-1/E1'));
+    io.stdin.write(mode === '备注' ? 'b' : mode === '条款选择' ? 'c' : KEYS.enter);
+    await waitFor(() => io.output().includes(mode === '备注' ? '备注' : mode === '条款选择' ? '选择有问题的条款' : '完整详情'));
+    io.stdin.write('\u0003');
+    await expect(result).resolves.toBe(2);
+    expect(await project.artifacts.readBytes(`runs/${runId}/dispositions.json`)).toBeUndefined();
+  });
+
   it.each(['clauses', 'cases'] as const)('%s 完整详情中的 Ctrl+C 保持中断码 2', async (view) => {
     const { artifacts } = await createProject();
     await artifacts.saveClauses('M', [clause(1)]);
