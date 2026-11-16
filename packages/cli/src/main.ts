@@ -4,6 +4,7 @@ import { InterruptedError, type CommandDependencies } from './context';
 import { initCommand } from './init';
 import { planCommand } from './plan';
 import { reqsCommand } from './reqs';
+import { reviewCommand } from './review';
 import { runCommand } from './run';
 import { writeReport } from './report';
 export { parseArgs } from './args';
@@ -21,7 +22,7 @@ export async function cliMain(argv: string[], options: { log?: (s: string) => vo
       case 'init': return await initCommand(args, log, deps, options.signal);
       case 'reqs': return await reqsCommand(args, log, deps, options.signal);
       case 'plan': return await planCommand(args, log, deps, options.signal);
-      default: throw new Error(`命令尚未实现：${args.command}`);
+      case 'review': return await reviewCommand(args, log, deps, options.signal);
     }
   } catch (error) {
     if (args.command === 'run' || args.command === 'report') { log('宿主存储、证据校验或报告操作失败'); return 3; }

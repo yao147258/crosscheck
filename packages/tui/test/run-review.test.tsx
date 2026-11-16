@@ -1,5 +1,5 @@
 import { PassThrough } from 'node:stream';
-import { Approvals } from '@crosscheck/core';
+import { Approvals, ArtifactStore } from '@crosscheck/core';
 import type { RenderOptions } from 'ink';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { runReview } from '../src/index';
@@ -58,7 +58,68 @@ function createTerminal() {
 const editor = { async edit() { throw new Error('本测试不使用编辑器'); } };
 const open = async () => {};
 
-describe('runReview 真实 Ink 退出码', () => {
+describe('runReview 真实 Ink 退出码（组件模拟流，不代表真实 TTY）', () => {
+  it('预取消不打开审核会话或渲染', async () => {
+    const { artifacts } = await createProject();
+    const io = createTerminal();
+    const read = vi.spyOn(artifacts, 'readBytes');
+    await expect(runReview({ artifacts, reviewer: '取消测试', editor, open, signal: AbortSignal.abort() })).resolves.toBe(2);
+    expect(read).not.toHaveBeenCalled();
+    expect(io.output()).toBe('');
+  });
+
+  it('空闲时外部取消退出 2', async () => {
+    const { artifacts } = await createProject();
+    const io = createTerminal(); const controller = new AbortController();
+    const result = runReview({ artifacts, reviewer: '取消测试', editor, open, view: 'profile', signal: controller.signal });
+    await waitFor(() => io.output().includes('environments.yaml'));
+    controller.abort();
+    await expect(result).resolves.toBe(2);
+  });
+
+  it('外部取消等待当前写盘结束，禁止新动作并自动退出 2', async () => {
+    const { artifacts } = await createProject();
+    const gate = deferred<void>(); const entered = deferred<void>();
+    const write = artifacts.writeJson.bind(artifacts);
+    vi.spyOn(artifacts, 'writeJson').mockImplementation(async (...args) => { entered.resolve(); await gate.promise; return write(...args); });
+    const io = createTerminal(); const controller = new AbortController(); let settled = false;
+    const result = runReview({ artifacts, reviewer: '取消测试', editor, open, view: 'profile', signal: controller.signal });
+    void result.then(() => { settled = true; });
+    await waitFor(() => io.output().includes('environments.yaml'));
+    io.stdin.write('a'); await entered.promise;
+    controller.abort(); io.stdin.write('r');
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(settled).toBe(false);
+    gate.resolve();
+    await expect(result).resolves.toBe(2);
+    expect((await Approvals.load(artifacts)).record('profile', 'environments.yaml')?.by).toBe('取消测试');
+  });
+
+  it.each(['SIGINT', 'SIGTERM'] as const)('CLI 接管非 raw %s，等待写盘再返回2且恢复监听器', async (event) => {
+    const { cliMain } = await import('../../cli/src/main');
+    const { artifacts, root } = await createProject();
+    const gate = deferred<void>(); const entered = deferred<void>();
+    const write = ArtifactStore.prototype.writeJson;
+    vi.spyOn(ArtifactStore.prototype, 'writeJson').mockImplementation(async function (this: ArtifactStore, ...args) {
+      entered.resolve(); await gate.promise; return write.apply(this, args);
+    });
+    const io = createTerminal(); let settled = false;
+    const before = [process.listenerCount('SIGINT'), process.listenerCount('SIGTERM')];
+    const result = cliMain(['review', 'profile', '--project', root], {
+      log: () => {}, dependencies: { env: { CROSSCHECK_REVIEWER: '信号测试' }, review: { isTTY: true } },
+    });
+    void result.then(() => { settled = true; });
+    await waitFor(() => io.output().includes('environments.yaml'));
+    io.stdin.write('a'); await entered.promise;
+    process.emit(event);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(settled).toBe(false);
+    gate.resolve();
+    await expect(result).resolves.toBe(2);
+    expect((await Approvals.load(artifacts)).record('profile', 'environments.yaml')?.by).toBe('信号测试');
+    expect([process.listenerCount('SIGINT'), process.listenerCount('SIGTERM')]).toEqual(before);
+  });
+
   it.each(['备注', '条款选择', '详情'] as const)('结果%s中的 Ctrl+C 返回 2 且不提交裁决', async (mode) => {
     const { project, runId } = await createFailedRun();
     const io = createTerminal();

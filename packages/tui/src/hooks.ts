@@ -1,7 +1,7 @@
 import { useApp } from 'ink';
 import { useCallback, useContext, useEffect, useRef, useState } from 'react';
 import type { Status } from './components';
-import { ActionContext } from './context';
+import { ActionContext, ReviewContext } from './context';
 
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
 
@@ -25,6 +25,7 @@ export function useAction(after?: () => void) {
   const [status, setStatus] = useState<Status>();
   const localBusy = useRef(false);
   const shared = useContext(ActionContext);
+  const signal = useContext(ReviewContext)?.signal;
   const busy = shared?.busy ?? localBusy;
   const alive = useRef(true);
   useEffect(() => {
@@ -32,6 +33,7 @@ export function useAction(after?: () => void) {
     return () => { alive.current = false; };
   }, []);
   const run = useCallback(async (fn: () => Promise<string>): Promise<void> => {
+    if (signal?.aborted) return;
     if (busy.current) {
       if (alive.current) setStatus({ kind: 'error', text: '请等待当前操作完成' });
       return;
@@ -49,7 +51,7 @@ export function useAction(after?: () => void) {
       shared?.changed();
       if (alive.current) after?.();
     }
-  }, [after, busy, shared]);
+  }, [after, busy, shared, signal]);
   return { status, setStatus, run };
 }
 

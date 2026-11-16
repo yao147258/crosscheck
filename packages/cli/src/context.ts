@@ -2,7 +2,9 @@ import type { Config, Role } from '@crosscheck/core';
 import { resolveRole, type ModelCandidate } from '@crosscheck/models';
 import type { RunSuiteOptions } from '@crosscheck/runner';
 
-export type CommandDependencies = Pick<RunSuiteOptions, 'modelOptions' | 'resilience' | 'env'>;
+import type { ReviewDependencies } from './review';
+
+export type CommandDependencies = Pick<RunSuiteOptions, 'modelOptions' | 'resilience' | 'env'> & { review?: ReviewDependencies };
 
 export class InterruptedError extends Error {
   override name = 'InterruptedError';

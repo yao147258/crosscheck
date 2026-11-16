@@ -133,6 +133,25 @@ it('模型执行中取消退出 2，不再调用后续模型或创建草稿', as
   expect(await artifacts.list('system')).toEqual([]);
 });
 
+it('T6 Minor：第1步已合成但第2步中断时丢弃未落盘草稿，退出2且保留既有写入', async () => {
+  const { root, artifacts } = await project(true);
+  await artifacts.writeYaml('system/pages.yaml', FILES['pages.yaml']);
+  const before = await artifacts.readBytes('system/pages.yaml');
+  const controller = new AbortController();
+  const model = scriptedModel([STEPS[0]!]);
+  const generate = model.doGenerate.bind(model);
+  vi.spyOn(model, 'doGenerate').mockImplementation(async (options) => {
+    if (model.doGenerateCalls.length === 1) { controller.abort(); options.abortSignal!.throwIfAborted(); }
+    return generate(options);
+  });
+  expect(await cliMain(['init', '--project', root], { log: () => {}, dependencies: deps(model), signal: controller.signal })).toBe(2);
+  expect(model.doGenerate).toHaveBeenCalledTimes(2);
+  expect(await artifacts.readBytes('system/environments.yaml')).toBeUndefined();
+  expect(await artifacts.readBytes('system/pages.yaml')).toEqual(before);
+  expect(await artifacts.list('system')).toEqual(['pages.yaml']);
+  expect(await artifacts.readBytes('approvals.json')).toBeUndefined();
+});
+
 it.each(['environments.yaml', 'guardrails.yaml'])('写入 %s 期间取消保留已完整写入文件，退出 2 并停止后续写入', async (cancelAt) => {
   const { root, artifacts } = await project(true);
   const controller = new AbortController();

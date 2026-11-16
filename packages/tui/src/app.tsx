@@ -1,5 +1,5 @@
 import { Box, Text, useApp, useInput } from 'ink';
-import { useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { ActionContext, ReviewContext, type ReviewEnv } from './context';
 import type { Nav, Route } from './routes';
 import { CasesView } from './views/cases';
@@ -27,10 +27,24 @@ export function App({ env, initial }: { env: ReviewEnv; initial: Route }) {
   const [stack, setStack] = useState<Route[]>([initial]);
   const [notice, setNotice] = useState<string>();
   const busy = useRef(false);
-  const actions = useMemo(() => ({ busy, changed: () => setNotice(undefined) }), []);
+  const actions = useMemo(() => ({ busy, changed: () => {
+    setNotice(undefined);
+    if (env.signal?.aborted && !busy.current) exit(2);
+  } }), [env.signal, exit]);
+  useEffect(() => {
+    // 外部取消不截断正在进行的写入；动作 finally 释放忙碌标记后再退出。
+    const interrupt = () => {
+      if (busy.current) setNotice('执行被中断，等待当前操作完成');
+      else exit(2);
+    };
+    env.signal?.addEventListener('abort', interrupt, { once: true });
+    if (env.signal?.aborted) interrupt();
+    return () => env.signal?.removeEventListener('abort', interrupt);
+  }, [env.signal, exit]);
   const route = stack[stack.length - 1]!;
   const guard = (fn: () => void) => {
-    if (busy.current) setNotice('请等待当前操作完成');
+    if (env.signal?.aborted) { if (!busy.current) exit(2); }
+    else if (busy.current) setNotice('请等待当前操作完成');
     else fn();
   };
   const nav: Nav = {

@@ -104,7 +104,8 @@ it('完成case恢复不重放，输入变化/筛选未知与空交集不全绿',
   const ids = await s.artifacts.list('runs');
   const newest = ids.sort().at(-1)!; const current = JSON.parse((await s.artifacts.readBytes(`runs/${newest}/results.json`))!.toString());
   expect(current.cases[0]).toMatchObject({ status: 'BLOCKED', reason: expect.stringContaining('确认已失效') });
-});
+// 连续启动 6 个进程；生产入口引入 Ink 后单次冷启动约 0.7 秒，不能共用默认 5 秒预算。
+}, 20000);
 it('删除当前画像条款后生产CLI仍离线重建，file浏览器安全且可读', async () => {
   const s = await setup(); expect((await launch(s)).code).toBe(0); const saved = await result(s);
   await rm(s.artifacts.resolve('system'), { recursive: true }); await rm(s.artifacts.resolve('requirements'), { recursive: true }); await rm(s.artifacts.resolve('cases'), { recursive: true }); await rm(s.artifacts.resolve('config.yaml'));
@@ -133,6 +134,65 @@ it('第二case中断后resume只重跑incomplete，保留第一case提交与历�
   expect(s.counts().actions).toBe(2); expect((await result(s)).data.cases.map((c: any) => c.attempt)).toEqual([1, 2]);
   expect(await s.artifacts.readBytes(`runs/${saved.id}/cases/M-TC-2/attempts/1/result.json`)).toBeDefined();
 }, 30000);
+it('init → reqs → review 人工确认 → plan → review 人工确认 → run 全链路', async () => {
+  const { cliMain } = await import('../src/main');
+  const { ReviewSession, approveProfileFile, approveAllClauses, approveAllCases, loadProfileOverview } = await import('@crosscheck/tui');
+  const { scriptedModel } = await import('../../agent/src/testing/scripted-model');
+  const base = await server((_req, res) => { res.setHeader('content-type', 'application/json'); res.end(JSON.stringify({ value: 'ok' })); });
+  const root = await mkdtemp(path.join(os.tmpdir(), 'flow14-')); roots.push(root);
+  const artifacts = new ArtifactStore(root);
+  await artifacts.writeYaml('config.yaml', { models: { extractor: 'mock:x', planner: 'mock:p', executor: 'mock:executor', reviewer: 'mock:reviewer' }, providers: { mock: { type: 'ollama' } }, defaultEnvironment: 'local', requirementsDocs: ['需求.md'], budget: { perCase: { steps: 20, tokens: 100000, minutes: 1 } } });
+  await import('node:fs/promises').then((fs) => fs.writeFile(path.join(root, '需求.md'), '下单接口返回 ok\n'));
+  const finish = (input: unknown) => ({ toolCalls: [{ name: 'finish', input }] });
+  const extractor = scriptedModel([
+    finish({ 'environments.yaml': { version: 1, environments: { local: { baseURL: base, healthcheck: `${base}/health`, reset: null } } } }),
+    finish({ 'auth.yaml': { version: 1, actors: { guest: { kind: 'anonymous' } } } }),
+    finish({ 'api-catalog.yaml': { version: 1, operations: {} }, 'pages.yaml': { version: 1, pages: {} } }),
+    finish({ 'data-model.yaml': { version: 1, queries: {} }, 'fixtures.yaml': { version: 1, fixtures: {} } }),
+    finish({ 'guardrails.yaml': { allowedHosts: [new URL(base).host] } }),
+    finish([{ id: 'M-AC-1', text: '下单接口返回 ok', source: { file: '需求.md', line: 1, excerpt: '下单接口返回 ok' } }]),
+  ]);
+  const planner = scriptedModel([finish([{ id: 'M-TC-1', covers: ['M-AC-1'], fixtures: [], actor: 'guest', steps: ['POST /api/action', 'GET /item'], expectations: ['E1', 'E2'].map((id) => ({ id, text: '返回真实ok', evidence: ['network'] })) }])]);
+  const dependencies = {
+    modelOptions: { env: {}, factories: { ollama: ({ modelId }: { modelId: string }) => modelId === 'x' ? extractor : planner } },
+    resilience: { retries: 0, baseDelayMs: 0 }, env: { CROSSCHECK_REVIEWER: '流程测试' },
+    // 仅模型及人工键盘选择用测试替身；审核状态函数、落盘和门禁均使用真实实现。
+    review: { isTTY: true, runReview: async (options: import('@crosscheck/tui').RunReviewOptions) => {
+      const session = await ReviewSession.open(options.artifacts, options.reviewer);
+      if (options.view === 'profile') for (const row of (await loadProfileOverview(session)).rows) await approveProfileFile(session, row.name);
+      else if (options.view === 'clauses') expect(await approveAllClauses(session, options.module!)).toBe('已确认 1 条条款');
+      else if (options.view === 'cases') expect(await approveAllCases(session, options.module!)).toBe('已确认 1 个用例');
+      else throw new Error('测试未安排的审核视图');
+      return 0;
+    } },
+  };
+  const log = () => {};
+  const command = (argv: string[]) => cliMain([...argv, '--project', root], { log, dependencies });
+  expect(await command(['init'])).toBe(0);
+  expect(await command(['reqs', '--module', 'M'])).toBe(0);
+  expect(await artifacts.readBytes('approvals.json')).toBeUndefined();
+  expect(await command(['plan', '--module', 'M'])).toBe(2);
+  expect(await command(['review', 'profile'])).toBe(0);
+  expect(await command(['plan', '--module', 'M'])).toBe(2);
+  expect(await command(['review', 'clauses', '--module', 'M'])).toBe(0);
+  expect(await command(['plan', '--module', 'M'])).toBe(0);
+  const env = { ...process.env, CROSSCHECK_TEST_MODE: 'pass', CROSSCHECK_TEST_BASE: base };
+  await expect(exec(runtime, [harness, 'run', '--project', root], { env, timeout: 20000 })).rejects.toMatchObject({ code: 2 });
+  expect(await command(['review', 'cases', '--module', 'M'])).toBe(0);
+  const out = await exec(runtime, [harness, 'run', '--project', root], { env, timeout: 20000 });
+  expect(out.stdout).toContain('PASS');
+  const runIds = (await artifacts.list('runs')).sort();
+  const runId = runIds.at(-1)!;
+  const saved = JSON.parse((await artifacts.readBytes(`runs/${runId}/results.json`))!.toString());
+  expect(saved.status).toBe('PASS');
+  expect((await exec(runtime, [production, 'report', runId, '--project', root], { timeout: 20000 })).stdout).toContain('报告');
+}, 60000);
+
+it('生产 CLI help 可用且非 TTY review 拒绝 2', async () => {
+  expect((await exec(runtime, [production, '--help'])).stdout).toContain('crosscheck review');
+  await expect(exec(runtime, [production, 'review'])).rejects.toMatchObject({ code: 2, stdout: expect.stringContaining('交互式终端') });
+});
+
 it.each(['abort', 'SIGINT', 'SIGTERM'])('Windows等价IPC控制%s中断真实HTTP资源，await保存incomplete，resume新attempt', async control => {
   const s = await setup({ slow: true });
   const child = fork(harness, ['run', '--project', s.root], { execPath: runtime, execArgv: [], silent: true, env: { ...process.env, CROSSCHECK_TEST_BASE: s.base, TEST_TOKEN: secret } });

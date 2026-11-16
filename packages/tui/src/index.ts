@@ -27,12 +27,15 @@ export interface RunReviewOptions {
   view?: ReviewView;
   module?: string;
   runId?: string;
+  signal?: AbortSignal;
 }
 
 export async function runReview(options: RunReviewOptions): Promise<number> {
+  if (options.signal?.aborted) return 2;
   const session = await ReviewSession.open(options.artifacts, options.reviewer);
+  if (options.signal?.aborted) return 2;
   const instance = render(createElement(App, {
-    env: { session, editor: options.editor, open: options.open },
+    env: { session, editor: options.editor, open: options.open, signal: options.signal },
     initial: initialRoute(options.view, options.module, options.runId),
   }), { exitOnCtrlC: false });
   try {

@@ -16,7 +16,19 @@ pnpm crosscheck --help
 pnpm --filter @crosscheck/cli exec crosscheck --help
 ```
 
-先阅读 [完整手工接入指南](docs/manual-integration.md)：包含全部七画像、条款/用例、显式人工 approveCase 脚本、凭证环境变量、安全限制及命令。没有 init、自动提取/生成、TUI、npm 发布或 npx 可用承诺，run 不自动批准。
+可使用 `init → reqs → review → plan → review → run` 流程，也可阅读 [完整手工接入指南](docs/manual-integration.md) 手工准备七画像、条款与用例；该指南中的独立 approveCase 脚本仍可用。生成命令只写草稿，不会自动确认；`run` 仍要求人工确认与凭证、网络授权等门禁。尚无 npm 发布或 npx 可用承诺。
+
+| 命令 | 用途 |
+|---|---|
+| `init [--openapi <文件>]...` | 缺少配置时写 `.crosscheck/config.yaml` 模板并退出 2；配置完成后扫描项目并生成七份画像草稿 |
+| `reqs --module <id>` | 从配置的 `requirementsDocs` 提取带来源的条款草稿 |
+| `review [profile\|clauses\|cases\|results]` | 交互审核画像、条款、用例与运行结果；支持 `--module <id>`、`--run <runId>` 定位 |
+| `plan --module <id>` | 画像全部确认、条款确认后，生成用例草稿 |
+| `run` / `report <runId>` | 执行已确认用例 / 从历史快照离线重建报告 |
+
+各命令支持 `--project <目录>`。重跑生成命令保留仍有效的已确认条目；中断丢弃尚未写盘的合成草稿，保留已经完整写入的文件，不承诺跨文件事务回滚。
+
+`review` 要求 stdin、stdout 都是 TTY，管道/重定向环境拒绝并退出 2。确认人优先取去除首尾空白后的 `CROSSCHECK_REVIEWER`，否则取系统用户名；无法确定时退出 2。编辑器依次取 `VISUAL`、`EDITOR`，支持双引号参数且不经过 shell；未设置时显示提示。外部编辑器运行时暂停 TUI 输入与渲染，结束或出错后恢复。`q` 正常退出、`Esc` 返回（初始视图退出），退出码 0；`Ctrl+C` 中断退出 2。写操作期间键盘退出会提示等待；外部 signal、SIGINT/SIGTERM 取消则等待当前操作结束后退出 2，不截断写盘。查看原始截图证据当前不支持；打开文本只请求系统启动，不保证宿主程序已显示。
 
 ```powershell
 # 仅在用户已配置、确认、提供凭证并授权真实模型运行后执行
@@ -49,7 +61,9 @@ HTTP fixture 只接受固定 JSON 请求与完整 JSON 响应；start/stop 仅�
 | `@crosscheck/tools` | 受控HTTP、只读PG、认证/夹具宿主适配与脱敏采证 |
 | `@crosscheck/runner` | 已确认输入执行、盲审、资源清理、提交与恢复 |
 | `@crosscheck/report` | 已验证历史数据的JSON/JUnit/静态HTML派生 |
-| `@crosscheck/cli` | 本地run/report、信号与退出码 |
+| `@crosscheck/cli` | init/reqs/plan/review/run/report、信号与退出码 |
+| `@crosscheck/tui` | 交互审核、人工确认与运行结果裁决 |
+| `@crosscheck/planner` | 基于已确认画像、条款生成用例草稿 |
 | `@crosscheck/discovery` | 只读提取本地项目与 OpenAPI 事实候选 |
 | `@crosscheck/requirements` | 从调用方提供的文档中提取可追溯的需求条款草稿 |
 

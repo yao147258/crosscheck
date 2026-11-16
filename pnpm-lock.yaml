@@ -80,12 +80,21 @@ importers:
       '@crosscheck/tools':
         specifier: workspace:^
         version: link:../tools
+      '@crosscheck/tui':
+        specifier: workspace:^
+        version: link:../tui
       ai:
         specifier: ^7.0.170
         version: 7.0.170(zod@4.6.7)
+      ink:
+        specifier: 7.1.1
+        version: 7.1.1(@types/react@19.2.0)(react@19.2.0)
       pg:
         specifier: 8.23.1
         version: 8.23.1
+      react:
+        specifier: 19.2.0
+        version: 19.2.0
       yaml:
         specifier: ^2.9.1
         version: 2.9.1
