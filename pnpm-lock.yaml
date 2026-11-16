@@ -99,9 +99,21 @@ importers:
 
   packages/discovery:
     dependencies:
+      '@crosscheck/agent':
+        specifier: workspace:^
+        version: link:../agent
+      '@crosscheck/core':
+        specifier: workspace:^
+        version: link:../core
+      '@crosscheck/models':
+        specifier: workspace:^
+        version: link:../models
       yaml:
         specifier: ^2.9.1
         version: 2.9.1
+      zod:
+        specifier: ^4.6.7
+        version: 4.6.7
 
   packages/models:
     dependencies:
