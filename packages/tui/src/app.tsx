@@ -27,23 +27,35 @@ export function App({ env, initial }: { env: ReviewEnv; initial: Route }) {
   const [stack, setStack] = useState<Route[]>([initial]);
   const [notice, setNotice] = useState<string>();
   const busy = useRef(false);
-  const actions = useMemo(() => ({ busy, changed: () => {
-    setNotice(undefined);
-    if (env.signal?.aborted && !busy.current) exit(2);
-  } }), [env.signal, exit]);
+  const loading = useRef(0);
+  const cancelError = useRef<Error | undefined>(undefined);
+  const actions = useMemo(() => {
+    const changed = (error?: unknown) => {
+      setNotice(undefined);
+      if (!env.signal?.aborted) return;
+      if (error !== undefined && !cancelError.current) {
+        cancelError.current = error instanceof Error ? error : new Error(String(error));
+      }
+      if (!busy.current && loading.current === 0) exit(cancelError.current ?? 2);
+    };
+    return { busy, changed,
+      loadStarted: () => { loading.current++; },
+      loadFinished: (error?: unknown) => { loading.current--; changed(error); },
+    };
+  }, [env.signal, exit]);
   useEffect(() => {
-    // 外部取消不截断正在进行的写入；动作 finally 释放忙碌标记后再退出。
+    // 既等待动作写盘，也等待加载器释放运行锁；错误经 Ink 拒绝路径保留给 CLI。
     const interrupt = () => {
-      if (busy.current) setNotice('执行被中断，等待当前操作完成');
-      else exit(2);
+      if (busy.current || loading.current > 0) setNotice('执行被中断，等待当前操作完成');
+      else actions.changed();
     };
     env.signal?.addEventListener('abort', interrupt, { once: true });
     if (env.signal?.aborted) interrupt();
     return () => env.signal?.removeEventListener('abort', interrupt);
-  }, [env.signal, exit]);
+  }, [env.signal, actions]);
   const route = stack[stack.length - 1]!;
   const guard = (fn: () => void) => {
-    if (env.signal?.aborted) { if (!busy.current) exit(2); }
+    if (env.signal?.aborted) actions.changed();
     else if (busy.current) setNotice('请等待当前操作完成');
     else fn();
   };

@@ -7,7 +7,9 @@ export const ReviewContext = createContext<ReviewEnv | null>(null);
 
 export const ActionContext = createContext<{
   busy: { current: boolean };
-  changed(): void;
+  changed(error?: unknown): void;
+  loadStarted?(): void;
+  loadFinished?(error?: unknown): void;
 } | null>(null);
 
 export function useReview(): ReviewEnv {

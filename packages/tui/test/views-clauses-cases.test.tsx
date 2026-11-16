@@ -1,7 +1,7 @@
 import { Approvals } from '@crosscheck/core';
 import { Text } from 'ink';
 import { cleanup, render } from 'ink-testing-library';
-import { useState } from 'react';
+import { act, useState } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { App, ReviewSession, approveClause, type EditorHost } from '../src/index';
 import { ActionContext, ReviewContext } from '../src/context';
@@ -253,7 +253,12 @@ describe('审核边界与终端可用性', () => {
     await waitFor(() => frame(ui).includes(name === 'clauses' ? '› M-AC-1' : '› M-TC-1'));
     ui.stdin.write('r');
     await entered.promise;
-    gate.resolve();
+    // 帧输出不代表输入订阅已交接；仅在本次 act 内启用环境标志并恢复原值。
+    const actEnv = globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean };
+    const previousActEnv = actEnv.IS_REACT_ACT_ENVIRONMENT;
+    actEnv.IS_REACT_ACT_ENVIRONMENT = true;
+    try { await act(async () => { gate.resolve(); }); }
+    finally { actEnv.IS_REACT_ACT_ENVIRONMENT = previousActEnv; }
     await waitFor(() => frame(ui).includes(outcome === 'empty' ? '（空）' : '延迟重载失败') && !frame(ui).includes('加载中…'));
     ui.stdin.write(outcome === 'empty' ? KEYS.escape : 'q');
     await waitFor(() => frame(ui).includes(outcome === 'empty' ? '已返回' : '已退出'));
