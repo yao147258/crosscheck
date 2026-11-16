@@ -36,8 +36,8 @@ export async function runReview(options: RunReviewOptions): Promise<number> {
     initial: initialRoute(options.view, options.module, options.runId),
   }), { exitOnCtrlC: false });
   try {
-    await instance.waitUntilExit();
-    return 0;
+    const result = await instance.waitUntilExit();
+    return result === 2 ? 2 : 0;
   } finally {
     instance.cleanup();
   }

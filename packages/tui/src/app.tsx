@@ -35,10 +35,10 @@ export function App({ env, initial }: { env: ReviewEnv; initial: Route }) {
   };
   const nav: Nav = {
     push: (next) => guard(() => setStack((s) => [...s, next])),
-    back: () => guard(() => { if (stack.length > 1) setStack((s) => s.slice(0, -1)); else exit(); }),
-    quit: () => guard(() => exit()),
+    back: () => guard(() => { if (stack.length > 1) setStack((s) => s.slice(0, -1)); else exit(0); }),
+    quit: () => guard(() => exit(0)),
   };
-  useInput((input, key) => { if (key.ctrl && input === 'c') nav.quit(); });
+  useInput((input, key) => { if (key.ctrl && input === 'c') guard(() => exit(2)); });
   return (
     <ReviewContext.Provider value={env}>
       <ActionContext.Provider value={actions}>
