@@ -65,9 +65,15 @@ importers:
       '@crosscheck/models':
         specifier: workspace:^
         version: link:../models
+      '@crosscheck/planner':
+        specifier: workspace:^
+        version: link:../planner
       '@crosscheck/report':
         specifier: workspace:^
         version: link:../report
+      '@crosscheck/requirements':
+        specifier: workspace:^
+        version: link:../requirements
       '@crosscheck/runner':
         specifier: workspace:^
         version: link:../runner

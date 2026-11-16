@@ -8,6 +8,8 @@
   "dependencies": {
     "@crosscheck/core": "workspace:^",
     "@crosscheck/discovery": "workspace:^",
+    "@crosscheck/requirements": "workspace:^",
+    "@crosscheck/planner": "workspace:^",
     "@crosscheck/runner": "workspace:^",
     "@crosscheck/report": "workspace:^",
     "@crosscheck/models": "workspace:^",
