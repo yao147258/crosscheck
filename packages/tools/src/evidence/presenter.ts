@@ -14,7 +14,7 @@ export function createEvidencePresenter(store: EvidenceStore, options: { maxText
         // 无图候选也核验已登记图片，坏盘/篡改不能被当成普通能力缺失吞掉。
         const evidence = await store.readScreenshotEvidence(id);
         context.signal.throwIfAborted();
-        if (options.capabilities?.[context.ref]?.images === true) output.push({ ...evidence, truncated: false });
+        if (options.capabilities?.[context.ref]?.images === true) output.push({ id: evidence.id, type: evidence.type, bytes: evidence.bytes, mediaType: evidence.mediaType, truncated: evidence.sourceIncomplete });
       } else {
         const evidence = await store.readTextEvidence(id);
         context.signal.throwIfAborted();

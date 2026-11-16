@@ -4,7 +4,10 @@ import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
 import { inflateSync } from 'node:zlib';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { ArtifactStore, EvidenceRecordSchema } from '@crosscheck/core';
+import { ArtifactStore, BudgetTracker, EvidenceRecordSchema } from '@crosscheck/core';
+import { runAgent, type EvidencePresentation } from '@crosscheck/agent';
+import { JudgementsSchema, validateJudgements } from '../../runner/src/judgement';
+import { scriptedModel } from '../../agent/src/testing/scripted-model';
 import * as tools from '../src/index';
 import { capturePage } from '../src/browser/capture';
 
@@ -135,6 +138,43 @@ describe.skipIf(skip)('标准 Playwright 真实表单与可信采证', () => {
       }
       const forged = await s.store.saveDom([{ tag: 'div', sensitive: true, omissionReason: 'redacted-value' } as any, { tag: 'input', sensitive: true, omissionReason: 'redacted-value' } as any], s.meta());
       expect((await s.store.readTextEvidence(forged.id)).sourceIncomplete).toBe(true);
+    } finally { await s.host.close(); await rm(s.root, { recursive: true, force: true }); }
+  });
+  it.each([
+    ['正常', '<p>保存成功</p>', false],
+    ['值脱敏', '<input type="password" value="PRIVATE"><p>保存成功</p>', false],
+    ['批准遮罩', '<div id="mask">业务结果</div>', true],
+    ['opaque', '<canvas></canvas>', true],
+    ['文本超限', `<p>${'x'.repeat(2100)}</p>`, true],
+    ['节点超限', '<div></div>'.repeat(2001), true],
+  ] as const)('截图only %s 跨 store 持久化完整性并进入实际呈现/判定门禁', async (_name, html, incomplete) => {
+    const s = await setup();
+    try {
+      const session = await s.host.getSession(s.signal);
+      await session.page.setContent(html);
+      const redactor = tools.createEvidenceRedactor();
+      const writer = new tools.EvidenceStore(s.artifacts, { runId: 'run-1', caseId: 'M-TC-1', attempt: 1 }, redactor);
+      const capture = await capturePage(session.page, redactor, ['#mask']);
+      const record = await writer.saveScreenshot(capture.screenshot, s.meta());
+      const reader = new tools.EvidenceStore(new ArtifactStore(s.root), { runId: 'run-1', caseId: 'M-TC-1', attempt: 1 }, tools.createEvidenceRedactor());
+      expect(await reader.readScreenshotEvidence(record.id)).toMatchObject({ sourceIncomplete: incomplete });
+      const expectations = [{ id: 'E1', text: '可见业务结果', evidence: ['screenshot' as const] }];
+      for (const verdict of ['pass', 'fail'] as const) {
+        const model = scriptedModel(Array.from({ length: 3 }, () => ({ toolCalls: [{ name: 'finish', input: { judgements: [{ expectationId: 'E1', verdict, evidenceIds: [record.id], reasoning: '仅引用截图' }] } }] })));
+        const shown = new Map<string, EvidencePresentation>();
+        const result = await runAgent({ stage: 'review', models: [{ ref: 'mock:image', model }], system: '按真实截图判定', messages: [], tools: [], output: JudgementsSchema, outputSchema: JudgementsSchema,
+          budget: new BudgetTracker({ steps: 10, tokens: 10000, minutes: 1 }), requiredEvidenceIds: [record.id], evidencePresenter: tools.createEvidencePresenter(reader, { capabilities: { 'mock:image': { images: true } } }),
+          onEvidencePresented: async event => { shown.clear(); event.evidence.forEach(item => shown.set(item.id, item)); },
+          validateOutput: value => validateJudgements(value, expectations, [record], reader, shown),
+        });
+        expect(shown.get(record.id)).toMatchObject({ truncated: incomplete });
+        expect(result.status).toBe(incomplete ? 'blocked' : 'done');
+        expect(model.doGenerateCalls[0]!.prompt.flatMap(m => m.role === 'user' ? m.content : []).some(p => p.type === 'file')).toBe(true);
+      }
+      const other = new tools.EvidenceStore(s.artifacts, { runId: 'run-other', caseId: 'M-TC-1', attempt: 1 }, redactor);
+      await expect(other.verify(record)).rejects.toThrow(/归属/);
+      await s.artifacts.writeBytes(record.path, Buffer.from('tampered'));
+      await expect(reader.readScreenshotEvidence(record.id)).rejects.toThrow(/摘要/);
     } finally { await s.host.close(); await rm(s.root, { recursive: true, force: true }); }
   });
   it('每个宿主的 context 独立，不共享 Cookie，禁止自动下载', async () => {

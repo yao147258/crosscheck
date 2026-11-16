@@ -23,7 +23,7 @@ async function fixture(work: (store: EvidenceStore, artifacts: ArtifactStore, im
     const artifacts = new ArtifactStore(root);
     const store = new EvidenceStore(artifacts, context, createEvidenceRedactor());
     // 直接构造已登记工件测试读取边界，不伪造可信截图采集能力。
-    const image = EvidenceRecordSchema.parse({ ...context, ...meta, id: 'e-png', type: 'screenshot', mime: 'image/png', time: new Date().toISOString(), path: `${prefix}/evidence/files/e-png.png`, digest: `sha256:${createHash('sha256').update(png).digest('hex')}`, redacted: true });
+    const image = EvidenceRecordSchema.parse({ ...context, ...meta, id: 'e-png', type: 'screenshot', mime: 'image/png', time: new Date().toISOString(), path: `${prefix}/evidence/files/e-png.png`, digest: `sha256:${createHash('sha256').update(png).digest('hex')}`, redacted: true, sourceIncomplete: false });
     await artifacts.writeBytes(image.path, png);
     await artifacts.writeJson(`${prefix}/evidence/index.json`, [image]);
     await work(store, artifacts, image);
@@ -127,6 +127,15 @@ describe('Task2 浏览器证据真实呈现', () => {
     expect(result).toMatchObject({ status: 'blocked', reason: 'invalid-output' });
     expect(events).toHaveLength(3); expect(events.every(e => e.type === 'dom' && e.truncated)).toBe(true);
     for (const call of model.doGenerateCalls) { expect(JSON.stringify(call.prompt)).toContain('可见全文'); expect(JSON.stringify(call.prompt)).toContain('#message'); expect(JSON.stringify(call.prompt)).toContain('宿主证据不完整'); }
+  }));
+  it('旧截图缺失源完整性字段时按 unknown 不完整处理，跨实例不能伪完整', async () => fixture(async (_store, artifacts, image) => {
+    const legacy = { ...image }; delete legacy.sourceIncomplete;
+    await artifacts.writeJson(`${prefix}/evidence/index.json`, [legacy]);
+    const reader = new EvidenceStore(artifacts, context, createEvidenceRedactor());
+    expect(await reader.readScreenshotEvidence(image.id)).toMatchObject({ sourceIncomplete: true });
+    const prepared = await prepareContext([], { ref: 'mock:image', signal: signal(), presenter: createEvidencePresenter(reader, { capabilities: { 'mock:image': { images: true } } }), requiredEvidenceIds: [image.id] });
+    expect(prepared.presentedEvidence).toEqual([{ id: image.id, type: 'screenshot', truncated: true }]);
+    expect(prepared.incompleteEvidenceIds).toEqual([image.id]);
   }));
   it('截图签名错误即使哈希匹配仍为宿主失败，不降为无图缺失', async () => fixture(async (store, artifacts, image) => {
     const bytes = Buffer.from('not a png');

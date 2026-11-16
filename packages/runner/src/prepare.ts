@@ -15,6 +15,7 @@ export async function prepareCase(options: {
   onFallback: (result: AgentResult<PreparationOutput>) => void;
   onMissing: (names: string[]) => void;
   check: () => void;
+  beforeAuthenticate?: () => Promise<void>;
 }): Promise<{ session: AuthSession; variables: unknown }> {
   const prepared = await options.fixtures.prepare(options.tc.fixtures, options.tc.actor, options.nextMeta, options.signal);
   if (prepared.status === 'missing') {
@@ -51,6 +52,7 @@ export async function prepareCase(options: {
     options.onFallback(result);
     if (result.status !== 'done' || !result.output.prepared) throw new PreparationBlocked(result.status === 'blocked' ? result.detail : '缺失夹具现场造数未完成');
   }
+  await options.beforeAuthenticate?.();
   options.check();
   const session = prepared.session ?? await options.auth.authenticate(options.actor, options.nextMeta(), options.signal);
   return { session, variables: Object.fromEntries(Object.entries(prepared.fixtures).map(([name, result]) => [name, result.variables])) };

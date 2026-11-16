@@ -8,11 +8,11 @@ export function isCapturedControl(node: DomNode): boolean { return controls.has(
 import type { EvidenceRedactor } from '../evidence/redactor';
 
 export interface MaskedCapture { readonly kind: 'masked-capture' }
-const trusted = new WeakMap<object, { bytes: Buffer; redactor: EvidenceRedactor }>();
-export function readTrustedCapture(value: unknown, redactor: EvidenceRedactor): Buffer {
+const trusted = new WeakMap<object, { bytes: Buffer; redactor: EvidenceRedactor; sourceIncomplete: boolean }>();
+export function readTrustedCapture(value: unknown, redactor: EvidenceRedactor): { bytes: Buffer; sourceIncomplete: boolean } {
   const capture = value && typeof value === 'object' ? trusted.get(value) : undefined;
   if (!capture || capture.redactor !== redactor) throw new ArtifactError('截图不是当前可信采集器的产物');
-  return Buffer.from(capture.bytes);
+  return { bytes: Buffer.from(capture.bytes), sourceIncomplete: capture.sourceIncomplete };
 }
 
 /** 固定宿主脚本保留文本顺序和祖先关系；零盒子不是不可见子树。 */
@@ -87,6 +87,8 @@ export async function capturePage(page: Page, redactor: EvidenceRedactor, screen
   const style = masks.map(s => `${s}, ${s} * { visibility: hidden !important; }`).join('\n');
   const bytes = await page.screenshot({ type: 'png', mask: masks.map(s => page.locator(s)), style, maskColor: '#FF00FF', animations: 'disabled', caret: 'hide', timeout: 5000 });
   const screenshot = Object.freeze({ kind: 'masked-capture' as const });
-  trusted.set(screenshot, { bytes: Buffer.from(bytes), redactor });
+  // 与 DOM 源省略语义一致；普通控件的批准值脱敏不是业务区域缺失。
+  const sourceIncomplete = dom.some(node => node.incomplete || node.sensitive && node.omissionReason !== 'redacted-value');
+  trusted.set(screenshot, { bytes: Buffer.from(bytes), redactor, sourceIncomplete });
   return { dom, screenshot };
 }

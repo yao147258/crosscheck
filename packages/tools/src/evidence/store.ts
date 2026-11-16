@@ -32,7 +32,7 @@ export class EvidenceStore {
   /** 仅宿主在认证成功且全部动态凭证已登记后调用，不回写先前省略记录。 */
   allowAuthenticatedPayloads(): void { this.payloadsOmitted = false; }
   get omittingPayloads(): boolean { return this.payloadsOmitted; }
-  private async save(type: EvidenceRecord['type'], mime: string, content: string | Buffer, meta: Meta): Promise<EvidenceRecord> {
+  private async save(type: EvidenceRecord['type'], mime: string, content: string | Buffer, meta: Meta, sourceIncomplete?: boolean): Promise<EvidenceRecord> {
     if (this.payloadsOmitted) {
       if (type === 'network') content = JSON.stringify(sanitizeHar({ log: { entries: [{ request: { method: 'OMITTED', url: 'about:blank' }, response: { status: 0, content: { mimeType: 'text/plain', omitted: true } }, failure: { kind: 'omitted', message: '动态身份认证前载荷已省略，不能作为完整观察' } }] } }, this.redactor));
       else if (type === 'console') content = '[omitted: unauthenticated payload]';
@@ -45,7 +45,7 @@ export class EvidenceStore {
       const id = `e-${randomUUID()}`;
       const path = evidencePath(this.prefix, id, mime);
       const bytes = Buffer.from(content);
-      const record = EvidenceRecordSchema.parse({ id, type, ...this.context, ...meta, time: new Date().toISOString(), mime, path, digest: `sha256:${createHash('sha256').update(bytes).digest('hex')}`, redacted: true });
+      const record = EvidenceRecordSchema.parse({ id, type, ...this.context, ...meta, time: new Date().toISOString(), mime, path, digest: `sha256:${createHash('sha256').update(bytes).digest('hex')}`, redacted: true, ...(sourceIncomplete !== undefined ? { sourceIncomplete } : {}) });
       const index = await this.artifacts.readJson(`${this.prefix}/evidence/index.json`, EvidenceRecordSchema.array()) ?? [];
       await this.artifacts.publishExclusive(path, bytes);
       await this.artifacts.writeJson(`${this.prefix}/evidence/index.json`, [...index, record]);
@@ -123,16 +123,17 @@ export class EvidenceStore {
     return { id, type: 'db', text: JSON.stringify(this.redactor.value(payload)), sourceIncomplete };
   }
   async saveScreenshot(capture: unknown, meta: Meta): Promise<EvidenceRecord> {
-    return this.save('screenshot', 'image/png', readTrustedCapture(capture, this.redactor), meta);
+    const trusted = readTrustedCapture(capture, this.redactor);
+    return this.save('screenshot', 'image/png', trusted.bytes, meta, trusted.sourceIncomplete);
   }
-  async readScreenshotEvidence(id: string): Promise<{ id: string; type: 'screenshot'; bytes: Buffer; mediaType: 'image/png' }> {
+  async readScreenshotEvidence(id: string): Promise<{ id: string; type: 'screenshot'; bytes: Buffer; mediaType: 'image/png'; sourceIncomplete: boolean }> {
     const index = await this.artifacts.readJson(`${this.prefix}/evidence/index.json`, EvidenceRecordSchema.array());
     const matches = index?.filter(record => record.id === id) ?? [];
     const record = matches[0];
     if (matches.length !== 1 || !record || record.type !== 'screenshot' || record.mime !== 'image/png') throw new ArtifactError('截图证据不存在或类型不符');
     const bytes = await this.verify(record);
     if (!bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) throw new ArtifactError('截图格式不合法');
-    return { id, type: 'screenshot', bytes, mediaType: 'image/png' };
+    return { id, type: 'screenshot', bytes, mediaType: 'image/png', sourceIncomplete: record.sourceIncomplete !== false };
   }
   sanitizeTrace(event: TraceEvent): TraceEvent { return this.redactor.trace(event); }
   async verify(record: EvidenceRecord): Promise<Buffer> {

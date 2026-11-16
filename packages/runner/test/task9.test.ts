@@ -68,6 +68,26 @@ describe('Task9真实编排边界', () => {
     expect(r.result?.cases[0]).toMatchObject({ status: 'BLOCKED', complete: true });
     expect(h.requests).toEqual(['http://localhost:39999/health', 'http://localhost:39999/value']); expect(h.executor.doGenerateCalls.length).toBeGreaterThan(0);
   });
+  it.each(['form', 'replay'] as const)('%s 的批准 dev 身份不能用于 prod，preflight 阻止全部服务副作用与秘密读取', async kind => {
+    const { artifacts, approvals } = await setup({ actor: { kind, environment: 'local', actions: [{ kind: 'goto', url: '/login' }, { kind: 'fill', selector: 'input', env: 'DEV_PASSWORD' }] }, fixtures: ['known'] });
+    const command = { program: process.execPath, argv: ['-e', 'process.stdout.write("{}")'], env: {} };
+    const environments = { version: 1, environments: {
+      dev: { baseURL: 'http://localhost:39998', healthcheck: 'http://localhost:39998/health', reset: null },
+      prod: { baseURL: 'http://localhost:39999', healthcheck: 'http://localhost:39999/health', reset: 'known', start: command, stop: command },
+    } };
+    const auth = { version: 1, actors: { guest: { kind, environment: 'dev', actions: [{ kind: 'goto', url: '/login' }, { kind: 'fill', selector: 'input', env: 'DEV_PASSWORD' }] } } };
+    for (const [name, data] of Object.entries({ 'environments.yaml': environments, 'auth.yaml': auth, 'fixtures.yaml': { version: 1, fixtures: { known: { kind: 'command', command } } } })) {
+      await artifacts.writeYaml(`system/${name}`, data); approvals.approve('profile', name, data, '人工');
+    }
+    await approvals.save(artifacts);
+    const h = harness(artifacts); let launches = 0, secretReads = 0;
+    const env = Object.defineProperty({}, 'DEV_PASSWORD', { enumerable: true, get: () => { secretReads++; return 'DEV_SECRET'; } });
+    const result = await runSuite({ ...h.options, environment: 'prod', env, launchBrowser: async () => { launches++; throw new Error('不得启动'); } });
+    expect(result.result?.cases[0]).toMatchObject({ status: 'BLOCKED', reason: expect.stringMatching(/认证.*环境|身份.*环境/) });
+    expect(h.requests).toEqual([]); expect(launches).toBe(0); expect(secretReads).toBe(0);
+    expect(h.executor.doGenerateCalls).toHaveLength(0); expect(h.reviewer.doGenerateCalls).toHaveLength(0);
+    expect(await artifacts.list(`runs/${result.result!.manifest.runId}/commands`)).toHaveLength(0);
+  });
   it('HTTP-only 包括header身份只注册惰性认证，不启动Chromium', async () => {
     const { artifacts } = await setup({ actor: { kind: 'token', env: 'TOKEN', inject: { kind: 'header', name: 'X-Actor' } } }); const h = harness(artifacts); let launches = 0;
     const r = await runSuite({ ...h.options, env: { TOKEN: 'http-only-secret' }, launchBrowser: async () => { launches++; throw new Error('不应启动浏览器'); } });

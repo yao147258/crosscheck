@@ -20,6 +20,8 @@ export const EvidenceRecordSchema = z.object({
   digest: DigestSchema,
   redacted: z.boolean(),
   summary: z.string().optional(),
+  /** 可信宿主采集时的源完整性；截图缺省为旧记录 unknown，读取时保守按不完整处理。 */
+  sourceIncomplete: z.boolean().optional(),
 });
 export type EvidenceRecord = z.infer<typeof EvidenceRecordSchema>;
 export const TraceInputSchema = z.discriminatedUnion('kind', [

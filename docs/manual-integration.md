@@ -86,7 +86,7 @@ form/replay 消费已人工批准动作，不实现录制，例如在 actors 中
       - { kind: waitFor, selector: '#logged-in' }
 ```
 
-reset→其他夹具→认证顺序固定。浏览器与 HTTP 共享当前 actor：HTTP facade 仅对 baseURL 同 origin 读取浏览器 cookie；header/command/token header 仅向主 page 的同 origin 请求注入，不承诺弹窗、iframe、worker 的头认证覆盖。浏览器原生 cookie 按 domain/path/secure 等规则发送，**cookie 不按端口隔离**，同主机其他端口可能收到它；header/storage 的精确 origin 范围不能被解释为 cookie 网络隔离。不同用例不复用上下文，恢复建立新会话。
+reset→其他夹具→认证顺序固定。缺失普通夹具的现场 browser prepare 使用独立惰性会话，准备完成后关闭，再建立 actor 身份；准备过程中应用自动设置的 cookie、local/sessionStorage、页面登录态不继承到执行，也不重放造数动作。form/replay 的 `environment` 必须与选中运行环境一致，错配由 preflight 阻断，不启动服务、健康检查、夹具或认证动作。浏览器与 HTTP 共享当前 actor：HTTP facade 仅对 baseURL 同 origin 读取浏览器 cookie；header/command/token header 仅向主 page 的同 origin 请求注入，不承诺弹窗、iframe、worker 的头认证覆盖。浏览器原生 cookie 按 domain/path/secure 等规则发送，**cookie 不按端口隔离**，同主机其他端口可能收到它；header/storage 的精确 origin 范围不能被解释为 cookie 网络隔离。不同用例不复用上下文，恢复建立新会话。
 
 `.crosscheck/system/api-catalog.yaml`
 
@@ -180,7 +180,7 @@ HTTP 工具允许主机精确含端口，重定向每跳发送前检查禁止终
 
 模型通过 `browser_action` 使用 navigate/fill/click/select/press/wait/observe；定位器支持 css/role/text/testId/xpath，fill 的 `value` 与 `env` 二选一，敏感信息只用 env 引用。没有 evaluate/shell/宿主文件路径。每动作前后采集当前视口 PNG 和安全 DOM，密码/敏感字段、填写值、已知秘密、批准 selector，以及 iframe/canvas 等不可可靠核验区域被遮罩/省略；控件值不暴露给模型，不能根据隐藏值断言实际填写内容。请断言可见成功提示或另取允许的业务观察。
 
-截图只覆盖当前视口，不是整页、所有滚动位置或动画期间的一致性证明；选择器不能保证识别未知秘密。网络证据仅 URL/方法/状态等有界元数据，正文/头/cookie 源头省略，不足以证明完整业务响应；DOM 被省略/截断或图片未呈现也不能伪造完整证据。采证先在内存脱敏再落盘，不保存原始 HAR/trace/storageState；报告无截图时明确“无截图证据”，不放占位图。自动脱敏不是绝对无泄漏承诺，分享前人工检查。
+截图的源完整性由可信采集器随 PNG 登记为证据索引的可选布尔字段 `sourceIncomplete`，不能由模型或截图输入对象自签，也不通过 summary 字符串传递。批准遮罩、不可核验区域、局部/节点超限等源省略为 true；普通控件的 `redacted-value` 仅表示已批准值脱敏，不视为业务区域缺失。读取后该状态进入实际模型呈现与判定门禁，截图-only 也不能凭不完整截图作 PASS/FAIL；旧截图缺少字段表示 unknown，保守视为不完整，仍可核验/查看，不伪称完整。截图只覆盖当前视口，不是整页、所有滚动位置或动画期间的一致性证明；选择器不能保证识别未知秘密。网络证据仅 URL/方法/状态等有界元数据，正文/头/cookie 源头省略，不足以证明完整业务响应；DOM 被省略/截断或图片未呈现也不能伪造完整证据。采证先在内存脱敏再落盘，不保存原始 HAR/trace/storageState；报告无截图时明确“无截图证据”，不放占位图。自动脱敏不是绝对无泄漏承诺，分享前人工检查。
 
 ## 4. 人工审阅与独立确认
 

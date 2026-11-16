@@ -13,7 +13,7 @@ const skip = process.env.CROSSCHECK_REAL_BROWSER !== '1';
 const roots: string[] = [], servers: Server[] = [];
 afterEach(async () => { vi.restoreAllMocks(); await Promise.all(servers.splice(0).map(s => new Promise<void>(resolve => { s.closeAllConnections(); s.close(() => resolve()); }))); await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))); });
 const secret = 'RUNNER_FORM_SENTINEL_9282';
-async function setup(options: { verdict?: string; fallback?: boolean; steps?: number; minutes?: number; authWait?: boolean; fixtures?: boolean; failedPrepare?: boolean } = {}) {
+async function setup(options: { verdict?: string; fallback?: boolean; steps?: number; minutes?: number; authWait?: boolean; fixtures?: boolean; failedPrepare?: boolean; anonymousPrepare?: boolean; replay?: boolean } = {}) {
   const requests: string[] = [];
   const server = createServer((req, res) => {
     requests.push(req.url!);
@@ -21,7 +21,10 @@ async function setup(options: { verdict?: string; fallback?: boolean; steps?: nu
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     if (req.url === '/login') res.end('<form action="/logged" method="post"><input name="password" type="password"><button>登录</button></form>');
     else if (req.url === '/logged') { res.setHeader('Set-Cookie', `sid=${secret}; Path=/`); res.end('<p id="ready">登录成功</p>'); }
-    else if (req.url === '/prepare') res.end('<p>准备完成</p>');
+    else if (req.url === '/prepare') {
+      if (options.anonymousPrepare) res.setHeader('Set-Cookie', 'sid=PREPARE_LOGIN_MEMBER; Path=/');
+      res.end(`<p>准备完成</p>${options.anonymousPrepare ? '<script>localStorage.setItem("actor","member");sessionStorage.setItem("actor","member");window.actor="member"</script>' : ''}`);
+    }
     else res.end(`<label>名称<input id="name"></label><button onclick="document.querySelector('#result').textContent='保存成功'">保存</button><p id="result">等待保存</p>`);
   }); servers.push(server); await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
   const baseURL = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
@@ -30,7 +33,7 @@ async function setup(options: { verdict?: string; fallback?: boolean; steps?: nu
   const source = { file: '需求.md', line: 1, excerpt: '保存后显示成功' };
   const clause = ClauseSchema.parse({ id: 'M-AC-1', text: '填写并保存后显示成功', source });
   const tc = TestCaseSchema.parse({ id: 'M-TC-1', covers: [clause.id], actor: 'member', fixtures: options.fixtures ? ['known', 'reset', 'missing'] : [], steps: ['保存表单'], expectations: [{ id: 'E1', text: '保存后页面显示保存成功', evidence: ['dom', 'screenshot'] }] });
-  const files = { 'environments.yaml': { version: 1, environments: { local: { baseURL, healthcheck: `${baseURL}/health`, reset: options.fixtures ? 'reset' : null } } }, 'auth.yaml': { version: 1, actors: { member: { kind: 'form', environment: 'local', actions: [{ kind: 'goto', url: '/login' }, ...(options.authWait ? [{ kind: 'waitFor', selector: '#never' }] : [{ kind: 'fill', selector: 'input', env: 'PASSWORD' }, { kind: 'click', selector: 'button' }, { kind: 'waitFor', selector: '#ready' }])] } } }, 'api-catalog.yaml': { version: 1, operations: options.fixtures ? Object.fromEntries(['reset', 'known'].map(name => [name, { environment: 'local', method: 'POST', path: `/${name}`, description: name, sources: [source] }])) : {} }, 'pages.yaml': { version: 1, pages: {} }, 'data-model.yaml': { version: 1, queries: {} }, 'fixtures.yaml': { version: 1, fixtures: options.fixtures ? { reset: { kind: 'http', operation: 'reset' }, known: { kind: 'http', operation: 'known' } } : {} }, 'guardrails.yaml': { allowedHosts: [new URL(baseURL).host] } };
+  const files = { 'environments.yaml': { version: 1, environments: { local: { baseURL, healthcheck: `${baseURL}/health`, reset: options.fixtures ? 'reset' : null } } }, 'auth.yaml': { version: 1, actors: { member: options.anonymousPrepare ? { kind: 'anonymous' } : { kind: options.replay ? 'replay' : 'form', environment: 'local', actions: [{ kind: 'goto', url: '/login' }, ...(options.authWait ? [{ kind: 'waitFor', selector: '#never' }] : [{ kind: 'fill', selector: 'input', env: 'PASSWORD' }, { kind: 'click', selector: 'button' }, { kind: 'waitFor', selector: '#ready' }])] } } }, 'api-catalog.yaml': { version: 1, operations: options.fixtures ? Object.fromEntries(['reset', 'known'].map(name => [name, { environment: 'local', method: 'POST', path: `/${name}`, description: name, sources: [source] }])) : {} }, 'pages.yaml': { version: 1, pages: {} }, 'data-model.yaml': { version: 1, queries: {} }, 'fixtures.yaml': { version: 1, fixtures: options.fixtures ? { reset: { kind: 'http', operation: 'reset' }, known: { kind: 'http', operation: 'known' } } : {} }, 'guardrails.yaml': { allowedHosts: [new URL(baseURL).host] } };
   for (const [name, data] of Object.entries(files)) await artifacts.writeYaml(`system/${name}`, data);
   await artifacts.saveClauses('M', [clause]); await artifacts.saveCases('M', [tc]); const approvals = Approvals.empty();
   for (const [name, data] of Object.entries(await loadProfile(artifacts))) approvals.approve('profile', name, data, '人工');
@@ -79,6 +82,37 @@ describe.skipIf(skip)('runner 真实浏览器与脚本模型', () => {
     expect(s.requests.filter(x => ['/reset', '/known', '/prepare', '/login'].includes(x))).toEqual(['/reset', '/known', '/prepare', '/login']);
     expect(result.result?.cases[0]?.reliability.errors).toContain('fixture-ad-hoc:missing');
     expect((await s.index()).filter(x => x.phase === 'preparation').length).toBeGreaterThan(0);
+  }, 30000);
+  it('prepare 自动登录 cookie/storage/页面状态不污染 anonymous 浏览器或 HTTP，夹具不重放', async () => {
+    const s = await setup({ fixtures: true, anonymousPrepare: true });
+    let turn = 0;
+    const executor = new MockLanguageModelV4({ doGenerate: async opts => {
+      if (!JSON.stringify(opts.prompt).includes('保存表单')) return s.executor.doGenerate(opts);
+      if (turn++ === 0) return scriptedModel([{ toolCalls: [{ name: 'http_request', input: { url: `${s.baseURL}/who` } }] }]).doGenerate(opts);
+      return s.executor.doGenerate(opts);
+    } });
+    const snapshots: unknown[] = []; let launches = 0;
+    const result = await runSuite({ ...s.options, modelOptions: { factories: { ollama: ({ modelId }) => modelId === 'e' ? executor : s.reviewer } }, launchBrowser: async opts => {
+      launches++;
+      const session = await launchBrowserSession(opts);
+      return { ...session, close: async () => {
+        if (!session.page.isClosed()) snapshots.push({ cookies: await session.context.cookies(), state: await session.page.evaluate(() => ({ local: localStorage.getItem('actor'), session: sessionStorage.getItem('actor'), actor: (window as any).actor ?? null })) });
+        await session.close();
+      } };
+    } });
+    expect(result.result?.status).toBe('PASS');
+    const http = (await s.index()).find(r => r.type === 'network' && r.phase === 'execution')!;
+    expect((await s.artifacts.readBytes(http.path))!.toString()).toContain('guest');
+    expect(snapshots).toEqual([
+      { cookies: [expect.objectContaining({ name: 'sid', value: 'PREPARE_LOGIN_MEMBER' })], state: { local: 'member', session: 'member', actor: 'member' } },
+      { cookies: [], state: { local: null, session: null, actor: null } },
+    ]);
+    expect(launches).toBe(2);
+    expect(s.requests.filter(x => ['/reset', '/known', '/prepare'].includes(x))).toEqual(['/reset', '/known', '/prepare']);
+  }, 30000);
+  it('正确环境 replay 仍通过真实表单认证', async () => {
+    const s = await setup({ replay: true }); const result = await runSuite(s.options);
+    expect(result.result?.status).toBe('PASS'); expect(s.requests).toContain('/logged');
   }, 30000);
   it('失败的浏览器准备动作不能以其前后截图与DOM伪造完成', async () => {
     const s = await setup({ fixtures: true, failedPrepare: true }); const result = await runSuite(s.options);
