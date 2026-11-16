@@ -1,0 +1,53 @@
+import { Box, Text, useApp, useInput } from 'ink';
+import { useMemo, useRef, useState } from 'react';
+import { ActionContext, ReviewContext, type ReviewEnv } from './context';
+import type { Nav, Route } from './routes';
+import { CasesView } from './views/cases';
+import { ClausesView } from './views/clauses';
+import { HomeView } from './views/home';
+import { ModulesView } from './views/modules';
+import { ProfileView } from './views/profile';
+import { ResultsView } from './views/results';
+import { RunsView } from './views/runs';
+
+function RouteView({ route, nav }: { route: Route; nav: Nav }) {
+  switch (route.name) {
+    case 'home': return <HomeView nav={nav} />;
+    case 'profile': return <ProfileView nav={nav} />;
+    case 'modules': return <ModulesView nav={nav} kind={route.kind} />;
+    case 'clauses': return <ClausesView nav={nav} module={route.module} />;
+    case 'cases': return <CasesView nav={nav} module={route.module} />;
+    case 'runs': return <RunsView nav={nav} />;
+    case 'results': return <ResultsView nav={nav} runId={route.runId} />;
+  }
+}
+
+export function App({ env, initial }: { env: ReviewEnv; initial: Route }) {
+  const { exit } = useApp();
+  const [stack, setStack] = useState<Route[]>([initial]);
+  const [notice, setNotice] = useState<string>();
+  const busy = useRef(false);
+  const actions = useMemo(() => ({ busy, changed: () => setNotice(undefined) }), []);
+  const route = stack[stack.length - 1]!;
+  const guard = (fn: () => void) => {
+    if (busy.current) setNotice('请等待当前操作完成');
+    else fn();
+  };
+  const nav: Nav = {
+    push: (next) => guard(() => setStack((s) => [...s, next])),
+    back: () => guard(() => { if (stack.length > 1) setStack((s) => s.slice(0, -1)); else exit(); }),
+    quit: () => guard(() => exit()),
+  };
+  useInput((input, key) => { if (key.ctrl && input === 'c') nav.quit(); });
+  return (
+    <ReviewContext.Provider value={env}>
+      <ActionContext.Provider value={actions}>
+        <Box flexDirection="column">
+          <Text bold color="cyan">Crosscheck 审核 · 确认人 {env.session.reviewer}</Text>
+          <RouteView key={`${stack.length}:${JSON.stringify(route)}`} route={route} nav={nav} />
+          {notice && <Text color="yellow">{notice}</Text>}
+        </Box>
+      </ActionContext.Provider>
+    </ReviewContext.Provider>
+  );
+}
