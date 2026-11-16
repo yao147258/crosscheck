@@ -88,6 +88,13 @@ export class EvidenceStore {
     try { return {status:response.status,body:this.redactor.value(JSON.parse(content.text))}; }
     catch { throw new HttpResponseUnavailableError(); }
   }
+  /** 仅供 presenter 选择读取分支；载荷归属/哈希仍由对应 read 方法核验，禁止用异常猜类型。 */
+  async readEvidenceType(id: string): Promise<EvidenceRecord['type']> {
+    const index = await this.artifacts.readJson(`${this.prefix}/evidence/index.json`, EvidenceRecordSchema.array());
+    const matches = index?.filter(record => record.id === id) ?? [];
+    if (matches.length !== 1) throw new ArtifactError('证据不存在或重复');
+    return matches[0]!.type;
+  }
   /** 仅宿主 presenter 使用：从当前归属索引按 ID 读取，不接受路径，不返回审计元数据。 */
   async readTextEvidence(id: string): Promise<{ id: string; type: 'network' | 'console' | 'db' | 'dom'; text: string; sourceIncomplete: boolean }> {
     const index = await this.artifacts.readJson(`${this.prefix}/evidence/index.json`, EvidenceRecordSchema.array());

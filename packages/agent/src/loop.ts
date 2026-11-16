@@ -4,7 +4,7 @@ import { generateText, jsonSchema, tool, type ModelMessage, type ToolSet } from 
 import { z } from 'zod';
 import { grantTools, type Stage } from './grants';
 import { defineTool, type AgentTool } from './tool';
-import { prepareContext, type ContextPolicy, type EvidencePresenter } from './context';
+import { prepareContext, type ContextPolicy, type EvidencePresenter, type EvidencePresentedEvent } from './context';
 
 export const FINISH_TOOL = 'finish';
 export const REPORT_BLOCKED_TOOL = 'report_blocked';
@@ -37,6 +37,8 @@ export interface RunAgentOptions<O> {
   budget: BudgetTracker;
   signal?: AbortSignal;
   evidencePresenter?: EvidencePresenter;
+  /** 每个真实候选请求装配后 await，列表仅含最终附件；宿主必须替换而非累计 shown。异常不做 provider 重试。 */
+  onEvidencePresented?: (event: EvidencePresentedEvent) => void | Promise<void>;
   contextPolicy?: ContextPolicy;
   /** 由宿主决定判定必需证据；默认所有已知证据都必须完整呈现。 */
   requiredEvidenceIds?: readonly string[];
@@ -144,6 +146,7 @@ export async function runAgent<O>(opts: RunAgentOptions<O>): Promise<AgentResult
           let prepared: Awaited<ReturnType<typeof prepareContext>>;
           try {
             prepared = await prepareContext(messages, { ...opts.contextPolicy, ref, signal: genSignal, presenter: opts.evidencePresenter, requiredEvidenceIds: opts.requiredEvidenceIds });
+            await opts.onEvidencePresented?.({ ref, evidence: prepared.presentedEvidence });
           } catch (error) {
             // 只识别明确取消来源；同时abort的真实磁盘/verify错误仍为宿主原错。
             if (genSignal.aborted && (error === genSignal.reason || error instanceof Error && error.name === 'AbortError')) throw error;

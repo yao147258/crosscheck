@@ -169,6 +169,7 @@ describe('Task9恢复/证据/资源故障', () => {
       const store = new EvidenceStore(artifacts, { runId: run.manifest.runId, caseId: tc.id, attempt: 1 }, createEvidenceRedactor());
       const record = await store.saveJson('db', { rows: [], truncated: true }, { actionId: 'a-query', phase: 'execution' });
       const text = (await createEvidencePresenter(store)([record.id], { ref: 'mock:e', signal: new AbortController().signal }))[0]!;
+      if (text.type === 'screenshot') throw new Error('期望数据库文本');
       expect(text.text.length).toBeLessThan(100);
       const result = await validateJudgements({ judgements: [{ expectationId: 'E1', verdict: 'pass', evidenceIds: [record.id], reasoning: '全量为空' }] }, [{ id: 'E1', text: '全量为空', evidence: ['db'] }], [record], store, new Map([[record.id, text]])); expect(result.ok).toBe(false);
     });
