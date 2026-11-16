@@ -59,6 +59,9 @@ importers:
       '@crosscheck/core':
         specifier: workspace:^
         version: link:../core
+      '@crosscheck/discovery':
+        specifier: workspace:^
+        version: link:../discovery
       '@crosscheck/models':
         specifier: workspace:^
         version: link:../models

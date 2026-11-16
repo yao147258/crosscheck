@@ -14,6 +14,32 @@ it('help不读取项目，参数错误退出2而非成功', async () => {
   expect(output.join('')).toContain('--resume');
   expect(await cliMain(['run', '--force'], { log: s => output.push(s) })).toBe(2);
 });
+it('解析新命令的参数', () => {
+  expect(parseArgs(['init', '--openapi', 'a.yaml', '--openapi', 'b.yaml', '--openapi', 'a.yaml'])).toMatchObject({ command: 'init', openapi: ['a.yaml', 'b.yaml'] });
+  expect(parseArgs(['reqs', '--module', 'M09'])).toMatchObject({ command: 'reqs', modules: ['M09'] });
+  expect(parseArgs(['plan', '--module', 'M09', '--project', 'p'])).toMatchObject({ command: 'plan', modules: ['M09'], project: 'p' });
+  expect(parseArgs(['review'])).toMatchObject({ command: 'review' });
+  expect(parseArgs(['review', 'clauses', '--module', 'M09'])).toMatchObject({ command: 'review', view: 'clauses', modules: ['M09'] });
+  expect(parseArgs(['review', 'results', '--run', '20261113T123456789Z-00000000000000000000000000000000'])).toMatchObject({ view: 'results', runId: '20261113T123456789Z-00000000000000000000000000000000' });
+});
+it.each([
+  ['reqs'], ['plan'], ['plan', '--module', 'M-1'], ['reqs', '--module', 'A', '--module', 'B'], ['init', '--module', 'M'],
+  ['review', 'bogus'], ['review', '--run', 'bad'], ['review', '--case', 'M-TC-1'], ['unknown'],
+  ['init', '--openapi'], ['plan', '--module', '../M'], ['review', '--module', 'A', '--module', 'B'],
+  ['reqs', '--open'], ['report', '20261113T123456789Z-00000000000000000000000000000000', '--openapi', 'a.yaml'],
+].map((args) => ({ args })))('拒绝新命令的错误参数$args', ({ args }) => {
+  expect(() => parseArgs(args)).toThrow();
+});
+it('保留旧命令的合法参数与集合语义', () => {
+  expect(parseArgs(['run', '--module', 'M-1', '--module', 'M-1', '--case', 'M-TC-1', '--case', 'M-TC-1', '--open'])).toMatchObject({ modules: ['M-1'], caseIds: ['M-TC-1'], open: true });
+  expect(parseArgs(['report', '20261113T123456789Z-00000000000000000000000000000000', '--project', 'p', '--open'])).toMatchObject({ command: 'report', project: 'p', open: true });
+});
+it('参数错误保留具体子命令与标识提示', async () => {
+  const output: string[] = [];
+  expect(await cliMain(['reqs'], { log: (s) => output.push(s) })).toBe(2);
+  expect(output.join('\n')).toContain('reqs 需要 --module');
+  expect(() => parseArgs(['review', '--run', 'bad'])).toThrow('运行标识不合法');
+});
 it('缺输入run不伪造result，错误report退出3', async () => {
   const output: string[] = [];
   expect(await cliMain(['run', '--project', '不存在的项目'], { log: s => output.push(s) })).toBe(2);

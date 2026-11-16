@@ -1,18 +1,28 @@
-import { ArtifactStore } from '@crosscheck/core';
-import type { RunSuiteOptions } from '@crosscheck/runner';
-import { HELP, parseArgs } from './args';
+import { ArtifactStore, GateError } from '@crosscheck/core';
+import { HELP, parseArgs, type CliArgs } from './args';
+import { InterruptedError, type CommandDependencies } from './context';
+import { initCommand } from './init';
 import { runCommand } from './run';
 import { writeReport } from './report';
 export { parseArgs } from './args';
 
-export async function cliMain(argv: string[], options: { log?: (s: string) => void; dependencies?: Pick<RunSuiteOptions, 'modelOptions' | 'resilience' | 'env'>; signal?: AbortSignal } = {}): Promise<number> {
+export async function cliMain(argv: string[], options: { log?: (s: string) => void; dependencies?: CommandDependencies; signal?: AbortSignal } = {}): Promise<number> {
   const log = options.log ?? console.log;
-  let args;
+  let args: CliArgs;
   try { args = parseArgs(argv); } catch (error) { log(error instanceof Error ? error.message : '参数错误'); return 2; }
   if (args.command === 'help') { log(HELP); return 0; }
+  const deps = options.dependencies ?? {};
   try {
-    if (args.command === 'run') return await runCommand(args, log, options.dependencies, options.signal);
-    await writeReport(new ArtifactStore(args.project), args.runId!, args.open, log);
-    return 0;
-  } catch { log('宿主存储、证据校验或报告操作失败'); return 3; }
+    switch (args.command) {
+      case 'run': return await runCommand(args, log, deps, options.signal);
+      case 'report': await writeReport(new ArtifactStore(args.project), args.runId!, args.open, log); return 0;
+      case 'init': return await initCommand(args, log, deps, options.signal);
+      default: throw new Error(`命令尚未实现：${args.command}`);
+    }
+  } catch (error) {
+    if (args.command === 'run' || args.command === 'report') { log('宿主存储、证据校验或报告操作失败'); return 3; }
+    if (error instanceof GateError || error instanceof InterruptedError) { log(error.message); return 2; }
+    log(`宿主错误：${error instanceof Error ? error.message : String(error)}`);
+    return 3;
+  }
 }
