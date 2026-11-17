@@ -28,7 +28,9 @@ describe('Task8 宿主证据 presenter', () => {
       const presented = await presenter([record.id], { ref: 'mock:a', signal: new AbortController().signal });
       expect(presented[0]!.truncated).toBe(incomplete);
       if (!kind.endsWith('db') && kind !== 'db-truncated') {
-        const har = JSON.parse(presented[0]!.text);
+        const text = presented[0]!;
+        if (text.type === 'screenshot') throw new Error('期望文本证据');
+        const har = JSON.parse(text.text);
         const body = kind.startsWith('request') ? har.log.entries[0].request.postData : har.log.entries[0].response.content;
         expect(body.omitted).toBe(incomplete);
         expect(body.truncated).toBe(kind.endsWith('truncated'));
@@ -122,16 +124,18 @@ describe('Task8 宿主证据 presenter', () => {
       const rows = await present([db.id, consoleRecord.id, network.id], { ref: 'mock:a', signal: new AbortController().signal });
       expect(rows.map(row => row.type)).toEqual(['db', 'console', 'network']);
       expect(JSON.stringify(rows)).not.toContain('secret-later');
-      expect(rows[0]!.text).toContain('REDACTED');
-      expect(rows[1]).toMatchObject({ truncated: true });
-      expect(rows[1]!.text.length).toBeLessThanOrEqual(200);
-      expect(rows[1]!.text).toContain('truncated');
+      const dbText = rows[0]!, consoleText = rows[1]!;
+      if (dbText.type === 'screenshot' || consoleText.type === 'screenshot') throw new Error('期望文本证据');
+      expect(dbText.text).toContain('REDACTED');
+      expect(consoleText).toMatchObject({ truncated: true });
+      expect(consoleText.text.length).toBeLessThanOrEqual(200);
+      expect(consoleText.text).toContain('truncated');
       expect(JSON.stringify(rows)).not.toContain('actionId');
       await expect(present([db.path], { ref: 'mock:a', signal: new AbortController().signal })).rejects.toThrow();
       const foreign = new EvidenceStore(artifacts, { ...context, attempt: 2 }, redactor);
       await expect(createEvidencePresenter(foreign)([db.id], { ref: 'mock:a', signal: new AbortController().signal })).rejects.toThrow();
-      const dom = await store.saveDom([{ tag: 'div', text: '禁止' }], meta);
-      await expect(present([dom.id], { ref: 'mock:a', signal: new AbortController().signal })).rejects.toThrow();
+      const dom = await store.saveDom([{ tag: 'div', text: '真实DOM' }], meta);
+      expect(await present([dom.id], { ref: 'mock:a', signal: new AbortController().signal })).toEqual([{ id: dom.id, type: 'dom', text: '[{"tag":"div","text":"真实DOM"}]', truncated: false }]);
       await artifacts.writeJson(db.path, { forged: true });
       await expect(present([db.id], { ref: 'mock:a', signal: new AbortController().signal })).rejects.toThrow(/摘要/);
     } finally { await rm(root, { recursive: true, force: true }); }

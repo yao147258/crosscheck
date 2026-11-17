@@ -1,10 +1,11 @@
 import { ArtifactError, GateError, exitCodeFor, loadVerifiedRunInputs, type ArtifactStore, type RunResult, type RunInputOptions } from '@crosscheck/core';
 import type { ResolveOptions, ResilienceOptions } from '@crosscheck/models';
-import { type HttpTransport, type PgConnection } from '@crosscheck/tools';
+import { type BrowserHostOptions, type HttpTransport, type PgConnection } from '@crosscheck/tools';
 import { RunStore } from './store/run-store';
 import { executeCase } from './run-case';
 import { executionFingerprint, findResume, snapshot, verifySnapshot } from './resume';
 import { runRedactor } from './redactor';
+import { preflight } from './preflight';
 
 export interface RunSuiteOptions extends RunInputOptions {
   artifacts: ArtifactStore;
@@ -13,6 +14,7 @@ export interface RunSuiteOptions extends RunInputOptions {
   modelOptions?: ResolveOptions;
   resilience?: ResilienceOptions;
   transport?: HttpTransport;
+  launchBrowser?: BrowserHostOptions['launch'];
   env?: Record<string, string | undefined>;
   createConnection?: (url: string) => PgConnection;
 }
@@ -23,12 +25,15 @@ export async function runSuite(options: RunSuiteOptions): Promise<SuiteOutcome> 
   let input: Awaited<ReturnType<typeof loadVerifiedRunInputs>>;
   try { input = await loadVerifiedRunInputs(options.artifacts, { environment: options.environment, modules: options.modules, caseIds: options.caseIds }); }
   catch (error) { return { exitCode: error instanceof GateError || error instanceof ArtifactError && !error.cause ? 2 : 3, interrupted: !!options.signal?.aborted, error: error instanceof GateError ? error.message : '运行输入读取或审批校验失败' }; }
+  // 全部用例在结构检查即拒绝时，不解析任何模型、认证或服务秘密。
+  const runnable = input.cases.some(tc => !preflight(input, tc));
+  const sourceEnv = runnable ? options.env ?? options.modelOptions?.env ?? process.env : {};
   const fingerprint = executionFingerprint(input, options.resilience);
   let run: RunStore;
   try {
     if (options.resume) run = await findResume(options.artifacts, options.resume, fingerprint);
     else {
-      const redactor = runRedactor(input, options.env ?? options.modelOptions?.env ?? process.env);
+      const redactor = runRedactor(input, sourceEnv);
       // 按批准结构投影 URL 字段；自然语言不猜测为 URL。
       const projected = structuredClone(input);
       for (const environment of Object.values(projected.profile['environments.yaml'].environments)) {
@@ -49,7 +54,7 @@ export async function runSuite(options: RunSuiteOptions): Promise<SuiteOutcome> 
       await verifySnapshot(options.artifacts, run, input, fingerprint);
       await run.updateStatus('running');
       const completed = new Set((await run.listCaseResults()).map(c => c.caseId));
-      const env = { ...(options.env ?? options.modelOptions?.env ?? process.env) };
+      const env = { ...sourceEnv };
       let hostError: string | undefined;
       for (const tc of input.cases) {
         if (completed.has(tc.id)) continue;

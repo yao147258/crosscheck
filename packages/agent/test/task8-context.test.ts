@@ -14,6 +14,41 @@ const history: ModelMessage[] = [
 const presenter: EvidencePresenter = async (ids) => ids.map(id => ({ id, type: 'db', text: `真实脱敏行 ${id}`, truncated: false }));
 
 describe('Task8 确定性上下文', () => {
+  it('旧multipart图片附件压缩为ID且每候选重新装配，不绕过当前bytes限额', async () => {
+    const messages: ModelMessage[] = [...history.slice(0, 4), { role: 'user', content: [{ type: 'text', text: '[宿主证据 e-image]\n截图' }, { type: 'image', image: new Uint8Array([1, 2, 3]), mediaType: 'image/png' }] }, ...history.slice(4)];
+    const compressed = compressContext(messages);
+    expect(compressed.evidenceIds).toContain('e-image');
+    expect(JSON.stringify(compressed.messages)).not.toContain('"type":"image"');
+    expect(compressed.messages.slice(-2)).toEqual(messages.slice(-2));
+    expect(messages[4]).toMatchObject({ role: 'user', content: expect.arrayContaining([expect.objectContaining({ type: 'image' })]) });
+    const prepared = await prepareContext(messages, { ref: 'mock:a', signal: new AbortController().signal, presenter: async () => [], requiredEvidenceIds: ['e-image'] });
+    expect(prepared.incompleteEvidenceIds).toContain('e-image');
+    expect(JSON.stringify(prepared.messages)).not.toContain('"type":"image"');
+  });
+  it('文字累计上限在实际SDK请求截断，异步通知返回最终元数据而非原正文', async () => {
+    const model = scriptedModel(Array.from({ length: 3 }, () => ({ toolCalls: [{ name: 'finish', input: { answer: 'ok' } }] })));
+    const seen: unknown[] = [];
+    const result = await runAgent({ stage: 'review', models: [{ ref: 'mock:a', model }], system: '原文', messages: [], tools: [], output: z.object({ answer: z.string() }), budget: new BudgetTracker({ steps: 10, tokens: 10000, minutes: 1 }), requiredEvidenceIds: ['e-dom'],
+      evidencePresenter: async () => [{ id: 'e-dom', type: 'dom', text: '正文'.repeat(500), truncated: false }], contextPolicy: { maxAttachmentChars: 150 },
+      onEvidencePresented: async event => { await Promise.resolve(); seen.push(event); },
+    });
+    expect(result).toMatchObject({ status: 'blocked', reason: 'invalid-output' });
+    expect(seen).toHaveLength(3);
+    expect(seen[0]).toEqual({ ref: 'mock:a', evidence: [{ id: 'e-dom', type: 'dom', truncated: true }] });
+    for (const call of model.doGenerateCalls) {
+      const text = call.prompt.flatMap(m => m.role === 'user' ? m.content : []).filter(p => p.type === 'text' && p.text.startsWith('[宿主证据 '));
+      expect(text.reduce((n, p) => n + (p.type === 'text' ? p.text.length : 0), 0)).toBeLessThanOrEqual(150);
+      expect(JSON.stringify(call.prompt)).not.toContain('正文'.repeat(100));
+    }
+  });
+  it('呈现通知失败与取消同时发生仍传播宿主原错，不调用或重试provider', async () => {
+    const primary = scriptedModel([]), backup = scriptedModel([]), ac = new AbortController();
+    const original = new Error('呈现通知写入失败');
+    await expect(runAgent({ stage: 'review', models: [{ ref: 'mock:a', model: primary }, { ref: 'mock:b', model: backup }], system: '原文', messages: [], tools: [], output: z.object({ answer: z.string() }), budget: new BudgetTracker({ steps: 10, tokens: 10000, minutes: 1 }), signal: ac.signal,
+      onEvidencePresented: async () => { await Promise.resolve(); ac.abort(); throw original; }, resilience: { retries: 2, sleep: async () => {} },
+    })).rejects.toBe(original);
+    expect(primary.doGenerateCalls).toHaveLength(0); expect(backup.doGenerateCalls).toHaveLength(0);
+  });
   it('真正附件总大小含截断标记不超过配置上限', async () => {
     const prepared = await prepareContext(history, { ref: 'mock:a', signal: new AbortController().signal,
       presenter: async ids => ids.map(id => ({ id, type: 'db' as const, text: 'x'.repeat(200), truncated: true })), maxAttachmentChars: 150 });

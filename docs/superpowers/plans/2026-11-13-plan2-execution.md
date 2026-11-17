@@ -12,12 +12,18 @@
 
 Task5 浏览器工具暂缓：真实准入验证发现 WebSocket 握手绕过已测 CDP 拦截，不能满足发送前阻断要求。原文保留作为后续恢复范围，本次交付改为 HTTP/可选 PostgreSQL 的 run/report 闭环；不开放未审查的浏览器研究代码，不交付截图/DOM 采集。要求 screenshot/dom 证据、form/replay 认证或 storage token 注入的用例必须在副作用前 BLOCKED，不能静默替换证据标准。最终 CLI 集成验收使用真实 loopback HTTP 工具与假模型，不声称完成真实浏览器闭环。细节见 `2026-11-13-plan2-contracts.md`。
 
+### 最新恢复裁定（2026-11-16，覆盖上段历史）
+
+用户取消浏览器网络隔离要求并恢复自动浏览器测试。当前交付标准 Playwright Chromium：受限 browser_action navigate/fill/click/select/press/wait/observe、每用例独立惰性上下文、脱敏截图/DOM/网络元数据/console、共享 actor 认证与图片附件双判。页面自身请求、重定向、WebSocket/WebTransport/WebRTC 正常运行，不安装强制代理/CDP 网络准入、不禁 WT/RTC，仅用于可信测试环境；HTTP/DB 守卫保持不变。下文 Task5 的严格准入内容仅保留为历史，现行实施范围以 `2026-11-16-browser-execution.md` Global Constraints 和对应 spec 顶部裁定为准，不再以安全准入研究为交付前提。
+
+Task4 用真实 loopback 表单、构建 CLI JS 子进程与脚本模型验证 navigate/fill/click/observe，双方实际收到 PNG/DOM，生成同状态 JSON/JUnit/HTML，核验 PNG 签名、归属/hash、脱敏及盲审。默认跳过 real 组时不能宣称真机验收；显式命令见手工指南。保留人工确认、预算、清理、证据完整性及模型图片能力门禁；PG/厂商/最低 Node 本轮未验证，旧 Node22.12 冒烟是历史。独立审查与最终分支验收由调用方负责，本任务不自行合并/推送。
+
 ## 全局约束
 
 - 所有对话和文档使用中文，代码注释使用中文。
 - core 不依赖其他内部包；模型与真实工具可注入替换，测试不消耗真实模型 token。
 - 判定标准只能来自已确认条款；reviewer 不得获得 executor 结论和推理。
-- 执行阶段不提供夹具能力；DB 查询工具始终只读；请求必须受 guardrails 约束。
+- 执行阶段不提供夹具能力；DB 查询工具始终只读；HTTP 工具请求受 guardrails 约束，浏览器页面流量不在此守卫范围。
 - 凭证只从环境变量取，证据必须先脱敏再落盘；被测项目内只写 `.crosscheck/`。
 - 每用例默认预算60步、400000 tokens、10分钟，由各执行阶段共享；代理轮次和模型重试次数分开记录。
 - 当前 SDK7/provider4 要求 Node ≥22，交付基线暂为 Node ≥22.12，不宣称 Node20兼容；最低版本实际验证状态需单列。
@@ -42,7 +48,7 @@ Task5 浏览器工具暂缓：真实准入验证发现 WebSocket 握手绕过已
 ### 输入与确认
 
 - `system/` 固定清单：environments、auth、api-catalog、pages、data-model、fixtures、guardrails；无 DB/夹具/认证时使用显式空配置或 `none`，不能因漏读文件跳过确认。
-- 环境含基础 URL、健康检查、可选已确认启动/停止命令；命令为可执行文件 + argv，不提供任意 shell。guardrails 的 allowedHosts 是唯一网络授权来源；环境地址也必须通过它。
+- 环境含基础 URL、健康检查、可选已确认启动/停止命令；命令为可执行文件 + argv，不提供任意 shell。HTTP 工具的 allowedHosts 是其网络授权来源，环境健康检查也必须通过它；不是浏览器页面自身请求的网络隔离规则。
 - auth 按 actor 声明 anonymous/form/token/声明式动作回放/预登记命令；凭证只写环境变量名。回放是消费批准的动作配置，不实现计划 3 的人工录制。HTTP 与浏览器共享同一用例的 actor 身份，账号凭证不进入报告。
 - fixture 实现按 command/http/sql 区分；命令、SQL 写凭证仅能在准备阶段使用。保留 `fixtures: string[]`，参数固定在已确认的 fixture 定义中，输出返回结构化上下文供后续步骤使用；不在本阶段增加任意模型模板语言。
 - 环境明确配置 reset 策略（具名reset或显式none）；宿主执行一次，随后按用例声明顺序运行其余夹具；数组中重复的 reset 去重。必需reset缺失/失败或已登记夹具失败直接BLOCKED，不能现场猜替代操作；仅缺失的普通夹具允许准备阶段通过受控 browser/http 现场造数，并记录低可靠与建议；失败即 BLOCKED。

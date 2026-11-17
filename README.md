@@ -1,16 +1,18 @@
 # Crosscheck
 
-面向**已启动、手工配置并经人确认**项目的本地 HTTP / 可选 PostgreSQL AI 验收工具。判定标准来自确认后的需求条款，双方判断引用真实工具证据；FAIL 是疑似 bug，待人工复核。
+面向**已启动、手工配置并经人确认的可信测试项目**的本地 Chromium 浏览器 / HTTP / 可选 PostgreSQL AI 验收工具。AI 可自动操作页面、采集脱敏证据，再由执行器与独立 reviewer 双判；FAIL 是疑似 bug，待人工复核。浏览器无网络隔离，不适用于不可信页面或生产环境。
 
 ## 构建与使用
 
-需要 Node.js >=22.12 和 pnpm 9。已实际验证 Node v22.12.0 运行构建 CLI；第三方依赖仍需安装，不是单文件独立分发。
+需要 Node.js >=22.12 和 pnpm 9。Node v22.12.0 构建 CLI 冒烟是此前历史验证，本轮浏览器交付未重跑最低 Node；第三方依赖仍需安装，不是单文件独立分发。
 
 ```powershell
 pnpm install
 pnpm test
 pnpm typecheck
 pnpm build
+# 需要浏览器操作或真实浏览器测试时安装 Chromium；HTTP-only 不启动它
+pnpm --filter @crosscheck/cli exec playwright install chromium
 pnpm crosscheck --help
 # 同一个本地 bin（从仓库运行）
 pnpm --filter @crosscheck/cli exec crosscheck --help
@@ -47,7 +49,19 @@ pnpm crosscheck report <runId> --project E:/my-test-project --open
 
 同一保存 RunResult 生成 `.crosscheck/runs/<runId>/results.json`、`junit.xml`、`report/index.html`。报告从历史展示快照与提交点重建，不读当前条款/画像；证据路径、归属、引用、hash 必须通过。HTML 纯静态，无脚本/fetch/CDN；采集 HTML/SVG 转义为文本。JUnit FAIL 为 failure，其他非PASS为 skipped，并保留原状态。未定价/失败缺usage的费用是未知，不是0。
 
-**计划2不含浏览器工具**：WebSocket 无法发送前可靠阻断，因此不支持页面操作验收；screenshot/dom、form/replay、token storage 用例在副作用前 BLOCKED。报告保留已保存 PNG 的静态渲染能力，本阶段 run 无截图时明确“无截图证据”，不伪造图片。
+**2026-11-16 当前能力**：标准 Playwright Chromium 支持 `browser_action` 的 navigate/fill/click/select/press/wait/observe；每用例独立上下文、惰性启动，结束/取消时等待关闭。2026-11-13 因 WebSocket 准入暂缓的裁定保留在计划历史，已被用户后续“取消浏览器网络隔离、恢复自动测试”覆盖。普通页面请求、重定向、WebSocket/WebTransport/WebRTC 正常运行，不安装强制代理或网络准入拦截；`allowedHosts/forbidden` 仍约束 HTTP 工具，不覆盖页面自身流量。模型没有 evaluate、shell 或宿主文件能力。
+
+截图/DOM、console 和网络元数据先脱敏再落盘；网络不保存完整正文、头或 cookie，不能作为完整响应断言。`guardrails.screenshotMasks` 为可选 CSS selector 数组（省略时保持旧确认哈希；更改后需重新人工确认）。模型图片能力必须按完整 ref 配置，例如 `capabilities: { 'openai:your-executor-model': { images: true }, 'google:your-reviewer-model': { images: true } }`，备用模型也逐项配置；缺省无图，不能满足 screenshot 预期则 BLOCKED/UNCLEAR，不伪造 PASS。form/replay 和同 origin storage token 已接入，认证与遮罩局限见手工指南。
+
+```powershell
+# 默认测试会跳过显式 real 浏览器组；以下才运行真实浏览器且不调用外部模型
+$env:CROSSCHECK_REAL_BROWSER = '1'
+pnpm vitest run packages/cli/test/browser-e2e.test.ts --maxWorkers=1 --testTimeout=15000
+pnpm vitest run --maxWorkers=1 --testTimeout=15000
+Remove-Item Env:CROSSCHECK_REAL_BROWSER
+```
+
+真实 CLI 用例通过构建 JS 入口（无隐式 TypeScript loader），脚本模型驱动真实 loopback 表单并核验双方 PNG/DOM 附件、报告与脱敏；不证明厂商模型质量。截图是当前视口，不保证滚动页/动画的全局一致性；控件值已脱敏，不能据隐藏值断言输入内容，未知秘密仍需人工检查。
 
 HTTP fixture 只接受固定 JSON 请求与完整 JSON 响应；start/stop 仅有限时、一次性、退出0并输出JSON的批准适配命令，不管理常驻服务。PostgreSQL 只接受完整 TCP URL，限制见指南，执行器只读；真实PG与厂商联调尚未执行。测试只替换外部模型，真实 loopback HTTP/证据/runner/报告均参与，但不代表真实模型质量指标已达标。
 

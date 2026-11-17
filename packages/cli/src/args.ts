@@ -27,7 +27,8 @@ init/reqs/plan 只写草稿，不自动确认；确认只能在 review 中由人
 review 需要交互式终端；编辑使用 VISUAL 或 EDITOR 指定的编辑器，确认人取 CROSSCHECK_REVIEWER 或系统用户名。
 run 中重复 module/case 各自为集合，两类筛选取交集。未知/空选择不视为通过。
 report 仅读取历史快照与真实证据，离线重建 JSON/JUnit/HTML。
-浏览器工具暂缓。只有 --open 会打开系统默认浏览器。
+AI 可按需使用 Playwright Chromium 操作测试页面（需安装 Chromium）；HTTP-only 不启动浏览器。
+--open 仅打开系统默认浏览器查看报告；测试浏览器不提供网络隔离保证。
 退出码：0 成功/全 PASS；1 含 FAIL（疑似 bug 待人工）；2 阻断/不确定/空/中断/参数错误/门禁未满足；3 宿主错误优先。`;
 
 const COMMANDS: readonly Command[] = ['init', 'reqs', 'plan', 'review', 'run', 'report'];
@@ -44,7 +45,6 @@ const REPEATABLE: Record<Command, readonly string[]> = {
 };
 const VIEWS: readonly ReviewView[] = ['profile', 'clauses', 'cases', 'results'];
 const RUN_ID = /^\d{8}T\d{9}Z-[a-f0-9]{32}$/;
-
 export function parseArgs(args: string[]): CliArgs {
   if (args.length === 1 && ['--help', '-h', 'help'].includes(args[0]!)) return { command: 'help', project: process.cwd(), open: false };
   const command = args[0] as Command;

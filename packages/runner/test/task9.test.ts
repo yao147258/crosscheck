@@ -62,11 +62,64 @@ describe('Task9真实编排边界', () => {
     expect(JSON.stringify(h.reviewer.doGenerateCalls)).not.toContain('EXECUTOR_SENTINEL_8291');
     expect(JSON.stringify(h.reviewer.doGenerateCalls[0]?.tools)).not.toContain('http_request');
   });
-  it.each([{ evidence: 'screenshot' }, { evidence: 'dom' }, { actor: { kind: 'form', environment: 'local', actions: [{ kind: 'goto', url: '/' }] } }, { actor: { kind: 'replay', environment: 'local', actions: [{ kind: 'goto', url: '/' }] } }, { actor: { kind: 'token', env: 'SECRET', inject: { kind: 'storage', storage: 'local', name: 'session' } } }])('浏览器暂缓零副作用%j', async extra => {
-    const { artifacts } = await setup(extra); const h = harness(artifacts);
+  it.each(['screenshot', 'dom'])('要求%s但只产生HTTP证据时仍BLOCKED，不静默放宽', async evidence => {
+    const { artifacts } = await setup({ evidence }); const h = harness(artifacts);
     const r = await runSuite(h.options);
-    expect(r.result?.cases[0]).toMatchObject({ status: 'BLOCKED', complete: true, reason: expect.stringContaining('浏览器工具暂缓，计划 2 不支持') });
-    expect(h.requests).toEqual([]); expect(h.executor.doGenerateCalls).toHaveLength(0);
+    expect(r.result?.cases[0]).toMatchObject({ status: 'BLOCKED', complete: true });
+    expect(h.requests).toEqual(['http://localhost:39999/health', 'http://localhost:39999/value']); expect(h.executor.doGenerateCalls.length).toBeGreaterThan(0);
+  });
+  it.each(['form', 'replay'] as const)('%s 的批准 dev 身份不能用于 prod，preflight 阻止全部服务副作用与秘密读取', async kind => {
+    const { artifacts, approvals } = await setup({ actor: { kind, environment: 'local', actions: [{ kind: 'goto', url: '/login' }, { kind: 'fill', selector: 'input', env: 'DEV_PASSWORD' }] }, fixtures: ['known'] });
+    const command = { program: process.execPath, argv: ['-e', 'process.stdout.write("{}")'], env: {} };
+    const environments = { version: 1, environments: {
+      dev: { baseURL: 'http://localhost:39998', healthcheck: 'http://localhost:39998/health', reset: null },
+      prod: { baseURL: 'http://localhost:39999', healthcheck: 'http://localhost:39999/health', reset: 'known', start: command, stop: command },
+    } };
+    const auth = { version: 1, actors: { guest: { kind, environment: 'dev', actions: [{ kind: 'goto', url: '/login' }, { kind: 'fill', selector: 'input', env: 'DEV_PASSWORD' }] } } };
+    for (const [name, data] of Object.entries({ 'environments.yaml': environments, 'auth.yaml': auth, 'fixtures.yaml': { version: 1, fixtures: { known: { kind: 'command', command } } } })) {
+      await artifacts.writeYaml(`system/${name}`, data); approvals.approve('profile', name, data, '人工');
+    }
+    await approvals.save(artifacts);
+    const h = harness(artifacts); let launches = 0, secretReads = 0;
+    const env = Object.defineProperty({}, 'DEV_PASSWORD', { enumerable: true, get: () => { secretReads++; return 'DEV_SECRET'; } });
+    const result = await runSuite({ ...h.options, environment: 'prod', env, launchBrowser: async () => { launches++; throw new Error('不得启动'); } });
+    expect(result.result?.cases[0]).toMatchObject({ status: 'BLOCKED', reason: expect.stringMatching(/认证.*环境|身份.*环境/) });
+    expect(h.requests).toEqual([]); expect(launches).toBe(0); expect(secretReads).toBe(0);
+    expect(h.executor.doGenerateCalls).toHaveLength(0); expect(h.reviewer.doGenerateCalls).toHaveLength(0);
+    expect(await artifacts.list(`runs/${result.result!.manifest.runId}/commands`)).toHaveLength(0);
+  });
+  it('HTTP-only 包括header身份只注册惰性认证，不启动Chromium', async () => {
+    const { artifacts } = await setup({ actor: { kind: 'token', env: 'TOKEN', inject: { kind: 'header', name: 'X-Actor' } } }); const h = harness(artifacts); let launches = 0;
+    const r = await runSuite({ ...h.options, env: { TOKEN: 'http-only-secret' }, launchBrowser: async () => { launches++; throw new Error('不应启动浏览器'); } });
+    expect(r.result?.status).toBe('PASS'); expect(launches).toBe(0);
+  });
+  it('浏览器启动业务失败返回错误证据而非host-error，HTTP-only可继续unclear', async () => {
+    const { artifacts } = await setup({ evidence: 'dom' });
+    const model = scriptedModel([{ toolCalls: [{ name: 'browser_action', input: { kind: 'navigate', url: '/' } }] }, finish('unclear', [], '启动失败'), finish('unclear', [], '观察不足')]);
+    const r = await runSuite({ artifacts, launchBrowser: async () => { throw new Error('缺少Chromium'); }, modelOptions: { factories: { ollama: () => model } }, transport: async () => new Response('{}', { headers: { 'content-type': 'application/json' } }) });
+    expect(r.exitCode).toBe(2); expect(r.result?.status).toBe('UNCLEAR'); expect(r.result?.cases[0]?.reliability.errors).not.toContain('host-error');
+    expect(JSON.stringify(model.doGenerateCalls)).toContain('浏览器启动失败');
+  });
+  it.each([false, true])('浏览器启动失败不污染同源HTTP，header身份=%s', async header => {
+    const { artifacts } = await setup(header ? { actor: { kind: 'token', env: 'TOKEN', inject: { kind: 'header', name: 'X-Actor' } } } : {});
+    const requests: { url: string; actor: string | null }[] = [];
+    const model = scriptedModel([{ toolCalls: [{ name: 'browser_action', input: { kind: 'navigate', url: '/' } }] }, { toolCalls: [{ name: 'http_request', input: { url: 'http://localhost:39999/value' } }] }, finish('unclear'), finish('unclear')]);
+    const r = await runSuite({ artifacts, env: { TOKEN: 'header-secret' }, launchBrowser: async () => { throw new Error('缺少Chromium'); }, modelOptions: { factories: { ollama: () => model } }, transport: async (url, init) => { requests.push({ url, actor: new Headers(init.headers).get('x-actor') }); return new Response('{}', { headers: { 'content-type': 'application/json' } }); } });
+    expect(requests).toEqual([{ url: 'http://localhost:39999/health', actor: null }, { url: 'http://localhost:39999/value', actor: header ? 'header-secret' : null }]);
+    expect(r.result?.status).toBe('UNCLEAR'); expect(r.exitCode).toBe(2);
+  });
+  it.each(['form', 'replay'] as const)('浏览器启动失败时%s认证仍blocked而非匿名', async kind => {
+    const { artifacts } = await setup({ actor: { kind, environment: 'local', actions: [{ kind: 'goto', url: '/login' }] } }); const h = harness(artifacts);
+    const r = await runSuite({ ...h.options, launchBrowser: async () => { throw new Error('缺少Chromium'); } });
+    expect(r.result?.status).toBe('BLOCKED'); expect(r.exitCode).toBe(2); expect(h.requests).toEqual(['http://localhost:39999/health']); expect(h.executor.doGenerateCalls).toHaveLength(0);
+  });
+  it.each(['browser_action', 'http_request'] as const)('command认证前缺失夹具%s不误报host-error且保持载荷省略', async tool => {
+    const { artifacts } = await setup({ fixtures: ['missing'], actor: { kind: 'command', command: { program: process.execPath, argv: ['-e', 'console.log(JSON.stringify({headers:{}}))'], env: {} } } }); let launches = 0;
+    const model = scriptedModel([{ toolCalls: [{ name: tool, input: tool === 'browser_action' ? { kind: 'navigate', url: '/prepare' } : { url: 'http://localhost:39999/prepare' } }] }, { toolCalls: [{ name: 'report_blocked', input: { reason: '动态身份未解析，不能证明准备完成' } }] }]);
+    const r = await runSuite({ artifacts, launchBrowser: async () => { launches++; return { context: { setDefaultTimeout() {}, setDefaultNavigationTimeout() {}, on() {}, off() {}, cookies: async () => [] }, page: { evaluate: async () => ({ nodes: [], overflow: false }), screenshot: async () => Buffer.from('png'), locator: () => ({}) }, close: async () => {} } as any; }, modelOptions: { factories: { ollama: () => model } }, transport: async () => new Response('{}', { headers: { 'content-type': 'application/json' } }) });
+    expect(r.exitCode).toBe(2); expect(r.result?.cases[0]?.complete).toBe(true); expect(r.result?.cases[0]?.reliability.errors).not.toContain('host-error'); expect(launches).toBe(0);
+    const prefix = `runs/${r.result!.manifest.runId}/cases/M-TC-1/attempts/1`;
+    expect((await artifacts.readBytes(`${prefix}/trace.jsonl`))!.toString()).toContain('动态身份认证前动作载荷省略');
   });
   it('未审批画像零网络/模型，未确认用例仍有可见BLOCKED结果', async () => {
     const { artifacts, approvals } = await setup({ approved: false }); const h = harness(artifacts);
@@ -90,7 +143,7 @@ describe('Task9真实编排边界', () => {
   it('complete业务BLOCKED不重放，输入变更拒绝resume', async () => {
     const { artifacts } = await setup({ evidence: 'dom' }); const h = harness(artifacts);
     const first = await runSuite(h.options); const id = first.result!.manifest.runId;
-    const next = await runSuite({ ...h.options, resume: id }); expect(next.result?.cases[0]?.attempt).toBe(1); expect(h.requests).toEqual([]);
+    const next = await runSuite({ ...h.options, resume: id }); expect(next.result?.cases[0]?.attempt).toBe(1); expect(h.requests).toEqual(['http://localhost:39999/health', 'http://localhost:39999/value']);
     await artifacts.writeYaml('config.yaml', { models: { extractor: 'mock:x', planner: 'mock:p', executor: 'mock:changed', reviewer: 'mock:r' }, defaultEnvironment: 'local' });
     const changed = await runSuite({ ...h.options, resume: id }); expect(changed.exitCode).toBe(2); expect(changed.error).toContain('指纹');
   });
@@ -131,13 +184,13 @@ describe('Task9恢复/证据/资源故障', () => {
     const { artifacts } = await setup({ start: good, stop: slow }); const h = harness(artifacts);
     const r = await runSuite(h.options); expect(r.exitCode).toBe(3); expect(r.result?.cases[0]?.complete).toBe(false); expect(r.result?.cases[0]?.reason).toContain('stop');
   }, 12000);
-  it('浏览器blocked在start/reset/fixture前拒绝，批准命令工件也不创建', async () => {
+  it('浏览器证据要求不再硬编码拒绝start/reset/fixture，缺少证据仍blocked', async () => {
     const command = { program: process.execPath, argv: ['-e', 'process.stdout.write("{}")'], env: {} };
     const { artifacts, approvals } = await setup({ evidence: 'dom', start: command, fixtures: ['known'] });
     const profile = await loadProfile(artifacts); const environments = { ...profile['environments.yaml'], environments: { local: { ...profile['environments.yaml'].environments.local!, reset: 'known' } } };
     const fixtures = { version: 1, fixtures: { known: { kind: 'command', command } } };
     for (const [name, value] of Object.entries({ 'environments.yaml': environments, 'fixtures.yaml': fixtures })) { await artifacts.writeYaml(`system/${name}`, value); approvals.approve('profile', name, value, '人工'); } await approvals.save(artifacts);
-    const h = harness(artifacts); const r = await runSuite(h.options); expect(r.result?.status).toBe('BLOCKED'); expect(await artifacts.list(`runs/${r.result!.manifest.runId}/commands`)).toEqual([]); expect(h.requests).toEqual([]); expect(h.executor.doGenerateCalls).toHaveLength(0);
+    const h = harness(artifacts); const r = await runSuite(h.options); expect(r.result?.status).toBe('BLOCKED'); expect(await artifacts.list(`runs/${r.result!.manifest.runId}/commands`)).toHaveLength(2); expect(h.requests).toEqual(['http://localhost:39999/health', 'http://localhost:39999/value']); expect(h.executor.doGenerateCalls.length).toBeGreaterThan(0);
   });
   it('候选重试/fallback策略变化也拒绝resume', async () => {
     const { artifacts } = await setup({ evidence: 'dom' }); const h = harness(artifacts); const r = await runSuite(h.options);
@@ -169,6 +222,7 @@ describe('Task9恢复/证据/资源故障', () => {
       const store = new EvidenceStore(artifacts, { runId: run.manifest.runId, caseId: tc.id, attempt: 1 }, createEvidenceRedactor());
       const record = await store.saveJson('db', { rows: [], truncated: true }, { actionId: 'a-query', phase: 'execution' });
       const text = (await createEvidencePresenter(store)([record.id], { ref: 'mock:e', signal: new AbortController().signal }))[0]!;
+      if (text.type === 'screenshot') throw new Error('期望数据库文本');
       expect(text.text.length).toBeLessThan(100);
       const result = await validateJudgements({ judgements: [{ expectationId: 'E1', verdict: 'pass', evidenceIds: [record.id], reasoning: '全量为空' }] }, [{ id: 'E1', text: '全量为空', evidence: ['db'] }], [record], store, new Map([[record.id, text]])); expect(result.ok).toBe(false);
     });

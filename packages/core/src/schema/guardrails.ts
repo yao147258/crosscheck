@@ -10,5 +10,7 @@ export const GuardrailsSchema = z.object({
     .default([]),
   /** 需要额外脱敏的字段名（不区分大小写） */
   redactFields: z.array(z.string().min(1)).default([]),
+  /** 可选遮罩选择器；不引入默认值以保持历史审批哈希稳定。 */
+  screenshotMasks: z.array(z.string().min(1)).optional(),
 });
 export type Guardrails = z.infer<typeof GuardrailsSchema>;

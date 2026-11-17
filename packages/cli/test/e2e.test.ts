@@ -72,9 +72,9 @@ it.each([['pass', 'PASS', 0], ['fail', 'FAIL', 1], ['disputed', 'DISPUTED', 2], 
   expect(s.counts().forbidden).toBe(0); if (mode !== 'invalid') expect(s.counts().actions).toBe(1);
   await assertNoSecret(s.artifacts.resolve(`runs/${saved.id}`));
 });
-it('screenshot/dom需求在任何动作前BLOCKED，未确认同样可见', async () => {
-  const s = await setup({ browser: true }); expect((await launch(s)).code).toBe(2); expect(s.counts().actions).toBe(0);
-  expect((await result(s)).data.cases[0].reason).toContain('浏览器工具暂缓');
+it('screenshot/dom需求不能被只有HTTP的模型假充完整，未确认仍零业务动作', async () => {
+  const s = await setup({ browser: true }); expect((await launch(s)).code).toBe(2); expect(s.counts().actions).toBe(3);
+  expect((await result(s)).data.cases[0].status).toBe('BLOCKED');
   const unapproved = await setup({ approved: false }); expect((await launch(unapproved)).code).toBe(2); expect(unapproved.counts().actions).toBe(0);
 });
 it('报告写入宿主故障优先退出3，不能用已完成PASS掩盖', async () => {

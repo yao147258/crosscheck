@@ -97,10 +97,6 @@ export class FixtureHost {
    if(firstMeta.phase!=='preparation')return this.fail('blocked',firstMeta);
    const actor=Object.hasOwn(this.profile['auth.yaml'].actors,actorName)?this.profile['auth.yaml'].actors[actorName]:undefined;
    if(!actor)return this.fail('blocked',firstMeta);
-   if(actor.kind==='form'||actor.kind==='replay'||actor.kind==='token'&&actor.inject.kind==='storage'){
-    const record=await this.options.store.saveText('console',JSON.stringify({kind:'auth',status:'blocked',message:'浏览器工具暂缓，不支持该认证方式'}),firstMeta);
-    throw new AuthenticationError('blocked','浏览器工具暂缓，不支持该认证方式',[record.id]);
-   }
    const reset=await this.ensureReset(firstMeta,signal);
    const fixtures:Record<string,FixtureResult>=Object.create(null),missing:string[]=[],ids=[...(reset?.evidenceIds??[])];
    if(reset&&this.reset)fixtures[this.reset]=reset;

@@ -1,13 +1,13 @@
 import { z } from 'zod';
 import { JudgementSchema, checkJudgement, type EvidenceRecord, type Expectation, type Judgement } from '@crosscheck/core';
-import type { TextEvidence, OutputValidation } from '@crosscheck/agent';
+import type { EvidencePresentation, OutputValidation } from '@crosscheck/agent';
 import type { EvidenceStore } from '@crosscheck/tools';
 
 export const JudgementsSchema = z.strictObject({ judgements: z.array(JudgementSchema) });
 export type JudgementsOutput = z.infer<typeof JudgementsSchema>;
 
 /** 只从宿主当前 attempt 已登记的真实业务证据校验，不接收执行器摘要。 */
-export async function validateJudgements(value: JudgementsOutput, expectations: Expectation[], records: EvidenceRecord[], store: EvidenceStore, shown: ReadonlyMap<string, TextEvidence>): Promise<OutputValidation> {
+export async function validateJudgements(value: JudgementsOutput, expectations: Expectation[], records: EvidenceRecord[], store: EvidenceStore, shown: ReadonlyMap<string, EvidencePresentation>): Promise<OutputValidation> {
   const ids = value.judgements.map(j => j.expectationId);
   if (ids.length !== expectations.length || new Set(ids).size !== ids.length || expectations.some(e => !ids.includes(e.id))) return { ok: false, error: '每条预期必须恰有一个判定，不得额外、遗漏或重复' };
   const index = new Map(records.map(record => [record.id, record]));
