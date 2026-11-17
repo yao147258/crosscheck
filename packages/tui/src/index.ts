@@ -7,6 +7,7 @@ import { ReviewSession } from './io/session';
 import { initialRoute, type ReviewView } from './routes';
 
 export { App } from './app';
+export * from './session';
 export * from './routes';
 export type { ReviewEnv } from './context';
 export * from './io/session';

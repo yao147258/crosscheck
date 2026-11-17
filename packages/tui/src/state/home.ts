@@ -1,4 +1,4 @@
-import type { ReviewSession } from '../io/session';
+import type { ReadonlyReviewContext } from '../io/session';
 import { loadCaseOverview } from './cases';
 import { loadClauseRows } from './clauses';
 import { loadProfileOverview } from './profile';
@@ -6,7 +6,7 @@ import { listRuns } from './results';
 
 export interface HomeSummary { profilePending: number; clausesPending: number; casesPending: number; runs: number }
 
-export async function loadHomeSummary(session: ReviewSession): Promise<HomeSummary> {
+export async function loadHomeSummary(session: ReadonlyReviewContext): Promise<HomeSummary> {
   const profilePending = (await loadProfileOverview(session)).rows.filter((r) => r.status !== 'approved').length;
   let clausesPending = 0;
   for (const module of await session.artifacts.listModules('requirements')) {

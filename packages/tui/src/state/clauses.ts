@@ -2,16 +2,16 @@ import { ClauseSchema, contentHash, type ApprovalState, type Clause } from '@cro
 import YAML from 'yaml';
 import { editValidated, parseYamlWith } from '../io/edit-loop';
 import type { EditorHost } from '../io/editor';
-import type { ReviewSession } from '../io/session';
+import type { ReadonlyReviewContext, ReviewSession } from '../io/session';
 
 export interface ClauseRow { clause: Clause; approval: ApprovalState }
 
-export async function listReviewModules(session: ReviewSession): Promise<string[]> {
+export async function listReviewModules(session: ReadonlyReviewContext): Promise<string[]> {
   const modules = [...await session.artifacts.listModules('requirements'), ...await session.artifacts.listModules('cases')];
   return [...new Set(modules)].sort();
 }
 
-export async function loadClauseRows(session: ReviewSession, module: string): Promise<ClauseRow[]> {
+export async function loadClauseRows(session: ReadonlyReviewContext, module: string): Promise<ClauseRow[]> {
   return (await session.artifacts.loadClauses(module)).map((clause) => ({ clause, approval: session.approvals.state('clause', clause.id, clause) }));
 }
 

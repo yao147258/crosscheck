@@ -22,7 +22,7 @@ function RouteView({ route, nav }: { route: Route; nav: Nav }) {
   }
 }
 
-export function App({ env, initial }: { env: ReviewEnv; initial: Route }) {
+export function App({ env, initial, onExitToParent }: { env: ReviewEnv; initial: Route; onExitToParent?: (error?: Error) => void }) {
   const { exit } = useApp();
   const [stack, setStack] = useState<Route[]>([initial]);
   const [notice, setNotice] = useState<string>();
@@ -38,7 +38,10 @@ export function App({ env, initial }: { env: ReviewEnv; initial: Route }) {
       if (error !== undefined && !cancelError.current) {
         cancelError.current = error instanceof Error ? error : new Error(String(error));
       }
-      if (!busy.current && loading.current === 0) exit(cancelError.current ?? 2);
+      if (!busy.current && loading.current === 0) {
+        if (onExitToParent) onExitToParent(cancelError.current);
+        else exit(cancelError.current ?? 2);
+      }
     };
     return { busy, changed,
       loadStarted: () => { loading.current++; },
@@ -59,13 +62,13 @@ export function App({ env, initial }: { env: ReviewEnv; initial: Route }) {
   const route = stack[stack.length - 1]!;
   const guard = (fn: () => void) => {
     if (signal.aborted || env.signal?.aborted) actions.changed();
-    else if (busy.current) setNotice('请等待当前操作完成');
+    else if (busy.current || (onExitToParent && loading.current > 0)) setNotice('请等待当前操作完成');
     else fn();
   };
   const nav: Nav = {
     push: (next) => guard(() => setStack((s) => [...s, next])),
-    back: () => guard(() => { if (stack.length > 1) setStack((s) => s.slice(0, -1)); else exit(0); }),
-    quit: () => guard(() => exit(0)),
+    back: () => guard(() => { if (stack.length > 1) setStack((s) => s.slice(0, -1)); else if (onExitToParent) onExitToParent(); else exit(0); }),
+    quit: () => guard(() => { if (onExitToParent) onExitToParent(); else exit(0); }),
   };
   useInput((input, key) => {
     if (key.ctrl && input === 'c') {

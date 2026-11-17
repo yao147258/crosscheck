@@ -4,7 +4,7 @@ import type { RunSuiteOptions } from '@crosscheck/runner';
 
 import type { ReviewDependencies } from './review';
 
-export type CommandDependencies = Pick<RunSuiteOptions, 'modelOptions' | 'resilience' | 'env'> & { review?: ReviewDependencies };
+export type CommandDependencies = Pick<RunSuiteOptions, 'modelOptions' | 'resilience' | 'env'> & { review?: ReviewDependencies; session?: { isTTY?: boolean } };
 
 export class InterruptedError extends Error {
   override name = 'InterruptedError';

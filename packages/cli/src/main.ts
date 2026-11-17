@@ -7,6 +7,7 @@ import { reqsCommand } from './reqs';
 import { reviewCommand } from './review';
 import { runCommand } from './run';
 import { writeReport } from './report';
+import { sessionCommand } from './session';
 export { parseArgs } from './args';
 
 export async function cliMain(argv: string[], options: { log?: (s: string) => void; dependencies?: CommandDependencies; signal?: AbortSignal } = {}): Promise<number> {
@@ -17,6 +18,7 @@ export async function cliMain(argv: string[], options: { log?: (s: string) => vo
   const deps = options.dependencies ?? {};
   try {
     switch (args.command) {
+      case 'session': return await sessionCommand(args, log, deps, options.signal);
       case 'run': return await runCommand(args, log, deps, options.signal);
       case 'report': await writeReport(new ArtifactStore(args.project), args.runId!, args.open, log); return 0;
       case 'init': return await initCommand(args, log, deps, options.signal);

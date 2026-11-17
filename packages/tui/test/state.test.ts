@@ -1,16 +1,28 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import YAML from 'yaml';
-import { assertStoredProfileApproved, loadProfile } from '@crosscheck/core';
+import { Approvals, assertStoredProfileApproved, loadProfile } from '@crosscheck/core';
 import {
   ReviewSession, approveAllCases, approveAllClauses, approveCase, approveClause, approveProfileFile,
   deleteCase, deleteClause, editCase, editClause, editProfileFile, listReviewModules,
-  loadCaseOverview, loadClauseRows, loadProfileOverview, markClauseUnclear, revokeCase, revokeClause,
+  loadCaseOverview, loadClauseRows, loadHomeSummary, loadProfileOverview, markClauseUnclear, revokeCase, revokeClause,
   revokeProfileFile, type EditorHost,
 } from '../src/index';
 import { cleanupProjects, clause, createProject, testCase } from './fixture';
 
 afterEach(async () => { vi.restoreAllMocks(); await cleanupProjects(); });
 const editorReturning = (...outputs: string[]): EditorHost => ({ async edit(text) { return outputs.shift() ?? text; } });
+
+it('无确认人的只读上下文读取摘要，与审核会话结果一致且不写确认', async () => {
+  const { artifacts, session } = await createProject();
+  await artifacts.saveClauses('M', [clause(1), clause(2)]);
+  await artifacts.saveCases('M', [testCase(1, ['M-AC-1'])]);
+  await approveClause(session, 'M', 'M-AC-1');
+  const before = await artifacts.readBytes('approvals.json');
+  const context = { artifacts, approvals: await Approvals.load(artifacts) };
+  expect(await loadHomeSummary(context)).toEqual({ profilePending: 7, clausesPending: 1, casesPending: 1, runs: 0 });
+  expect(await loadHomeSummary(session)).toEqual(await loadHomeSummary(context));
+  expect(await artifacts.readBytes('approvals.json')).toEqual(before);
+});
 
 describe('画像', () => {
   it('区分缺失、语法错误、schema 错误与未确认，拒绝非法确认', async () => {

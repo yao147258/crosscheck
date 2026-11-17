@@ -3,13 +3,13 @@ import YAML from 'yaml';
 import type { z } from 'zod';
 import { editValidated, parseYamlWith } from '../io/edit-loop';
 import type { EditorHost } from '../io/editor';
-import type { ReviewSession } from '../io/session';
+import type { ReadonlyReviewContext, ReviewSession } from '../io/session';
 
 export type ProfileRowStatus = ApprovalState | 'missing' | 'invalid';
 export interface ProfileRow { name: ProfileFile; status: ProfileRowStatus; error?: string; details: string[] }
 export interface ProfileOverview { rows: ProfileRow[]; crossCheck?: string }
 
-export async function loadProfileOverview(session: ReviewSession): Promise<ProfileOverview> {
+export async function loadProfileOverview(session: ReadonlyReviewContext): Promise<ProfileOverview> {
   // 详情随已有受跟踪加载一起完成，Enter 不再发起后台读盘。
   const rows: ProfileRow[] = [];
   for (const file of await readProfileFiles(session.artifacts)) {

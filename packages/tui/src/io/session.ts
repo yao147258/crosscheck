@@ -1,5 +1,10 @@
 import { Approvals, type ArtifactStore } from '@crosscheck/core';
 
+export interface ReadonlyReviewContext {
+  readonly artifacts: ArtifactStore;
+  readonly approvals: Approvals;
+}
+
 export class ReviewSession {
   private busy = false;
 

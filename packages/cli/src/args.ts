@@ -3,7 +3,7 @@ import { CaseIdSchema, ProfileNameSchema } from '@crosscheck/core';
 export type Command = 'init' | 'reqs' | 'plan' | 'review' | 'run' | 'report';
 export type ReviewView = 'profile' | 'clauses' | 'cases' | 'results';
 export interface CliArgs {
-  command: Command | 'help';
+  command: Command | 'help' | 'session';
   project: string;
   environment?: string;
   modules?: string[];
@@ -16,6 +16,7 @@ export interface CliArgs {
 }
 
 export const HELP = `Crosscheck 本地验收 CLI（Node >=22.12）
+  crosscheck（无参数：进入交互会话，stdin/stdout 均须为 TTY）
   crosscheck init [--openapi <文件>]... [--project <目录>]
   crosscheck reqs --module <id> [--project <目录>]
   crosscheck plan --module <id> [--project <目录>]
@@ -23,6 +24,8 @@ export const HELP = `Crosscheck 本地验收 CLI（Node >=22.12）
   crosscheck run [--module <id>]... [--case <id>]... [--resume [runId]] [--project <目录>] [--environment <名称>] [--open]
   crosscheck report <runId> [--project <目录>] [--open]
   crosscheck --help
+会话支持 /init /reqs /plan /review /run /report /help /exit；命令失败显示退出码但不结束会话。
+普通文本使用 planner 模型和当前项目只读摘要，模型无工具；审核仍须人工确认。
 init/reqs/plan 只写草稿，不自动确认；确认只能在 review 中由人完成。
 review 需要交互式终端；编辑使用 VISUAL 或 EDITOR 指定的编辑器，确认人取 CROSSCHECK_REVIEWER 或系统用户名。
 run 中重复 module/case 各自为集合，两类筛选取交集。未知/空选择不视为通过。
@@ -46,6 +49,7 @@ const REPEATABLE: Record<Command, readonly string[]> = {
 const VIEWS: readonly ReviewView[] = ['profile', 'clauses', 'cases', 'results'];
 const RUN_ID = /^\d{8}T\d{9}Z-[a-f0-9]{32}$/;
 export function parseArgs(args: string[]): CliArgs {
+  if (args.length === 0) return { command: 'session', project: process.cwd(), open: false };
   if (args.length === 1 && ['--help', '-h', 'help'].includes(args[0]!)) return { command: 'help', project: process.cwd(), open: false };
   const command = args[0] as Command;
   if (!COMMANDS.includes(command)) throw new Error('请选择 init、reqs、plan、review、run 或 report；使用 --help 查看参数');

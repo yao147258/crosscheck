@@ -1,0 +1,151 @@
+import { cleanup, render } from 'ink-testing-library';
+import { afterEach, expect, it, vi } from 'vitest';
+import { Approvals, loadProfile } from '@crosscheck/core';
+import { ReviewSession } from '../src/io/session';
+import { SessionApp, type RunSessionOptions } from '../src/session';
+import { cleanupProjects, createProject } from './fixture';
+import { deferred, KEYS, waitFor } from './helpers';
+
+const exit = vi.hoisted(() => vi.fn());
+vi.mock('ink', async (importOriginal) => {
+  const ink = await importOriginal<typeof import('ink')>();
+  return { ...ink, useApp: () => ({ ...ink.useApp(), exit }) };
+});
+
+afterEach(async () => { cleanup(); exit.mockReset(); await cleanupProjects(); });
+const editor = { async edit() { throw new Error('unused'); } };
+const open = async () => {};
+const frame = (ui: ReturnType<typeof render>) => ui.lastFrame() ?? '';
+
+it('审核退出返回聊天并重新解析会话', async () => {
+  const project = await createProject();
+  const resolveReview = vi.fn(async () => ({ session: project.session, editor, open }));
+  const options: RunSessionOptions = { tokenize: (text) => text.split(' '), runSlashCommand: async () => ({ kind: 'review', args: { project: project.root, view: 'profile' } }), resolveReview, chatReply: async () => '回答' };
+  const ui = render(<SessionApp options={options} />);
+  ui.stdin.write('/review'); ui.stdin.write(KEYS.enter);
+  await waitFor(() => frame(ui).includes('environments.yaml'));
+  ui.stdin.write('q');
+  await waitFor(() => frame(ui).includes('交互会话'));
+  ui.stdin.write('/review'); ui.stdin.write(KEYS.enter);
+  await waitFor(() => resolveReview.mock.calls.length === 2);
+});
+
+it('外部取消等待审核写盘完成后才退出', async () => {
+  const { session, artifacts, root } = await createProject();
+  const gate = deferred<void>(), entered = deferred<void>();
+  const write = artifacts.writeJson.bind(artifacts);
+  vi.spyOn(artifacts, 'writeJson').mockImplementation(async (...args) => { entered.resolve(); await gate.promise; return write(...args); });
+  const controller = new AbortController();
+  const options: RunSessionOptions = { signal: controller.signal, tokenize: text => [text], runSlashCommand: async () => ({ kind: 'review', args: { project: root, view: 'profile' } }), resolveReview: async () => ({ session, editor, open }), chatReply: async () => '' };
+  const ui = render(<SessionApp options={options} />);
+  ui.stdin.write('/review'); ui.stdin.write(KEYS.enter);
+  await waitFor(() => frame(ui).includes('environments.yaml'));
+  ui.stdin.write('a'); await entered.promise;
+  controller.abort();
+  await waitFor(() => frame(ui).includes('等待当前操作完成'));
+  expect((await Approvals.load(artifacts)).record('profile', 'environments.yaml')).toBeUndefined();
+  gate.resolve();
+  await waitFor(() => frame(ui).includes('交互会话') || frame(ui).includes('等待当前操作完成'));
+  await waitFor(asyncCheck(() => Approvals.load(artifacts).then(a => Boolean(a.record('profile', 'environments.yaml')))));
+});
+
+it('会话显示去除不可信文本中的终端控制字符并保留换行', async () => {
+  const payload = '甲\u001b]52;c;SGVsbG8=\u0007乙\u009b丙\u0000丁\n戊';
+  const options: RunSessionOptions = { tokenize: text => [text], runSlashCommand: async () => ({ kind: 'log', code: 0, lines: [payload] }), resolveReview: async () => { throw new Error('unused'); }, chatReply: async () => payload };
+  const ui = render(<SessionApp options={options} />);
+  ui.stdin.write('hello'); ui.stdin.write(KEYS.enter);
+  await waitFor(() => frame(ui).includes('助手：'));
+  expect(frame(ui)).toContain('丁\n戊');
+  expect(frame(ui)).not.toMatch(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/);
+  ui.stdin.write('/log'); ui.stdin.write(KEYS.enter);
+  await waitFor(() => frame(ui).includes('退出码 0'));
+  expect(frame(ui)).not.toMatch(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/);
+  expect(ui.frames.join('')).not.toContain('\u001b]52;');
+});
+
+it('显示用户输入和错误时过滤控制字符，但不改变提交的原文', async () => {
+  const chatReply = vi.fn(async (_history: unknown, _text: string) => { throw new Error('失败\u009b隐藏\u0000文本'); });
+  const options: RunSessionOptions = { tokenize: text => [text], runSlashCommand: async () => ({ kind: 'exit' }), resolveReview: async () => { throw new Error('unused'); }, chatReply };
+  const ui = render(<SessionApp options={options} />);
+  ui.stdin.write('用户\u009b输入');
+  await waitFor(() => frame(ui).includes('用户输入'));
+  expect(frame(ui)).not.toContain('\u009b');
+  ui.stdin.write(KEYS.enter);
+  await waitFor(() => frame(ui).includes('失败隐藏文本'));
+  expect(frame(ui)).toContain('你：用户输入');
+  expect(frame(ui)).not.toMatch(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/);
+  expect(chatReply.mock.calls[0]?.[1]).toBe('用户\u009b输入');
+});
+
+it('外部中断的正常取消保持退出码二', async () => {
+  const entered = deferred<void>(), gate = deferred<void>();
+  const controller = new AbortController();
+  const options: RunSessionOptions = { signal: controller.signal, tokenize: text => [text], runSlashCommand: async (_tokens, signal) => { entered.resolve(); await gate.promise; signal.throwIfAborted(); return { kind: 'exit' }; }, resolveReview: async () => { throw new Error('unused'); }, chatReply: async () => '' };
+  const ui = render(<SessionApp options={options} />);
+  ui.stdin.write('/plan'); ui.stdin.write(KEYS.enter); await entered.promise;
+  controller.abort(); gate.resolve();
+  await waitFor(() => exit.mock.calls.length > 0);
+  expect(exit).toHaveBeenCalledWith(2);
+});
+
+it('外部中断审核等待结束后传播写盘错误', async () => {
+  const { session, artifacts, root } = await createProject();
+  const entered = deferred<void>(), gate = deferred<void>();
+  const failure = new Error('写盘失败');
+  vi.spyOn(artifacts, 'writeJson').mockImplementation(async () => { entered.resolve(); await gate.promise; throw failure; });
+  const controller = new AbortController();
+  const options: RunSessionOptions = { signal: controller.signal, tokenize: text => [text], runSlashCommand: async () => ({ kind: 'review', args: { project: root, view: 'profile' } }), resolveReview: async () => ({ session, editor, open }), chatReply: async () => '' };
+  const ui = render(<SessionApp options={options} />);
+  ui.stdin.write('/review'); ui.stdin.write(KEYS.enter);
+  await waitFor(() => frame(ui).includes('environments.yaml'));
+  ui.stdin.write('a'); await entered.promise;
+  controller.abort(); gate.resolve();
+  await waitFor(() => exit.mock.calls.length > 0);
+  expect(exit).toHaveBeenCalledWith(failure);
+});
+
+it('外部中断操作等待结束后传播非取消错误', async () => {
+  const entered = deferred<void>(), gate = deferred<void>();
+  const failure = new Error('宿主失败');
+  const controller = new AbortController();
+  const options: RunSessionOptions = { signal: controller.signal, tokenize: text => [text], runSlashCommand: async () => { entered.resolve(); await gate.promise; throw failure; }, resolveReview: async () => { throw new Error('unused'); }, chatReply: async () => '' };
+  const ui = render(<SessionApp options={options} />);
+  ui.stdin.write('/plan'); ui.stdin.write(KEYS.enter); await entered.promise;
+  controller.abort(); gate.resolve();
+  await waitFor(() => exit.mock.calls.length > 0);
+  expect(exit).toHaveBeenCalledWith(failure);
+});
+
+function asyncCheck(check: () => Promise<boolean>): () => boolean {
+  let done = false;
+  return () => { void check().then(value => { done ||= value; }); return done; };
+}
+
+it('每次重新打开审核读取最新确认记录', async () => {
+  const { artifacts } = await createProject();
+  const first = await ReviewSession.open(artifacts, '甲');
+  const approvals = Approvals.empty();
+  const profile = await loadProfile(artifacts);
+  approvals.approve('profile', 'environments.yaml', profile['environments.yaml'], '乙');
+  await approvals.save(artifacts);
+  const second = await ReviewSession.open(artifacts, '甲');
+  expect(first.approvals.record('profile', 'environments.yaml')).toBeUndefined();
+  expect(second.approvals.record('profile', 'environments.yaml')?.by).toBe('乙');
+});
+
+it('中断任务后等待清理，不接收重复输入并允许后续任务', async () => {
+  const entered = deferred<void>(), release = deferred<void>();
+  const runSlashCommand = vi.fn(async (_tokens: string[], signal: AbortSignal) => {
+    entered.resolve(); await release.promise; signal.throwIfAborted();
+    return { kind: 'log' as const, code: 0, lines: [] };
+  });
+  const options: RunSessionOptions = { tokenize: (text) => [text], runSlashCommand, resolveReview: async () => { throw new Error('unused'); }, chatReply: async () => '回答' };
+  const ui = render(<SessionApp options={options} />);
+  ui.stdin.write('/plan'); ui.stdin.write(KEYS.enter); await entered.promise;
+  ui.stdin.write('\u0003'); ui.stdin.write('/again'); ui.stdin.write(KEYS.enter);
+  expect(runSlashCommand).toHaveBeenCalledTimes(1);
+  release.resolve();
+  await waitFor(() => frame(ui).includes('操作已中断'));
+  ui.stdin.write('hello'); ui.stdin.write(KEYS.enter);
+  await waitFor(() => frame(ui).includes('回答'));
+});

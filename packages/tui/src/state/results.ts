@@ -4,7 +4,7 @@ import {
 } from '@crosscheck/core';
 import { loadReportData, type ReportData } from '@crosscheck/report';
 import { RunStore } from '@crosscheck/runner';
-import type { ReviewSession } from '../io/session';
+import type { ReadonlyReviewContext, ReviewSession } from '../io/session';
 import { markClauseUnclear } from './clauses';
 
 export const DECISION_LABELS: Record<Decision, string> = {
@@ -12,7 +12,7 @@ export const DECISION_LABELS: Record<Decision, string> = {
 };
 
 const RUN_ID = /^\d{8}T\d{9}Z-[a-f0-9]{32}$/;
-export async function listRuns(session: ReviewSession): Promise<string[]> {
+export async function listRuns(session: ReadonlyReviewContext): Promise<string[]> {
   return (await session.artifacts.list('runs')).filter((name) => RUN_ID.test(name)).sort().reverse();
 }
 

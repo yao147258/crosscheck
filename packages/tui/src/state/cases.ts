@@ -2,7 +2,7 @@ import { TestCaseSchema, contentHash, coverage, loadCoveredClauses, selectPlanna
 import YAML from 'yaml';
 import { editValidated, parseYamlWith } from '../io/edit-loop';
 import type { EditorHost } from '../io/editor';
-import type { ReviewSession } from '../io/session';
+import type { ReadonlyReviewContext, ReviewSession } from '../io/session';
 
 export interface CaseRow { testCase: TestCase; approval: ApprovalState }
 export interface CaseOverview {
@@ -12,12 +12,12 @@ export interface CaseOverview {
   coverage: { covered: string[]; uncovered: string[] };
 }
 
-function caseState(session: ReviewSession, testCase: TestCase, clauses: Clause[], usable: Set<string>): ApprovalState {
+function caseState(session: ReadonlyReviewContext, testCase: TestCase, clauses: Clause[], usable: Set<string>): ApprovalState {
   const state = session.approvals.stateCase(testCase, clauses);
   return state === 'approved' && testCase.covers.some((id) => !usable.has(id)) ? 'stale' : state;
 }
 
-export async function loadCaseOverview(session: ReviewSession, module: string): Promise<CaseOverview> {
+export async function loadCaseOverview(session: ReadonlyReviewContext, module: string): Promise<CaseOverview> {
   const cases = await session.artifacts.loadCases(module);
   const moduleClauses = await session.artifacts.loadClauses(module);
   const coveredClauses = await loadCoveredClauses(session.artifacts, cases);

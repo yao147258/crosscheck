@@ -5,7 +5,13 @@ it('重复模块/用例保留集合筛选，resume可有无标识', () => {
   expect(parseArgs(['run', '--module', 'M', '--module', 'N', '--case', 'M-TC-1', '--case', 'N-TC-2', '--resume', '--project', 'a', '--environment', 'local'])).toMatchObject({ command: 'run', modules: ['M', 'N'], caseIds: ['M-TC-1', 'N-TC-2'], resume: true, project: 'a', environment: 'local', open: false });
   expect(parseArgs(['run', '--resume', 'saved'])).toMatchObject({ resume: 'saved' });
 });
-it.each([[], ['run', '--mock-pass'], ['run', '--approve'], ['run', '--case'], ['report'], ['report', '../bad'], ['report', 'id', '--resume'], ['run', '--project', 'a', '--project', 'b'], ['run', 'extra']].map(args => ({ args })))('拒绝错误参数$args', ({ args }) => {
+it('无参数解析为会话，非 TTY 时拒绝启动', async () => {
+  expect(parseArgs([])).toMatchObject({ command: 'session', project: process.cwd(), open: false });
+  const lines: string[] = [];
+  expect(await cliMain([], { log: (line) => lines.push(line), dependencies: { session: { isTTY: false } } })).toBe(2);
+  expect(lines.join('\n')).toContain('TTY');
+});
+it.each([['run', '--mock-pass'], ['run', '--approve'], ['run', '--case'], ['report'], ['report', '../bad'], ['report', 'id', '--resume'], ['run', '--project', 'a', '--project', 'b'], ['run', 'extra']].map(args => ({ args })))('拒绝错误参数$args', ({ args }) => {
   expect(() => parseArgs(args)).toThrow();
 });
 it('help不读取项目，参数错误退出2而非成功', async () => {

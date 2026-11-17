@@ -65,6 +65,11 @@ async function assertNoSecret(directory: string): Promise<void> {
     else expect((await readFile(file)).includes(Buffer.from(secret)), file).toBe(false);
   }
 }
+it('无参数在非 TTY 子进程中拒绝会话并退出 2', async () => {
+  try { await exec(runtime, [production], { cwd: repo }); throw new Error('应拒绝非 TTY'); }
+  catch (error: any) { expect(error.code).toBe(2); expect(error.stdout).toContain('TTY'); }
+});
+
 it.each([['pass', 'PASS', 0], ['fail', 'FAIL', 1], ['disputed', 'DISPUTED', 2], ['invalid', 'BLOCKED', 2]] as const)('真实HTTP/SDK子进程%s产生%s及三种报告且无秘密', async (mode, status, code) => {
   const s = await setup(); const out = await launch(s, mode); expect(out.code, out.stdout).toBe(code);
   const saved = await result(s); expect(saved.data.status).toBe(status); expect(saved.data.usage.cost).toBeNull();
