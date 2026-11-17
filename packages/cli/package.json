@@ -1,9 +1,11 @@
 {
-  "name": "@crosscheck/cli",
-  "version": "0.0.0",
-  "private": true,
+  "name": "crosscheck",
+  "version": "0.1.0",
+  "description": "面向已启动、手工配置并经人确认的可信测试项目的本地 Chromium 浏览器 / HTTP / 可选 PostgreSQL AI 验收工具",
   "type": "module",
   "bin": { "crosscheck": "./dist/index.js" },
+  "files": ["dist/index.js", "README.md"],
+  "repository": { "type": "git", "url": "https://github.com/yao147258/crosscheck.git" },
   "engines": { "node": ">=22.12" },
   "dependencies": {
     "@crosscheck/core": "workspace:^",

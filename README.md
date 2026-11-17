@@ -12,11 +12,13 @@ pnpm test
 pnpm typecheck
 pnpm build
 # 需要浏览器操作或真实浏览器测试时安装 Chromium；HTTP-only 不启动它
-pnpm --filter @crosscheck/cli exec playwright install chromium
+pnpm --filter crosscheck exec playwright install chromium
 pnpm crosscheck --help
 # 同一个本地 bin（从仓库运行）
-pnpm --filter @crosscheck/cli exec crosscheck --help
+pnpm --filter crosscheck exec crosscheck --help
 ```
+
+发布到 npm 后也可全局安装为系统命令：`npm i -g crosscheck`，之后在任意目录直接运行 `crosscheck --help`。
 
 可使用 `init → reqs → review → plan → review → run` 流程，也可阅读 [完整手工接入指南](docs/manual-integration.md) 手工准备七画像、条款与用例；该指南中的独立 approveCase 脚本仍可用。生成命令只写草稿，不会自动确认；`run` 仍要求人工确认与凭证、网络授权等门禁。尚无 npm 发布或 npx 可用承诺。
 
@@ -75,7 +77,7 @@ HTTP fixture 只接受固定 JSON 请求与完整 JSON 响应；start/stop 仅�
 | `@crosscheck/tools` | 受控HTTP、只读PG、认证/夹具宿主适配与脱敏采证 |
 | `@crosscheck/runner` | 已确认输入执行、盲审、资源清理、提交与恢复 |
 | `@crosscheck/report` | 已验证历史数据的JSON/JUnit/静态HTML派生 |
-| `@crosscheck/cli` | init/reqs/plan/review/run/report、信号与退出码 |
+| `crosscheck`（内部包名曾为 `@crosscheck/cli`） | init/reqs/plan/review/run/report、信号与退出码 |
 | `@crosscheck/tui` | 交互审核、人工确认与运行结果裁决 |
 | `@crosscheck/planner` | 基于已确认画像、条款生成用例草稿 |
 | `@crosscheck/discovery` | 只读提取本地项目与 OpenAPI 事实候选 |

@@ -12,11 +12,11 @@ pnpm typecheck
 pnpm test
 pnpm build
 pnpm crosscheck --help
-pnpm --filter @crosscheck/cli exec crosscheck --help
+pnpm --filter crosscheck exec crosscheck --help
 node packages/cli/dist/index.js --help
 ```
 
-浏览器执行使用运行时依赖 Playwright 的 Chromium，安装命令为 `pnpm --filter @crosscheck/cli exec playwright install chromium`。HTTP-only 用例不要求启动 Chromium。必须在 Crosscheck 仓库构建后运行 `packages/cli/dist/index.js` / `pnpm crosscheck`，不依赖隐式 TypeScript loader。仅用于可信测试环境：标准浏览器没有网络隔离，普通页面自身请求、重定向、WebSocket/WebTransport/WebRTC 正常运行；不安装强制代理，不承诺阻断页面访问其他目标。HTTP/DB 工具的现有守卫不变。
+浏览器执行使用运行时依赖 Playwright 的 Chromium，安装命令为 `pnpm --filter crosscheck exec playwright install chromium`。HTTP-only 用例不要求启动 Chromium。必须在 Crosscheck 仓库构建后运行 `packages/cli/dist/index.js` / `pnpm crosscheck`，不依赖隐式 TypeScript loader。仅用于可信测试环境：标准浏览器没有网络隔离，普通页面自身请求、重定向、WebSocket/WebTransport/WebRTC 正常运行；不安装强制代理，不承诺阻断页面访问其他目标。HTTP/DB 工具的现有守卫不变。
 
 以下示例假设用户自己启动了 `http://127.0.0.1:3000` 测试应用，`GET /health` 返回成功，`POST /api/action` 改变状态，`GET /api/item` 返回完整 JSON `{ "status": "done" }`。服务不存在时必须先人工提供适配，Crosscheck 不会替用户启动未知系统。
 
