@@ -11,6 +11,7 @@ export * from './profile/profile-files';
 export * from './workflow/run-inputs';
 export * from './workflow/drafts';
 export * from './store/artifact-store';
+export * from './store/user-config';
 export * from './store/evidence-path';
 export * from './approvals/hash';
 export * from './approvals/approvals';

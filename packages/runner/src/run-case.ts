@@ -25,7 +25,7 @@ export async function executeCase(artifacts: ArtifactStore, run: RunStore, input
   const prefix = `runs/${context.runId}/cases/${tc.id}/attempts/${attempt}`;
   const env = options.env ?? options.modelOptions?.env ?? process.env;
   // 环境值只留内存，所有适配器共享可动态 addSecrets 的同一对象。
-  const redactor = runRedactor(input, env);
+  const redactor = runRedactor(input, env, Object.values(options.modelOptions?.apiKeys ?? {}).filter((key): key is string => !!key));
   const store = new EvidenceStore(artifacts, context, redactor, { omitPayloadsUntilAuthenticated: input.profile['auth.yaml'].actors[tc.actor]?.kind === 'command' });
   const commands = new ApprovedCommandRunner(artifacts, context.runId, redactor, { env });
   const client = new HttpClient(new RequestPolicy(input.profile['guardrails.yaml']), store, redactor, { transport: options.transport });

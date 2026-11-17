@@ -3,7 +3,7 @@ import { runSuite, type RunSuiteOptions } from '@crosscheck/runner';
 import type { CliArgs } from './args';
 import { writeReport } from './report';
 
-export async function runCommand(args: CliArgs, log: (s: string) => void, dependencies: Pick<RunSuiteOptions, 'modelOptions' | 'resilience' | 'env'> = {}, signal?: AbortSignal): Promise<number> {
+export async function runCommand(args: CliArgs, log: (s: string) => void, dependencies: Pick<RunSuiteOptions, 'modelOptions' | 'resilience' | 'env' | 'userConfigHome'> = {}, signal?: AbortSignal): Promise<number> {
   const controller = new AbortController();
   const abort = () => controller.abort();
   process.on('SIGINT', abort); process.on('SIGTERM', abort);

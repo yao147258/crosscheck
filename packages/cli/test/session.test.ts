@@ -1,11 +1,14 @@
 import { expect, it, vi } from 'vitest';
+import { rm, writeFile } from 'node:fs/promises';
+import path from 'node:path';
 import { afterEach } from 'vitest';
 import { APICallError } from 'ai';
 import { ReviewSession, approveClause } from '@crosscheck/tui';
 import { clause } from '../../tui/test/fixture';
 import { scriptedModel } from '../../agent/src/testing/scripted-model';
 import { cleanupProjects, createProject } from '../../tui/test/fixture';
-import { chatReply, createSlashDispatcher, tokenizeCommand } from '../src/session';
+import { chatReply as realChatReply, createSlashDispatcher, tokenizeCommand } from '../src/session';
+const chatReply: typeof realChatReply = (root, history, text, deps, signal) => realChatReply(root, history, text, { ...deps, userConfigHome: path.join(root, 'user') }, signal);
 
 afterEach(async () => { vi.restoreAllMocks(); await cleanupProjects(); });
 
@@ -31,9 +34,20 @@ it('可重试模型错误只由 fallback 控制重试次数', async () => {
   expect(model.doGenerateCalls).toHaveLength(1);
 });
 
+it('聊天结果和模型错误均清除全局密钥', async () => {
+  const { root } = await createProject();
+  const secret = 'CHAT_SECRET_829761';
+  await writeFile(path.join(root, 'user', '.crosscheck', 'config.yaml'), JSON.stringify({ models: { extractor: 'mock:x', planner: 'mock:p', executor: 'mock:e', reviewer: 'mock:r' }, providers: { mock: { type: 'ollama', apiKey: secret } } }));
+  const model = scriptedModel([{ text: `回复 ${secret}` }]);
+  const reply = await chatReply(root, [], '你好', { modelOptions: { factories: { ollama: () => model } } }, new AbortController().signal);
+  expect(reply).not.toContain(secret);
+  const failed = scriptedModel([{ error: new Error(`错误 ${secret}`) }]);
+  await expect(chatReply(root, [], '你好', { resilience: { retries: 0 }, modelOptions: { factories: { ollama: () => failed } } }, new AbortController().signal)).rejects.not.toThrow(secret);
+});
+
 it('聊天首次读取摘要并回退模型，不授予工具且保留历史', async () => {
   const { root, artifacts } = await createProject();
-  await artifacts.writeYaml('config.yaml', { models: { extractor: 'mock:x', planner: 'mock:primary', executor: 'mock:e', reviewer: 'mock:r', fallback: { planner: 'mock:backup' } }, providers: { mock: { type: 'ollama' } } });
+  await writeFile(path.join(root, 'user', '.crosscheck', 'config.yaml'), JSON.stringify({ models: { extractor: 'mock:x', planner: 'mock:primary', executor: 'mock:e', reviewer: 'mock:r', fallback: { planner: 'mock:backup' } }, providers: { mock: { type: 'ollama' } } }));
   const primary = scriptedModel([{ error: new Error('模型故障') }]);
   const backup = scriptedModel([{ text: '只读回答' }]);
   const reply = await chatReply(root, [{ role: 'user', content: '上个问题' }, { role: 'assistant', content: '上个回答' }], '还有多少', { resilience: { retries: 0 }, modelOptions: { env: {}, factories: { ollama: ({ modelId }) => modelId === 'primary' ? primary : backup } } }, new AbortController().signal);
@@ -47,7 +61,7 @@ it('聊天首次读取摘要并回退模型，不授予工具且保留历史', a
 
 it('缺少模型配置时聊天显示错误且不影响命令分发', async () => {
   const { root, artifacts } = await createProject();
-  await artifacts.writeYaml('config.yaml', {});
+  await rm(path.join(root, 'user', '.crosscheck', 'config.yaml'));
   const signal = new AbortController().signal;
   await expect(chatReply(root, [], '你好', {}, signal)).rejects.toThrow();
   expect(await createSlashDispatcher({})(['help'], signal)).toMatchObject({ kind: 'log', code: 0 });

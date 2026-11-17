@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createServer, type Server } from 'node:http';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { MockLanguageModelV4 } from 'ai/test';
@@ -29,7 +29,9 @@ async function setup(options: { verdict?: string; fallback?: boolean; steps?: nu
   }); servers.push(server); await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
   const baseURL = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
   const root = await mkdtemp(path.join(tmpdir(), 'browser-runner-')); roots.push(root); const artifacts = new ArtifactStore(root);
-  await artifacts.writeYaml('config.yaml', { models: { extractor: 'mock:x', planner: 'mock:p', executor: 'mock:e', reviewer: 'mock:r', ...(options.fallback ? { fallback: { reviewer: 'mock:f' } } : {}) }, providers: { mock: { type: 'ollama' } }, capabilities: { 'mock:e': { images: true }, 'mock:r': { images: true }, 'mock:f': { images: false } }, defaultEnvironment: 'local', budget: { perCase: { steps: options.steps ?? 30, tokens: 100000, minutes: options.minutes ?? 1 } } });
+  const userHome = path.join(root, 'user'); await mkdir(path.join(userHome, '.crosscheck'), { recursive: true });
+  await writeFile(path.join(userHome, '.crosscheck', 'config.yaml'), JSON.stringify({ models: { extractor: 'mock:x', planner: 'mock:p', executor: 'mock:e', reviewer: 'mock:r', ...(options.fallback ? { fallback: { reviewer: 'mock:f' } } : {}) }, providers: { mock: { type: 'ollama' } }, capabilities: { 'mock:e': { images: true }, 'mock:r': { images: true }, 'mock:f': { images: false } } }));
+  await artifacts.writeYaml('config.yaml', { defaultEnvironment: 'local', budget: { perCase: { steps: options.steps ?? 30, tokens: 100000, minutes: options.minutes ?? 1 } } });
   const source = { file: '需求.md', line: 1, excerpt: '保存后显示成功' };
   const clause = ClauseSchema.parse({ id: 'M-AC-1', text: '填写并保存后显示成功', source });
   const tc = TestCaseSchema.parse({ id: 'M-TC-1', covers: [clause.id], actor: 'member', fixtures: options.fixtures ? ['known', 'reset', 'missing'] : [], steps: ['保存表单'], expectations: [{ id: 'E1', text: '保存后页面显示保存成功', evidence: ['dom', 'screenshot'] }] });
@@ -55,7 +57,7 @@ async function setup(options: { verdict?: string; fallback?: boolean; steps?: nu
   } });
   const reviewer = new MockLanguageModelV4({ doGenerate: async opts => { expect(opts.tools?.map(t => t.name)).toEqual(['finish', 'report_blocked']); if (options.fallback) throw new Error('切换无图模型'); return scriptedModel([finish(options.verdict ?? 'pass', await latest('execution'))]).doGenerate(opts); } });
   const fallback = new MockLanguageModelV4({ doGenerate: async opts => scriptedModel([finish('pass', await latest('execution'))]).doGenerate(opts) });
-  return { artifacts, requests, baseURL, executor, reviewer, fallback, index, options: { artifacts, env: { PASSWORD: secret }, modelOptions: { factories: { ollama: ({ modelId }: { modelId: string }) => modelId === 'e' ? executor : modelId === 'r' ? reviewer : fallback } }, resilience: { retries: 0, baseDelayMs: 0 } } };
+  return { artifacts, requests, baseURL, executor, reviewer, fallback, index, options: { artifacts, userConfigHome: userHome, env: { PASSWORD: secret }, modelOptions: { factories: { ollama: ({ modelId }: { modelId: string }) => modelId === 'e' ? executor : modelId === 'r' ? reviewer : fallback } }, resilience: { retries: 0, baseDelayMs: 0 } } };
 }
 describe.skipIf(skip)('runner 真实浏览器与脚本模型', () => {
   it.each([['pass', 'PASS'], ['fail', 'DISPUTED'], ['unclear', 'UNCLEAR']] as const)('表单与盲审 %s→%s，浏览器关闭后提交', async (verdict, status) => {

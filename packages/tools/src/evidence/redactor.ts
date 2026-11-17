@@ -6,7 +6,12 @@ export function createEvidenceRedactor(fields: string[] = [], secrets: string[] 
   const known = new Set<string>();
   let patterns: RegExp[] = [];
   const addSecrets = (values: string[]) => {
-    for (const value of values) if (value) known.add(value);
+    for (const value of values) if (value) {
+      known.add(value);
+      const bytes = Buffer.from(value);
+      known.add(bytes.toString('base64'));
+      known.add(bytes.toString('base64url'));
+    }
     patterns = [...known].sort((a, b) => b.length - a.length).map(secret => {
       const encoded = encodeURIComponent(secret).replace(/%[0-9A-F]{2}|[^%]/g, part => {
         if (part === '%20') return '(?:%20|\\+)';

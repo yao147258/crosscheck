@@ -89,7 +89,7 @@ describe('ConfigSchema', () => {
     expect(ConfigSchema.safeParse({ models: { ...models, executor: 'gpt-5.4' } }).success).toBe(false);
   });
 
-  it('自定义 provider 只写环境变量名', () => {
+  it('公开 provider 配置不保留秘密或旧环境变量名', () => {
     const cfg = ConfigSchema.parse({
       models,
       providers: {
@@ -100,7 +100,7 @@ describe('ConfigSchema', () => {
         },
       },
     });
-    expect(cfg.providers.qwen?.apiKeyEnv).toBe('DASHSCOPE_API_KEY');
+    expect(cfg.providers.qwen).not.toHaveProperty('apiKeyEnv');
   });
 });
 

@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { RunStore } from '../src/store/run-store';
@@ -11,7 +11,10 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { MockLanguageModelV4 } from 'ai/test';
 import { Approvals, ArtifactStore, ClauseSchema, TestCaseSchema, loadProfile, RunResultSchema } from '@crosscheck/core';
 import { scriptedModel } from '../../agent/src/testing/scripted-model';
-import { runSuite } from '../src/run-suite';
+import { runSuite as realRunSuite, type RunSuiteOptions } from '../src/run-suite';
+const userFile = (artifacts: ArtifactStore) => path.join(path.dirname(artifacts.root), 'user', '.crosscheck', 'config.yaml');
+const runSuite = (options: RunSuiteOptions) => realRunSuite({ ...options, userConfigHome: path.join(path.dirname(options.artifacts.root), 'user') });
+async function changeUser(artifacts: ArtifactStore, change: (config: any) => void) { const file = userFile(artifacts); const config = JSON.parse(await readFile(file, 'utf8')); change(config); await writeFile(file, JSON.stringify(config)); }
 
 const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))); });
@@ -21,7 +24,9 @@ const finish = (verdict = 'pass', evidenceIds: string[] = [], reasoning = '真�
 async function setup(extra: { evidence?: string; actor?: unknown; approved?: boolean; count?: number; steps?: number; fixtures?: string[]; start?: unknown; stop?: unknown } = {}) {
   const root = await mkdtemp(path.join(os.tmpdir(), 'task9-')); roots.push(root);
   const artifacts = new ArtifactStore(root);
-  await artifacts.writeYaml('config.yaml', { models: { extractor: 'mock:x', planner: 'mock:p', executor: 'mock:e', reviewer: 'mock:r', fallback: { reviewer: 'mock:f' } }, providers: { mock: { type: 'ollama' } }, defaultEnvironment: 'local', budget: { perCase: { steps: extra.steps ?? 20, tokens: 10000, minutes: 1 } } });
+  const userHome = path.join(root, 'user'); await mkdir(path.join(userHome, '.crosscheck'), { recursive: true });
+  await writeFile(path.join(userHome, '.crosscheck', 'config.yaml'), JSON.stringify({ models: { extractor: 'mock:x', planner: 'mock:p', executor: 'mock:e', reviewer: 'mock:r', fallback: { reviewer: 'mock:f' } }, providers: { mock: { type: 'ollama' } } }));
+  await artifacts.writeYaml('config.yaml', { defaultEnvironment: 'local', budget: { perCase: { steps: extra.steps ?? 20, tokens: 10000, minutes: 1 } } });
   const files = { 'environments.yaml': { version: 1, environments: { local: { baseURL: 'http://localhost:39999', healthcheck: 'http://localhost:39999/health', reset: null, ...(extra.start ? { start: extra.start } : {}), ...(extra.stop ? { stop: extra.stop } : {}) } } }, 'auth.yaml': { version: 1, actors: { guest: extra.actor ?? { kind: 'anonymous' } } }, 'api-catalog.yaml': { version: 1, operations: {} }, 'pages.yaml': { version: 1, pages: {} }, 'data-model.yaml': { version: 1, queries: {} }, 'fixtures.yaml': { version: 1, fixtures: {} }, 'guardrails.yaml': { allowedHosts: ['localhost:39999'] } };
   for (const [name, value] of Object.entries(files)) await artifacts.writeYaml(`system/${name}`, value);
   const cases = Array.from({ length: extra.count ?? 1 }, (_, i) => TestCaseSchema.parse({ ...tc, id: `M-TC-${i + 1}`, fixtures: extra.fixtures ?? [], expectations: [{ ...tc.expectations[0], evidence: [extra.evidence ?? 'network'] }] }));
@@ -140,6 +145,31 @@ describe('Task9真实编排边界', () => {
     for (const call of [...h.reviewer.doGenerateCalls, ...h.fallback.doGenerateCalls]) { expect(JSON.stringify(call.prompt)).not.toContain('EXECUTOR_SENTINEL_8291'); expect(JSON.stringify(call.prompt)).toContain('原文'); }
     expect(r.result?.cases[0]?.reliability.attempts).toBe(5);
   });
+  it('主模型缺少全局密钥时返回安全配置诊断及退出码2', async () => {
+    const { artifacts } = await setup();
+    await changeUser(artifacts, config => { config.providers.mock.type = 'openai'; });
+    const outcome = await runSuite(harness(artifacts).options);
+    expect(outcome.exitCode).toBe(2);
+    expect(outcome.error).toMatch(/apiKey/);
+    expect(outcome.error).not.toMatch(/宿主/);
+  });
+  it('运行脱敏器清除全局密钥的 base64 编码', () => {
+    const redactor = createEvidenceRedactor([], ['GLOBAL_SECRET_8427']);
+    expect(redactor.text(Buffer.from('GLOBAL_SECRET_8427').toString('base64'))).not.toContain(Buffer.from('GLOBAL_SECRET_8427').toString('base64'));
+  });
+  it('全局密钥轮换可恢复，模型配置变化拒绝恢复，密钥不进入快照和结果', async () => {
+    const { artifacts } = await setup(); const h = harness(artifacts);
+    await changeUser(artifacts, config => { config.providers.mock.apiKey = 'SECRET_GLOBAL_FIRST_8473'; });
+    const first = await runSuite(h.options); const id = first.result!.manifest.runId;
+    expect(first.exitCode).toBe(0);
+    await changeUser(artifacts, config => { config.providers.mock.apiKey = 'SECRET_GLOBAL_ROTATED_8473'; });
+    const resumed = await runSuite({ ...h.options, resume: id }); expect(resumed.exitCode).toBe(0);
+    for (const rel of [`runs/${id}/input.json`, `runs/${id}/results.json`, `runs/${id}/manifest.json`]) {
+      const text = (await artifacts.readBytes(rel))!.toString(); expect(text).not.toContain('SECRET_GLOBAL_FIRST_8473'); expect(text).not.toContain('SECRET_GLOBAL_ROTATED_8473');
+    }
+    await changeUser(artifacts, config => { config.models.reviewer = 'mock:changed'; });
+    const changed = await runSuite({ ...h.options, resume: id }); expect(changed.exitCode).toBe(2); expect(changed.error).toContain('指纹');
+  });
   it('complete业务BLOCKED不重放，输入变更拒绝resume', async () => {
     const { artifacts } = await setup({ evidence: 'dom' }); const h = harness(artifacts);
     const first = await runSuite(h.options); const id = first.result!.manifest.runId;
@@ -174,7 +204,7 @@ describe('Task9恢复/证据/资源故障', () => {
     const h = harness(new BrokenStore(path.dirname(artifacts.root))); const r = await runSuite(h.options); expect(r.exitCode).toBe(3); expect(h.requests).toEqual([]);
   });
   it('共享token预算在executor合法finish恰好耗尽时不再review', async () => {
-    const { artifacts } = await setup(); const config = await artifacts.loadConfig(); config.budget.perCase.tokens = 30; await artifacts.writeYaml('config.yaml', config);
+    const { artifacts } = await setup(); const config = await artifacts.loadProjectConfig(); config.budget.perCase.tokens = 30; await artifacts.writeYaml('config.yaml', config);
     const h = harness(artifacts); const r = await runSuite(h.options);
     expect(r.result?.cases[0]?.expectations[0]).toMatchObject({ executor: { verdict: 'pass' }, reviewer: null, status: 'BLOCKED' }); expect(h.reviewer.doGenerateCalls).toHaveLength(0); expect(r.result?.budget.tokens).toBe(30);
   });
@@ -247,7 +277,7 @@ describe('Task9恢复/证据/资源故障', () => {
     const resumed = await runSuite({ ...h.options, resume: first.result!.manifest.runId }); expect(resumed.exitCode).toBe(1); expect(h.requests).toHaveLength(n); expect(h.executor.doGenerateCalls).toHaveLength(calls);
   });
   it('已知价格按真实模型计费并保留数字预算汇总', async () => {
-    const { artifacts } = await setup(); const config = await artifacts.loadConfig(); config.pricing = { 'mock:e': { inputPerMTok: 1, outputPerMTok: 2 }, 'mock:r': { inputPerMTok: 3, outputPerMTok: 4 } }; await artifacts.writeYaml('config.yaml', config);
+    const { artifacts } = await setup(); await changeUser(artifacts, config => { config.pricing = { 'mock:e': { inputPerMTok: 1, outputPerMTok: 2 }, 'mock:r': { inputPerMTok: 3, outputPerMTok: 4 } }; });
     const h = harness(artifacts); const r = await runSuite(h.options);
     expect(r.result?.usage).toEqual({ inputTokens: 30, outputTokens: 15, pricingKnown: true, cost: 0.00009 });
     expect(r.result?.budget).toMatchObject({ steps: 3, tokens: 45 });
@@ -293,7 +323,7 @@ describe('Task9恢复/证据/资源故障', () => {
     const r = await runSuite(h.options); expect(r.exitCode).toBe(3); expect(r.result?.status).toBe('BLOCKED'); expect(h.reviewer.doGenerateCalls).toHaveLength(0);
   });
   it('总deadline从健康检查开始贯穿真实transport，时长耗尽不调用模型', async () => {
-    const { artifacts } = await setup(); const config = await artifacts.loadConfig(); config.budget.perCase.minutes = 0.0003; await artifacts.writeYaml('config.yaml', config);
+    const { artifacts } = await setup(); const config = await artifacts.loadProjectConfig(); config.budget.perCase.minutes = 0.0003; await artifacts.writeYaml('config.yaml', config);
     let aborted = false;
     const model = scriptedModel([]);
     const r = await runSuite({ artifacts, modelOptions: { factories: { ollama: () => model } }, transport: async (_url, init) => new Promise((_resolve, reject) => { const signal = init.signal!; const abort = () => { aborted = true; reject(new Error('已取消')); }; if (signal.aborted) abort(); else signal.addEventListener('abort', abort, { once: true }); }) });
@@ -369,7 +399,7 @@ describe('Task9恢复/证据/资源故障', () => {
   it('单用例仍真实审批，运行期输入变更不改变已固定快照，后续resume拒绝', async () => {
     const { artifacts } = await setup(); let changed = false;
     const model = scriptedModel([finish('unclear', [], '原条款不可判定'), finish('unclear', [], '独立不可判定')]);
-    const r = await runCase({ artifacts, caseId: tc.id, modelOptions: { factories: { ollama: () => model } }, transport: async () => { if (!changed) { changed = true; await artifacts.saveClauses('M', [{ ...clause, text: 'MUTATED_MID_RUN' }]); } return new Response('{}', { headers: { 'content-type': 'application/json' } }); } });
+    const r = await runCase({ artifacts, userConfigHome: path.join(path.dirname(artifacts.root), 'user'), caseId: tc.id, modelOptions: { factories: { ollama: () => model } }, transport: async () => { if (!changed) { changed = true; await artifacts.saveClauses('M', [{ ...clause, text: 'MUTATED_MID_RUN' }]); } return new Response('{}', { headers: { 'content-type': 'application/json' } }); } });
     expect(r.result?.status).toBe('UNCLEAR');
     expect(JSON.stringify(model.doGenerateCalls)).not.toContain('MUTATED_MID_RUN');
     const next = await runSuite({ artifacts, resume: r.result!.manifest.runId }); expect(next.exitCode).toBe(2); expect(next.error).toContain('指纹');
@@ -483,7 +513,7 @@ describe('Task9 fix1 I-2 HTTP轨迹投影', () => {
 describe('Task9 fix1 I-3 异常阶段模型审计', () => {
   it.each(['tool', 'presenter', 'semantic'] as const)('primary/retry/fallback后%s异常不丢尝试、tokens或未知费用', async fault => {
     const { artifacts } = await setup();
-    const config = await artifacts.loadConfig(); config.models.fallback.executor = 'mock:ef'; config.pricing = { 'mock:e': { inputPerMTok: 1, outputPerMTok: 1 }, 'mock:ef': { inputPerMTok: 1, outputPerMTok: 1 } }; await artifacts.writeYaml('config.yaml', config);
+    await changeUser(artifacts, config => { config.models.fallback.executor = 'mock:ef'; config.pricing = { 'mock:e': { inputPerMTok: 1, outputPerMTok: 1 }, 'mock:ef': { inputPerMTok: 1, outputPerMTok: 1 } }; });
     let fired = false;
     class FaultStore extends ArtifactStore {
       override async writeJson(rel: string, value: unknown) {
@@ -740,7 +770,7 @@ describe('最终修复 I4 DB业务证据资格', () => {
 describe('最终修复 I5 真实presenter取消来源', () => {
   it.each(['cancel', 'disk-abort', 'deadline', 'review-cancel', 'review-disk-abort'] as const)('%s读取边界不新增provider，正常取消2/宿主原错3', async kind => {
     const { artifacts } = await setup(); const ac = new AbortController(); let fired = false, afterFinishReads = 0;
-    if (kind === 'deadline') { const config = await artifacts.loadConfig(); config.budget.perCase.minutes = 0.005; await artifacts.writeYaml('config.yaml', config); }
+    if (kind === 'deadline') { const config = await artifacts.loadProjectConfig(); config.budget.perCase.minutes = 0.005; await artifacts.writeYaml('config.yaml', config); }
     class BoundaryStore extends ArtifactStore {
       override async readBytes(rel: string) {
         const bytes = await super.readBytes(rel);

@@ -3,7 +3,7 @@ import { callWithFallback } from '@crosscheck/models';
 import { createEditorHost, createOpener, loadHomeSummary, ReviewSession, runSession, type ChatMessage, type SlashCommandResult } from '@crosscheck/tui';
 import { generateText } from 'ai';
 import { parseArgs, type CliArgs } from './args';
-import { resolveModels, withInterrupt, type CommandDependencies } from './context';
+import { loadModelContext, resolveModels, withInterrupt, type CommandDependencies } from './context';
 import { cliMain } from './main';
 
 export function tokenizeCommand(text: string): string[] {
@@ -36,17 +36,20 @@ export function createSlashDispatcher(deps: CommandDependencies) {
 
 export async function chatReply(project: string, history: ChatMessage[], text: string, deps: CommandDependencies, signal: AbortSignal): Promise<string> {
   const artifacts = new ArtifactStore(project);
-  const config = await artifacts.loadConfig();
+  const context = await loadModelContext(artifacts, deps);
+  const { config, redactor } = context;
   signal.throwIfAborted();
   // 摘要只读确认记录，不需要解析操作者身份。
   const summary = await loadHomeSummary({ artifacts, approvals: await Approvals.load(artifacts) });
   signal.throwIfAborted();
-  const models = resolveModels(config, 'planner', deps, () => {});
+  const models = resolveModels(config, 'planner', context.deps, () => {});
+  try {
   const result = await callWithFallback(models, async (model) => {
     const response = await generateText({ model, maxRetries: 0, system: `你是只读助手。仅根据项目摘要回答，不可执行写入或确认操作；请引导用户使用斜杠命令或 /review 自行操作。项目摘要：${JSON.stringify(summary)}`, messages: [...history.slice(-20), { role: 'user', content: text }], abortSignal: signal });
     return response.text;
   }, { ...deps.resilience, signal });
-  return result.value;
+  return redactor.text(result.value);
+  } catch (error) { throw new Error(redactor.text(error instanceof Error ? error.message : '模型调用失败')); }
 }
 
 export async function sessionCommand(args: CliArgs, log: (s: string) => void, deps: CommandDependencies, signal?: AbortSignal): Promise<number> {

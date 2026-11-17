@@ -1,10 +1,14 @@
-import { mkdtemp, mkdir, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
-import { Approvals, ArtifactError, ArtifactStore, ConfigSchema, readProfileFile } from '@crosscheck/core';
+import { Approvals, ArtifactError, ArtifactStore, ConfigSchema, ProjectConfigSchema, readProfileFile } from '@crosscheck/core';
 import { scriptedModel, type ScriptStep } from '../../agent/src/testing/scripted-model';
-import { cliMain } from '../src/main';
+import { cliMain as realCliMain } from '../src/main';
+const cliMain: typeof realCliMain = (argv, options = {}) => {
+  const index = argv.indexOf('--project');
+  return realCliMain(argv, { ...options, dependencies: { ...options.dependencies, userConfigHome: index >= 0 ? path.join(argv[index + 1]!, 'user') : undefined } });
+};
 import { CONFIG_TEMPLATE } from '../src/init';
 import { InterruptedError, resolveModels, withInterrupt } from '../src/context';
 
@@ -26,7 +30,9 @@ const STEPS = [finish(['environments.yaml']), finish(['auth.yaml']), finish(['ap
 async function project(withConfig: boolean) {
   const root = await mkdtemp(path.join(os.tmpdir(), 'cli-init-')); roots.push(root);
   const artifacts = new ArtifactStore(root);
-  if (withConfig) await artifacts.writeYaml('config.yaml', { models: { extractor: 'mock:x', planner: 'mock:p', executor: 'mock:e', reviewer: 'mock:r' }, providers: { mock: { type: 'ollama' } } });
+  await mkdir(path.join(root, 'user', '.crosscheck'), { recursive: true });
+  await writeFile(path.join(root, 'user', '.crosscheck', 'config.yaml'), JSON.stringify({ models: { extractor: 'mock:x', planner: 'mock:p', executor: 'mock:e', reviewer: 'mock:r' }, providers: { mock: { type: 'ollama' } } }));
+  if (withConfig) await artifacts.writeYaml('config.yaml', {});
   return { root, artifacts };
 }
 const deps = (model: ReturnType<typeof scriptedModel>) => ({ modelOptions: { env: {}, factories: { ollama: () => model } }, resilience: { retries: 0, baseDelayMs: 0 } });
@@ -35,8 +41,8 @@ it('没有 config.yaml 时写入合法模板并退出 2，不调用模型', asyn
   const { root, artifacts } = await project(false);
   const model = scriptedModel([]); const out: string[] = [];
   expect(await cliMain(['init', '--project', root], { log: (s) => out.push(s), dependencies: deps(model) })).toBe(2);
-  expect(ConfigSchema.safeParse(await artifacts.readYaml('config.yaml', ConfigSchema)).success).toBe(true);
-  expect(ConfigSchema.safeParse(CONFIG_TEMPLATE).success).toBe(true);
+  expect(ProjectConfigSchema.safeParse(await artifacts.readYaml('config.yaml', ProjectConfigSchema)).success).toBe(true);
+  expect(ProjectConfigSchema.safeParse(CONFIG_TEMPLATE).success).toBe(true);
   expect(out.join('\n')).toContain('模板');
   expect(model.doGenerateCalls).toHaveLength(0);
 });
@@ -199,10 +205,10 @@ it.each(['environments.yaml', 'guardrails.yaml'])('写入 %s 期间取消保留�
 
 it('配置缺密钥是宿主错误，保留具体诊断', async () => {
   const { root, artifacts } = await project(true);
-  await artifacts.writeYaml('config.yaml', CONFIG_TEMPLATE);
+  await writeFile(path.join(root, 'user', '.crosscheck', 'config.yaml'), JSON.stringify({ models: { extractor: 'openai:x', planner: 'openai:x', executor: 'openai:x', reviewer: 'openai:x' }, providers: { openai: { type: 'openai' } } }));
   const out: string[] = [];
   expect(await cliMain(['init', '--project', root], { log: (s) => out.push(s), dependencies: { env: {} } })).toBe(3);
-  expect(out.join('\n')).toContain('ANTHROPIC_API_KEY');
+  expect(out.join('\n')).toContain('apiKey');
   expect(await artifacts.list('system')).toEqual([]);
 });
 
@@ -258,7 +264,7 @@ it.each(['SIGINT', 'SIGTERM'] as const)('withInterrupt 接管 %s 并恢复监听
   await expect(withInterrupt(undefined, async () => 7)).resolves.toBe(7);
 });
 
-it('公共模型解析优先使用命令 env，并记录备用模型缺密钥警告', () => {
+it('公共模型解析使用独立密钥集合，并记录备用模型缺密钥警告', () => {
   const config = ConfigSchema.parse({
     models: { extractor: 'mock:x', planner: 'mock:p', executor: 'mock:e', reviewer: 'mock:r', fallback: { extractor: 'anthropic:backup' } },
     providers: { mock: { type: 'ollama', apiKeyEnv: 'MOCK_KEY' } },
@@ -267,9 +273,9 @@ it('公共模型解析优先使用命令 env，并记录备用模型缺密钥警
   const out: string[] = [];
   const models = resolveModels(config, 'extractor', {
     env: { MOCK_KEY: '命令密钥' },
-    modelOptions: { env: { MOCK_KEY: '模型密钥', ANTHROPIC_API_KEY: '备用密钥' }, factories: { ollama: (options) => { key = options.apiKey; return scriptedModel([]); } } },
+    modelOptions: { env: { MOCK_KEY: '模型密钥', ANTHROPIC_API_KEY: '备用密钥' }, apiKeys: { mock: '全局密钥' }, factories: { ollama: (options) => { key = options.apiKey; return scriptedModel([]); } } },
   }, (s) => out.push(s));
-  expect(key).toBe('命令密钥');
+  expect(key).toBe('全局密钥');
   expect(models.map((m) => m.ref)).toEqual(['mock:x']);
   expect(out.join('\n')).toContain('跳过备用模型');
 });

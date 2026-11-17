@@ -1,6 +1,6 @@
 # 手工接入与本地验收
 
-本阶段只面向**已经启动、已准备测试数据、手工配置且经人确认**的项目。不是自动初始化器：没有 init、需求提取、用例生成、TUI、发布到 npm 或 npx 可用承诺。不要把生产环境作为首次接入目标。真实模型调用必须由用户提供环境变量、目标测试环境与授权后自行运行。
+本指南面向**已经启动、已准备测试数据、手工配置且经人确认**的项目。也可使用 init、需求提取、用例生成及交互审核；生成内容仍须人工确认。不要把生产环境作为首次接入目标。真实模型调用需要用户提供全局模型配置、目标测试环境及授权。
 
 ## 1. 安装与构建
 
@@ -22,24 +22,34 @@ node packages/cli/dist/index.js --help
 
 ## 2. 手填配置、全部七画像
 
-在被测项目创建 `.crosscheck/system`、`.crosscheck/requirements`、`.crosscheck/cases`。以下各代码块分别保存为标注文件。密钥值只在环境变量，不写 YAML、条款、用例或命令参数。
-
-`.crosscheck/config.yaml`（模型 ID 是示例，用户应替换成自己账户可用、已授权的型号；不保证厂商长期可用）
+在用户主目录创建 `~/.crosscheck/config.yaml`，以下模型 ID、URL 和密钥均为占位示例，必须替换。此文件包含明文模型密钥：不要提交、共享或粘贴到日志；POSIX 系统应限制目录和文件权限（例如 `chmod 700 ~/.crosscheck && chmod 600 ~/.crosscheck/config.yaml`），Windows 应由用户自行设置文件 ACL，程序不会自动提供 ACL 保护。现有全局文件不会被自动创建或覆盖。
 
 ```yaml
 models:
-  extractor: openai:your-extractor-model
-  planner: openai:your-planner-model
-  executor: openai:your-executor-model
-  reviewer: google:your-reviewer-model
-providers: {}
+  extractor: custom:extractor
+  planner: custom:planner
+  executor: custom:executor
+  reviewer: custom:reviewer
+  fallback: {}
+providers:
+  custom:
+    type: openai-compatible
+    baseURL: https://example.test/v1
+    apiKey: 替换为实际密钥
+capabilities: {}
+pricing: {}
+```
+
+全局配置是唯一模型配置来源；项目中旧的模型配置不迁移、不覆盖全局配置。非 ollama 模型应配置非空 apiKey，openai-compatible 必须配置 HTTP(S) baseURL，不允许 URL 用户信息。运行开始时固定配置；仅轮换密钥不会改变恢复指纹，其他公开模型配置变化会阻止不兼容的 resume。离线报告和审核不需要全局模型密钥。
+
+在被测项目创建 `.crosscheck/system`、`.crosscheck/requirements`、`.crosscheck/cases`。项目配置和其他工件不要写模型密钥。以下各代码块分别保存为标注文件。
+
+项目 `.crosscheck/config.yaml`
+
+```yaml
 defaultEnvironment: local
 budget:
   perCase: { steps: 30, tokens: 100000, minutes: 5 }
-capabilities:
-  "openai:your-executor-model": { images: true }
-  "google:your-reviewer-model": { images: true }
-pricing: {}
 requirementsDocs: []
 ```
 
@@ -199,11 +209,9 @@ node packages/cli/dist/manual-approve.js E:/my-test-project 审核人 我已逐�
 
 ## 5. 用户授权后的真实运行
 
-以下环境变量需要用户自行提供，不要把命令带真实密钥提交。离线 report 不需要任何模型 key。
+模型密钥按上文填写全局配置；被测系统身份凭证仍使用环境变量，不要把含真实密钥的命令提交。离线 report 不需要模型 key。
 
 ```powershell
-$env:OPENAI_API_KEY = '<用户本地提供>'
-$env:GOOGLE_GENERATIVE_AI_API_KEY = '<用户本地提供>'
 # 只有使用 apiUser 时需要；完整值由测试环境决定
 $env:TEST_API_TOKEN = 'Bearer <用户本地提供>'
 pnpm crosscheck run --project E:/my-test-project --environment local --module M --case M-TC-1

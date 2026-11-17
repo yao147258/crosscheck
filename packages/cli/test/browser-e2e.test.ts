@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { once } from 'node:events';
-import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { createServer, type RequestListener } from 'node:http';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -53,12 +53,12 @@ async function setup(images: boolean) {
   });
   const root = await mkdtemp(path.join(tmpdir(), 'browser-cli-')); roots.push(root);
   const artifacts = new ArtifactStore(root);
-  await artifacts.writeYaml('config.yaml', {
+  const userHome = path.join(root, 'user'); await mkdir(path.join(userHome, '.crosscheck'), { recursive: true });
+  await writeFile(path.join(userHome, '.crosscheck', 'config.yaml'), JSON.stringify({
     models: { extractor: 'mock:x', planner: 'mock:p', executor: 'mock:executor', reviewer: 'mock:reviewer' },
-    providers: { mock: { type: 'ollama' } }, defaultEnvironment: 'local',
-    capabilities: { 'mock:executor': { images: true }, 'mock:reviewer': { images } },
-    budget: { perCase: { steps: 20, tokens: 100000, minutes: 1 } },
-  });
+    providers: { mock: { type: 'ollama' } }, capabilities: { 'mock:executor': { images: true }, 'mock:reviewer': { images } },
+  }));
+  await artifacts.writeYaml('config.yaml', { defaultEnvironment: 'local', budget: { perCase: { steps: 20, tokens: 100000, minutes: 1 } } });
   const files = {
     'environments.yaml': { version: 1, environments: { local: { baseURL: base, healthcheck: `${base}/health`, reset: null } } },
     'auth.yaml': { version: 1, actors: { guest: { kind: 'anonymous' } } },
@@ -94,7 +94,7 @@ describe.skipIf(process.env.CROSSCHECK_REAL_BROWSER !== '1')('构建 CLI 真实 
     let actualCode = 0, stdout = '';
     try {
       stdout = (await exec(process.execPath, [harness, 'run', '--project', s.root], {
-        cwd: repo, env: { ...process.env, CROSSCHECK_TEST_MODE: mode, CROSSCHECK_TEST_BASE: s.base, BROWSER_PASSWORD: secret }, timeout: 20000,
+        cwd: repo, env: { ...process.env, USERPROFILE: path.join(s.root, 'user'), HOME: path.join(s.root, 'user'), CROSSCHECK_TEST_MODE: mode, CROSSCHECK_TEST_BASE: s.base, BROWSER_PASSWORD: secret }, timeout: 20000,
       })).stdout;
     } catch (error: any) {
       if (typeof error.code !== 'number') throw error;

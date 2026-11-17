@@ -5,7 +5,11 @@ import path from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
 import { Approvals, ArtifactStore, ClauseSchema, TestCaseSchema, loadProfile } from '@crosscheck/core';
 import { scriptedModel, type ScriptStep } from '../../agent/src/testing/scripted-model';
-import { cliMain } from '../src/main';
+import { cliMain as realCliMain } from '../src/main';
+const cliMain: typeof realCliMain = (argv, options = {}) => {
+  const index = argv.indexOf('--project');
+  return realCliMain(argv, { ...options, dependencies: { ...options.dependencies, userConfigHome: index >= 0 ? path.join(argv[index + 1]!, 'user') : undefined } });
+};
 
 vi.mock('node:fs/promises', { spy: true });
 
@@ -35,7 +39,9 @@ async function tempRoot() {
 async function project(docs: string[] = ['docs/需求.md']) {
   const root = await tempRoot();
   const artifacts = new ArtifactStore(root);
-  await artifacts.writeYaml('config.yaml', { models: { extractor: 'mock:x', planner: 'mock:p', executor: 'mock:e', reviewer: 'mock:r' }, providers: { mock: { type: 'ollama' } }, requirementsDocs: docs });
+  await mkdir(path.join(root, 'user', '.crosscheck'), { recursive: true });
+  await writeFile(path.join(root, 'user', '.crosscheck', 'config.yaml'), JSON.stringify({ models: { extractor: 'mock:x', planner: 'mock:p', executor: 'mock:e', reviewer: 'mock:r' }, providers: { mock: { type: 'ollama' } } }));
+  await artifacts.writeYaml('config.yaml', { requirementsDocs: docs });
   await mkdir(path.join(root, 'docs'));
   await writeFile(path.join(root, 'docs/需求.md'), doc);
   return { root, artifacts };

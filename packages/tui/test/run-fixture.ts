@@ -42,7 +42,7 @@ export async function createFailedRun(clauseCount = 2) {
     judgements({ E1: 'fail', E2: 'fail', E3: 'pass' }, ids(opts.prompt), '复核方理由'),
   ]).doGenerate(opts) });
   const outcome = await runSuite({
-    artifacts,
+    artifacts, userConfigHome: project.userHome,
     modelOptions: { env: {}, factories: { ollama: ({ modelId }: { modelId: string }) => modelId === 'e' ? executor : reviewer } },
     resilience: { retries: 0, baseDelayMs: 0 },
     env: {},
