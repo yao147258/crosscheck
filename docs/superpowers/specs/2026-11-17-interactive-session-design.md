@@ -35,22 +35,21 @@
 
 1. TTY 门禁：`stdin`/`stdout` 都不是 TTY 时打印提示并返回退出码 2（和 `review` 一致）；不在这里强制解析确认人身份——确认人只在真正进入 `/review` 时才解析，这样纯聊天或跑 `/plan` 不需要先配置 `CROSSCHECK_REVIEWER`。
 2. 组装三个注入给 `@crosscheck/tui` 的行为，调用其导出的 `runSession()`：
-   - `runSlashCommand(line)`：见第 4 节。
-   - `resolveReview()`：首次执行 `/review` 时调用，内部就是现在 `reviewCommand` 里那几行——`resolveReviewer(env)` → `new ArtifactStore(args.project)` → `ReviewSession.open(...)`；解析失败把错误信息作为聊天消息展示，不中断会话。解析成功后的 `ReviewSession` 在本次进程内缓存复用（和 `reviewCommand` 单次运行期间只开一次的语义一致）。
+   - `runSlashCommand(tokens)`：见第 4 节，返回一个判别联合结果，`tui` 一侧只认结果的 `kind`，不自己解析任何命令语法。
+   - `resolveReview()`：第一次需要进入审核模式时调用，内部就是现在 `reviewCommand` 里那几行——`resolveReviewer(env)` → `new ArtifactStore(args.project)` → `ReviewSession.open(...)`；解析失败把错误信息作为聊天消息展示，不中断会话。解析成功后的 `ReviewSession` 在本次进程内缓存复用（和 `reviewCommand` 单次运行期间只开一次的语义一致）。
    - `chatReply(history, text)`：见第 5 节。
 
 ## 4. 斜杠命令分发
 
-会话里一行输入先按开头字符分流：
+`ChatView` 把一行输入按开头字符分流，**不自己解析任何命令语法**——所有解析都在 `cli` 一侧的 `runSlashCommand` 里完成，`tui` 只认返回结果的 `kind`：
 
-- 不以 `/` 开头 → 整行作为聊天消息，走第 5 节。
-- `/exit` → 结束会话，退出码 0（由 `tui` 的 `SessionApp` 调用 `exit(0)`）。
-- `/review ...`（去掉开头 `/` 后首个词是 `review`）→ **不**走 `cliMain`，而是用现有 `parseArgs(['review', ...rest])` 解出 `view/module/runId`，交给 `SessionApp` 切换到"嵌入式审核模式"：直接挂载现有的 `<App env={...} initial={initialRoute(...)} onExitToParent={...} />`（见第 6 节），完整复用 `app.tsx`/`routes.ts`/`views/*` 现有代码，不新写任何审核逻辑。
-- 其余（`/init /reqs /plan /run /report /help`）→ 去掉开头 `/`，按空白切词，直接调用现有的 `cliMain(tokens, { log: pushLine, dependencies, signal })`。这一步完全复用现有参数校验、各命令实现和退出码语义；唯一的差别是 `log` 把输出收集成这条消息的内容，而不是写 `console.log`，执行完也不会让进程退出。
-  - 这里天然要求 `cliMain` 不会再走到它自己的 `review` 分支（因为 `review` 已经在上一步被截走），所以不会出现"已经在 Ink 渲染树里又调用一次 `runReview()` 自己 `render()`"的嵌套问题。
-  - `cliMain` 抛出的 `GateError`/`InterruptedError`/宿主错误都已经被其自身的 try/catch 转成 `(log 消息, 退出码)`，这里直接拿返回值展示即可，不需要额外处理。
-
-未知斜杠命令（如 `/foo`）会被 `cliMain`/`parseArgs` 当成未知命令报错，错误信息原样展示为一条消息，不影响会话继续。
+- 不以 `/` 开头 → 整行作为聊天消息，走第 5 节，不调用 `runSlashCommand`。
+- 以 `/` 开头 → 去掉开头 `/`、按空白切词成 `tokens`（空输入即 `[]`），调用 `runSlashCommand(tokens)`，得到以下三种结果之一：
+  - `{ kind: 'exit' }`：`tokens[0] === 'exit'`。`SessionApp` 调用 `exit(0)` 结束会话。
+  - `{ kind: 'review'; view?: ReviewView; module?: string; runId?: string }`：`tokens[0] === 'review'`，内部用现有 `parseArgs(['review', ...tokens.slice(1)])` 解出 `view/modules[0]/runId`（解析失败则落到下面的 `log` 结果，`code` 为 2）。`SessionApp` 收到后用 `resolveReview()` 拿到/复用 `ReviewSession`，再用 `tui` 自己已有的 `initialRoute(view, module, runId)` 算出路由，挂载 `<App env={...} initial={route} onExitToParent={...} />`（见第 6 节），完整复用 `app.tsx`/`routes.ts`/`views/*` 现有代码，不新写任何审核逻辑。
+  - `{ kind: 'log'; code: number; lines: string[] }`：其余所有情况（`init/reqs/plan/run/report/help`、未知命令、`review` 参数不合法）。实现上除 `review` 外都是直接把 `tokens` 转给现有的 `cliMain(tokens, { log: pushLine, dependencies, signal })`，`log` 把输出收集进 `lines` 而不是写 `console.log`；`review` 参数不合法时在 `runSlashCommand` 内部捕获 `parseArgs` 抛出的错误，包成同样的 `{ kind: 'log', code: 2, lines: [错误信息] }`。`SessionApp` 把 `lines`（用 `code` 标注成功/失败）展示为一条消息，不退出会话。
+  - 这里天然保证 `cliMain` 永远不会走到它自己的 `review` 分支（`review` 已经在 `runSlashCommand` 内被截走，只用 `parseArgs` 解析，不调用 `reviewCommand`），所以不会出现"已经在 Ink 渲染树里又调用一次 `runReview()` 自己 `render()`"的嵌套问题。
+  - `cliMain` 抛出的 `GateError`/`InterruptedError`/宿主错误都已经被其自身的 try/catch 转成 `(log 消息, 退出码)`，这里直接拿返回值放进 `lines`/`code` 即可，不需要额外处理。
 
 ## 5. 聊天（自由文本）
 
@@ -59,8 +58,8 @@
 1. 用已有的 `resolveModels(config, 'planner', deps, log)`（`context.ts` 里现成的函数）取模型候选；多个候选时和其它角色一样，主模型失败再退备用。
 2. 系统提示词：声明助手只能基于只读摘要回答问题、不能执行任何写入或确认动作、遇到"请确认/修改"类请求要引导用户用对应斜杠命令或 `/review` 自己操作。
 3. 只读上下文：复用 `@crosscheck/tui` 已有的 `loadHomeSummary(session)`（`state/home.ts`，`HomeView` 已经在用）取画像/条款/用例待处理数量、运行次数；若 `ReviewSession` 还未解析（用户还没碰过 `/review`），上下文里这部分留空并说明"尚未加载项目摘要"，不强制触发确认人解析。
-4. 用 `ai` SDK 的 `streamText`（`tools: {}`，不授予任何工具）把"系统提示 + 摘要 + 最近若干轮历史 + 本次输入"传给模型，流式文本追加到当前这条助手消息里。
-5. 不接 `BudgetTracker`、不接 `deps.resilience`：聊天是非门禁的辅助功能，失败（网络错误、模型报错）直接把错误文本当成助手回复展示，用户可以重新问一遍，不影响其它斜杠命令。
+4. 用 `@crosscheck/models` 已有的 `callWithFallback(models, fn, opts)` 做主备切换与重试（和其它角色一致，`opts` 原样转发 `deps.resilience`），`fn` 内调用 `ai` SDK 的 `generateText({ model, system, messages })`（不传 `tools`，不授予任何工具），等拿到完整文本后一次性追加为一条助手消息——和现有代码里用 `generateText` 的风格一致，不引入流式接口。
+5. 不接 `BudgetTracker`：聊天没有"按用例"预算的概念，不是门禁流程。失败（网络错误、模型报错、`callWithFallback` 耗尽候选）直接把错误文本当成助手回复展示，用户可以重新问一遍，不影响其它斜杠命令。
 
 聊天历史只保存在 `SessionApp` 的内存状态里，随进程退出丢弃。
 
@@ -83,13 +82,17 @@ packages/tui/src/
 `RunSessionOptions`（`session.ts` 导出）大致形状：
 
 ```ts
+type SlashCommandResult =
+  | { kind: 'exit' }
+  | { kind: 'review'; view?: ReviewView; module?: string; runId?: string }
+  | { kind: 'log'; code: number; lines: string[] };
+
 interface RunSessionOptions {
-  artifacts: ArtifactStore;
   editor: EditorHost;        // 复用，/review 内编辑仍要用
   open: (file: string) => Promise<void>;
   resolveReview: () => Promise<ReviewSession>;        // 懒解析，失败抛错由 SessionApp 捕获展示
-  runSlashCommand: (line: string) => Promise<{ code: number; lines: string[] }>;
-  chatReply: (history: ChatMessage[], text: string) => AsyncIterable<string>;
+  runSlashCommand: (tokens: string[]) => Promise<SlashCommandResult>;
+  chatReply: (history: ChatMessage[], text: string) => Promise<string>;
   signal?: AbortSignal;
 }
 ```
@@ -110,12 +113,12 @@ interface RunSessionOptions {
 | `parseArgs([])` | 返回 `{command:'session',...}`，不再抛错 |
 | `sessionCommand` | 非 TTY 报错退出码 2；`resolveReview` 失败不影响后续聊天/命令调用 |
 | `runSlashCommand` | `/exit`、`/help`、未知命令、以及至少一个转发给 `cliMain` 的真实命令（用假 `dependencies` 验证不触发真实模型调用也能拿到预期错误码） |
-| `chatReply` | 假模型断言：系统提示包含只读限制说明、历史记录被传入、流式分片被正确拼接 |
+| `chatReply` | 假模型断言：系统提示包含只读限制说明、历史记录被传入、返回文本原样作为一条消息；首选模型失败时验证回退到备用模型（复用 `callWithFallback` 的既有测试覆盖，这里只断言接线正确） |
 | `app.tsx` 的 `onExitToParent` | ink-testing-library：栈顶 `Esc`/`q` 调用回调而不是 `exit()`；不传时行为与现状快照一致（回归） |
 | `SessionApp` / `ChatView` | ink-testing-library：输入回显、backspace、Enter 提交、mode 在 chat/review 间切换、busy 态拒绝重复提交 |
 | CLI e2e | 延续 `packages/cli/test/e2e.test.ts` 风格，补一条"空参数 + 非 TTY → 退出码 2"的用例 |
 
-所有测试不访问网络，不消耗真实 token（聊天测试用假模型/假 `streamText` 替身）。
+所有测试不访问网络，不消耗真实 token（聊天测试用 `ai/test` 的 `MockLanguageModelV4` 替身，和 `packages/cli/test/harness.ts` 的既有做法一致）。
 
 ## 9. 验收
 
