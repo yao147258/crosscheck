@@ -7,6 +7,8 @@ import * as core from '../src/index';
 const clause = core.ClauseSchema.parse({ id: 'M-AC-1', text: '原条款', source: { file: '需求.md', line: 1, excerpt: '' } });
 const tc = core.TestCaseSchema.parse({ id: 'M-TC-1', covers: [clause.id], actor: 'guest', steps: ['打开页面'], expectations: [{ id: 'E1', text: '可见', evidence: ['dom'] }] });
 const models = { extractor: 'test:a', planner: 'test:b', executor: 'test:c', reviewer: 'test:d' };
+const userConfig = core.UserModelConfigSchema.parse({ models });
+const loadInputs = (store: core.ArtifactStore, options?: core.RunInputOptions) => core.loadVerifiedRunInputs(store, options, userConfig);
 const files = () => ({
   'environments.yaml': { version: 1, environments: { local: { baseURL: 'http://localhost:3000', healthcheck: 'http://localhost:3000/health', reset: null } } },
   'auth.yaml': { version: 1, actors: { guest: { kind: 'anonymous' } } },
@@ -64,10 +66,21 @@ describe('画像与运行输入', () => {
     await rm(store.resolve('system/pages.yaml'));
     await expect(core.loadProfile(store)).rejects.toThrow('pages.yaml');
   });
+  it('短密钥与普通业务文本部分重合不会阻止运行输入', async () => {
+    const { store } = await setup();
+    const config = core.UserModelConfigSchema.parse({ models, providers: { test: { type: 'ollama', apiKey: 'a' } } });
+    expect((await core.loadVerifiedRunInputs(store, {}, config)).fingerprint).toMatch(/^sha256:/);
+  });
+  it('项目输入包含全局密钥时拒绝计算指纹', async () => {
+    const { store } = await setup();
+    await store.saveClauses('M', [{ ...clause, text: '泄漏 KEY_SENTINEL_94827' }]);
+    const secretConfig = core.UserModelConfigSchema.parse({ models, providers: { test: { type: 'ollama', apiKey: 'KEY_SENTINEL_94827' } } });
+    await expect(core.loadVerifiedRunInputs(store, {}, secretConfig)).rejects.toThrow(/密钥/);
+  });
   it('未确认用例保留 BLOCKED，普通缺失 fixture 留待准备', async () => {
     const { store } = await setup();
     await store.saveCases('M', [{ ...tc, fixtures: ['现场造数'] }]);
-    const input = await core.loadVerifiedRunInputs(store);
+    const input = await loadInputs(store);
     expect(input.selection.ready).toEqual([]);
     expect(input.selection.blocked).toEqual([{ id: tc.id, reason: '未确认' }]);
     expect(input.missingFixtures).toEqual(['现场造数']);
@@ -79,15 +92,15 @@ describe('画像与运行输入', () => {
     const { store, approvals } = await setup();
     approvals.approveCase(tc, [clause], '人工');
     await approvals.save(store);
-    const first = await core.loadVerifiedRunInputs(store);
+    const first = await loadInputs(store);
     expect(first.selection.ready).toEqual([tc]);
     expect(first.approvals.cases[tc.id]).toBe('approved');
-    expect((await core.loadVerifiedRunInputs(store)).fingerprint).toBe(first.fingerprint);
+    expect((await loadInputs(store)).fingerprint).toBe(first.fingerprint);
     const changed = { ...clause, text: '修改条款并重新确认' };
     await store.saveClauses('M', [changed]);
     approvals.approve('clause', changed.id, changed, '人工');
     await approvals.save(store);
-    const next = await core.loadVerifiedRunInputs(store);
+    const next = await loadInputs(store);
     expect(next.selection.ready).toEqual([]);
     expect(next.selection.blocked[0]?.id).toBe(tc.id);
     expect(next.approvals.cases[tc.id]).toBe('stale');
@@ -95,36 +108,36 @@ describe('画像与运行输入', () => {
   });
   it('显式空筛选不选用例，全部无功能画像可显式为空但环境仍需明确', async () => {
     const { store, profile } = await setup();
-    expect((await core.loadVerifiedRunInputs(store, { caseIds: [] })).cases).toEqual([]);
-    expect((await core.loadVerifiedRunInputs(store, { modules: [] })).cases).toEqual([]);
+    expect((await loadInputs(store, { caseIds: [] })).cases).toEqual([]);
+    expect((await loadInputs(store, { modules: [] })).cases).toEqual([]);
     expect(core.ProfileSchema.safeParse({ ...profile, 'environments.yaml': { version: 1, environments: {} }, 'auth.yaml': { version: 1, actors: {} } }).success).toBe(true);
     await store.writeYaml('config.yaml', { models });
-    await expect(core.loadVerifiedRunInputs(store)).rejects.toThrow('环境');
+    await expect(loadInputs(store)).rejects.toThrow('环境');
   });
   it('未确认全局画像时拒绝，即使用例过滤为空', async () => {
     const { store, approvals } = await setup();
     approvals.revoke('profile', 'auth.yaml');
     await approvals.save(store);
-    await expect(core.loadVerifiedRunInputs(store, { caseIds: [] })).rejects.toThrow(core.GateError);
+    await expect(loadInputs(store, { caseIds: [] })).rejects.toThrow(core.GateError);
   });
   it('拒绝缺 actor、未知筛选和不存在默认环境', async () => {
     const { store } = await setup();
     await store.saveCases('M', [{ ...tc, actor: 'missing' }]);
-    await expect(core.loadVerifiedRunInputs(store)).rejects.toThrow(/actor|角色/);
+    await expect(loadInputs(store)).rejects.toThrow(/actor|角色/);
     await store.saveCases('M', [tc]);
-    await expect(core.loadVerifiedRunInputs(store, { modules: ['missing'] })).rejects.toThrow('模块');
-    await expect(core.loadVerifiedRunInputs(store, { caseIds: ['M-TC-9'] })).rejects.toThrow('用例');
-    await expect(core.loadVerifiedRunInputs(store, { environment: 'missing' })).rejects.toThrow('环境');
+    await expect(loadInputs(store, { modules: ['missing'] })).rejects.toThrow('模块');
+    await expect(loadInputs(store, { caseIds: ['M-TC-9'] })).rejects.toThrow('用例');
+    await expect(loadInputs(store, { environment: 'missing' })).rejects.toThrow('环境');
     await store.writeYaml('config.yaml', { models, defaultEnvironment: 'missing' });
-    await expect(core.loadVerifiedRunInputs(store)).rejects.toThrow('环境');
+    await expect(loadInputs(store)).rejects.toThrow('环境');
   });
   it('跨模块重复 ID 即使过滤也拒绝', async () => {
     const { store } = await setup();
     await store.saveClauses('N', [clause]);
-    await expect(core.loadVerifiedRunInputs(store, { modules: ['M'] })).rejects.toThrow('条款');
+    await expect(loadInputs(store, { modules: ['M'] })).rejects.toThrow('条款');
     await store.saveClauses('N', []);
     await store.saveCases('N', [tc]);
-    await expect(core.loadVerifiedRunInputs(store, { modules: ['M'] })).rejects.toThrow('用例');
+    await expect(loadInputs(store, { modules: ['M'] })).rejects.toThrow('用例');
   });
   it('拒绝非法 auth 密钥字段、环境引用、reset 和 SQL 查询引用', async () => {
     const { store } = await setup();

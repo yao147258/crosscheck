@@ -33,11 +33,11 @@ const config = ConfigSchema.parse({
     fallback: { executor: 'anthropic:claude-sonnet-4-6' },
   },
   providers: {
-    qwen: { type: 'openai-compatible', baseURL: 'https://dashscope.example/v1', apiKeyEnv: 'DASHSCOPE_API_KEY' },
+    qwen: { type: 'openai-compatible', baseURL: 'https://dashscope.example/v1' },
   },
 });
 
-const env = { OPENAI_API_KEY: 'sk-o', ANTHROPIC_API_KEY: 'sk-a', DASHSCOPE_API_KEY: 'sk-q' };
+const apiKeys = { openai: 'sk-o', anthropic: 'sk-a', qwen: 'sk-q' };
 
 describe('parseModelRef', () => {
   it('只在第一个冒号处切分', () => {
@@ -51,28 +51,34 @@ describe('parseModelRef', () => {
 
 describe('resolveRole', () => {
   it('主模型在前、备用模型在后', () => {
-    const c = resolveRole(config, 'executor', { env, factories });
+    const c = resolveRole(config, 'executor', { apiKeys, factories });
     expect(c.map((x) => x.ref)).toEqual(['openai:gpt-5.4', 'anthropic:claude-sonnet-4-6']);
     expect(c[0]?.model).toBe('openai/gpt-5.4');
   });
 
-  it('密钥从配置指定的环境变量读取', () => {
+  it('密钥从独立的全局密钥集合读取', () => {
     seen.length = 0;
-    resolveRole(config, 'reviewer', { env, factories });
+    resolveRole(config, 'reviewer', { apiKeys, factories });
     expect(seen[0]).toEqual({ name: 'qwen', modelId: 'qwen-max', apiKey: 'sk-q', baseURL: 'https://dashscope.example/v1' });
+  });
+
+  it('从独立的全局密钥集合读取密钥而不是环境变量', () => {
+    seen.length = 0;
+    resolveRole(config, 'reviewer', { env: { DASHSCOPE_API_KEY: 'wrong' }, apiKeys: { qwen: 'direct-key' }, factories });
+    expect(seen[0]?.apiKey).toBe('direct-key');
   });
 
   it('ollama 不需要密钥', () => {
     expect(resolveRole(config, 'planner', { env: {}, factories })[0]?.ref).toBe('ollama:qwen2.5:7b');
   });
 
-  it('缺少环境变量时给出可读错误', () => {
-    expect(() => resolveRole(config, 'executor', { env: {}, factories })).toThrow(/OPENAI_API_KEY/);
+  it('缺少全局密钥时给出可读错误', () => {
+    expect(() => resolveRole(config, 'executor', { env: {}, factories })).toThrow(/apiKey/);
   });
 
   it('未知的 provider 报错', () => {
     const bad = ConfigSchema.parse({ ...config, models: { ...config.models, reviewer: 'nope:x' } });
-    expect(() => resolveRole(bad, 'reviewer', { env, factories })).toThrow(/未知的 provider：nope/);
+    expect(() => resolveRole(bad, 'reviewer', { apiKeys, factories })).toThrow(/未知的 provider：nope/);
   });
 });
 

@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { ArtifactStore, ClauseSchema, TestCaseSchema, type Clause, type TestCase } from '@crosscheck/core';
@@ -31,10 +31,12 @@ export async function createProject(options: { profile?: boolean } = {}) {
   const root = await mkdtemp(path.join(os.tmpdir(), 'tui-'));
   roots.push(root);
   const artifacts = new ArtifactStore(root);
-  await artifacts.writeYaml('config.yaml', { models: { extractor: 'mock:x', planner: 'mock:p', executor: 'mock:e', reviewer: 'mock:r' }, providers: { mock: { type: 'ollama' } }, defaultEnvironment: 'local', budget: { perCase: { steps: 20, tokens: 100000, minutes: 1 } } });
+  const userHome = path.join(root, 'user'); await mkdir(path.join(userHome, '.crosscheck'), { recursive: true });
+  await writeFile(path.join(userHome, '.crosscheck', 'config.yaml'), JSON.stringify({ models: { extractor: 'mock:x', planner: 'mock:p', executor: 'mock:e', reviewer: 'mock:r' }, providers: { mock: { type: 'ollama' } } }));
+  await artifacts.writeYaml('config.yaml', { defaultEnvironment: 'local', budget: { perCase: { steps: 20, tokens: 100000, minutes: 1 } } });
   if (options.profile !== false) {
     for (const [name, value] of Object.entries(PROFILE_FILES_CONTENT)) await artifacts.writeYaml(`system/${name}`, value);
   }
   const session = await ReviewSession.open(artifacts, '测试人');
-  return { root, artifacts, session };
+  return { root, userHome, artifacts, session };
 }

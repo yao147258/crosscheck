@@ -34,6 +34,8 @@ pnpm --filter crosscheck exec crosscheck --help
 
 普通文本使用当前工作目录项目的 `planner` 模型配置和当前磁盘摘要（待审核画像、条款、用例和运行次数），无需确认人身份；聊天模型没有工具或确认权限，不能修改项目。模型配置或摘要读取失败会显示错误，其他命令仍可使用。聊天历史仅保存在内存中。带参数的一次性 CLI 及其退出码保持不变。
 
+模型的四个角色、`providers`（含明文 `apiKey`、`baseURL`）、`capabilities` 和 `pricing` 配置于用户级 `~/.crosscheck/config.yaml`；项目 `.crosscheck/config.yaml` 只负责预算、`requirementsDocs` 与默认环境，不能覆盖模型配置。文件格式、权限及安全注意事项见[手工接入指南](docs/manual-integration.md)。程序不会自动覆盖全局文件或迁移旧项目；报告和审核可离线运行。全局密钥为明文，务必限制文件权限并避免分享；POSIX 可使用 `chmod 600`，Windows 须自行配置 ACL。
+
 各命令支持 `--project <目录>`。重跑生成命令保留仍有效的已确认条目；中断丢弃尚未写盘的合成草稿，保留已经完整写入的文件，不承诺跨文件事务回滚。
 
 `review` 要求 stdin、stdout 都是 TTY，管道/重定向环境拒绝并退出 2。确认人优先取去除首尾空白后的 `CROSSCHECK_REVIEWER`，否则取系统用户名；无法确定时退出 2。编辑器依次取 `VISUAL`、`EDITOR`，支持双引号参数且不经过 shell；未设置时显示提示。外部编辑器通过 Ink 暂停 TUI 后启动，结束或出错后恢复；已在 Windows ConPTY 验证事件式/同步读入的命令行编辑器交互输入、连续保存与错误恢复，不代表已验收所有平台或原生 GUI 编辑器。`q` 正常退出、`Esc` 返回（初始视图退出），退出码 0；`Ctrl+C` 中断退出 2。写操作期间键盘退出会提示等待；外部 signal、SIGINT/SIGTERM 取消则等待当前操作结束后退出 2，不截断写盘。查看原始截图证据当前不支持；打开文本只请求系统启动，不保证宿主程序已显示。

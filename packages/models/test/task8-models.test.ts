@@ -6,16 +6,16 @@ const config = ConfigSchema.parse({ models: { extractor: 'openai:a', planner: 'o
 describe('Task8 模型边界', () => {
   it('备用缺 key 仅跳过并警告，主模型缺 key 仍失败', () => {
     const warnings: string[] = [];
-    const chain = resolveRole(config, 'executor', { env: { OPENAI_API_KEY: 'test' }, onWarning: warning => warnings.push(warning) });
+    const chain = resolveRole(config, 'executor', { apiKeys: { openai: 'test' }, onWarning: warning => warnings.push(warning) });
     expect(chain.map(c => c.ref)).toEqual(['openai:a']);
-    expect(warnings.join()).toMatch(/google:c.*GOOGLE_GENERATIVE_AI_API_KEY/);
-    expect(() => resolveRole(config, 'executor', { env: {}, onWarning: warning => warnings.push(warning) })).toThrow(/OPENAI_API_KEY/);
+    expect(warnings.join()).toMatch(/google:c.*apiKey/);
+    expect(() => resolveRole(config, 'executor', { env: {}, onWarning: warning => warnings.push(warning) })).toThrow(/apiKey/);
   });
   it('备用未知 provider 或缺 baseURL 不被缺 key 掩盖', () => {
     const bad = ConfigSchema.parse({ ...config, providers: { broken: { type: 'openai-compatible', apiKeyEnv: 'MISSING_KEY' } }, models: { ...config.models, fallback: { executor: 'broken:x' } } });
-    expect(() => resolveRole(bad, 'executor', { env: { OPENAI_API_KEY: 'test' } })).toThrow(/baseURL/);
+    expect(() => resolveRole(bad, 'executor', { apiKeys: { openai: 'test' } })).toThrow(/baseURL/);
     const unknown = ConfigSchema.parse({ ...config, models: { ...config.models, fallback: { executor: 'unknown:x' } } });
-    expect(() => resolveRole(unknown, 'executor', { env: { OPENAI_API_KEY: 'test' } })).toThrow(/未知/);
+    expect(() => resolveRole(unknown, 'executor', { apiKeys: { openai: 'test' } })).toThrow(/未知/);
   });
   it('别名、规范 endpoint 和备用模型均参与同源警告', () => {
     const alias = ConfigSchema.parse({ ...config, providers: { alias: { type: 'openai', baseURL: 'https://API.OPENAI.COM:443/v1/' } }, models: { ...config.models, reviewer: 'alias:b' } });

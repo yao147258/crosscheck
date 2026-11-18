@@ -5,13 +5,14 @@ import {
 } from '@crosscheck/core';
 import { generateCases } from '@crosscheck/planner';
 import type { CliArgs } from './args';
-import { resolveModels, withInterrupt, type CommandDependencies } from './context';
+import { loadModelContext, resolveModels, withInterrupt, type CommandDependencies } from './context';
 
 export async function planCommand(args: CliArgs, log: (s: string) => void, deps: CommandDependencies = {}, signal?: AbortSignal): Promise<number> {
   return withInterrupt(signal, async (sig) => {
     const module = args.modules![0]!;
     const artifacts = new ArtifactStore(args.project);
-    const config = await artifacts.loadConfig();
+    const context = await loadModelContext(artifacts, deps);
+    const { config, redactor } = context;
     const approvals = await Approvals.load(artifacts);
     sig.throwIfAborted();
     let profile: Profile;
@@ -33,23 +34,23 @@ export async function planCommand(args: CliArgs, log: (s: string) => void, deps:
     const cases = await artifacts.loadCases(module);
     const { approved } = partitionCases(cases, await loadCoveredClauses(artifacts, cases), approvals);
     sig.throwIfAborted();
-    const models = resolveModels(config, 'planner', deps, log);
+    const models = resolveModels(config, 'planner', context.deps, (line) => log(redactor.text(line)));
     sig.throwIfAborted();
     const result = await generateCases({
       module, clauses: ready, approvals, profile, knownCases: approved, models,
       budget: new BudgetTracker(config.budget.perCase),
       signal: sig, resilience: deps.resilience,
-    });
+    }).catch((error: unknown) => { throw new Error(redactor.text(error instanceof Error ? error.message : '模型调用失败')); });
     sig.throwIfAborted();
-    if (result.status !== 'done') { log(`用例生成未完成（${result.reason}）：${result.detail}；未修改用例文件`); return 2; }
-    const merged = mergeDrafts(approved, result.output);
+    if (result.status !== 'done') { log(redactor.text(`用例生成未完成（${result.reason}）：${result.detail}；未修改用例文件`)); return 2; }
+    const merged = mergeDrafts(approved, redactor.value(result.output));
     sig.throwIfAborted();
     await artifacts.saveCases(module, merged.items);
     sig.throwIfAborted();
-    for (const dropped of merged.dropped) log(`丢弃草稿 ${dropped.id}：${dropped.reason}`);
+    for (const dropped of merged.dropped) log(redactor.text(`丢弃草稿 ${dropped.id}：${dropped.reason}`));
     const cov = coverage(ready, merged.items);
     log(`模块 ${module}：保留已确认 ${merged.kept} 个，写入草稿 ${merged.added} 个；条款覆盖 ${cov.covered.length}/${ready.length}`);
-    if (cov.uncovered.length) log(`未覆盖条款：${cov.uncovered.join(', ')}`);
+    if (cov.uncovered.length) log(redactor.text(`未覆盖条款：${cov.uncovered.join(', ')}`));
     log(`请运行 crosscheck review cases --module ${module} 审核`);
     return 0;
   });

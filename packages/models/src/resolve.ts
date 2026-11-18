@@ -1,7 +1,7 @@
 import { PROVIDER_TYPES, type Config, type ProviderType, type Role } from '@crosscheck/core';
 import type { LanguageModel } from 'ai';
 import { ModelConfigError, parseModelRef } from './model-ref';
-import { builtinFactories, DEFAULT_KEY_ENV, type ProviderFactory } from './providers';
+import { builtinFactories, type ProviderFactory } from './providers';
 
 export interface ModelCandidate {
   ref: string;
@@ -10,6 +10,7 @@ export interface ModelCandidate {
 
 export interface ResolveOptions {
   env?: Record<string, string | undefined>;
+  apiKeys?: Record<string, string | undefined>;
   factories?: Partial<Record<ProviderType, ProviderFactory>>;
   /** 仅备用模型缺密钥可跳过；未提供回调时写标准警告。 */
   onWarning?: (warning: string) => void;
@@ -32,12 +33,10 @@ function descriptor(ref: string, config: Config) {
 }
 
 export function resolveModelRef(ref: string, config: Config, opts: ResolveOptions = {}): ModelCandidate {
-  const env = opts.env ?? process.env;
   // 结构错误优先于缺 key，不能被 fallback 的跳过策略掩盖。
   const { provider, modelId, custom, type } = descriptor(ref, config);
-  const keyEnv = custom?.apiKeyEnv ?? DEFAULT_KEY_ENV[type];
-  const apiKey = keyEnv ? env[keyEnv] : undefined;
-  if (keyEnv && !apiKey) throw new MissingModelKeyError(`模型 ${ref} 需要环境变量 ${keyEnv}`);
+  const apiKey = opts.apiKeys?.[provider];
+  if (type !== 'ollama' && !apiKey) throw new MissingModelKeyError(`模型 ${ref} 需要在全局配置中设置 apiKey`);
   const factory = opts.factories?.[type] ?? builtinFactories[type];
   return { ref, model: factory({ name: provider, modelId, apiKey, baseURL: custom?.baseURL }) };
 }

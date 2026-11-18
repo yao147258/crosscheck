@@ -16,14 +16,6 @@ export interface ProviderSettings {
 
 export type ProviderFactory = (s: ProviderSettings) => LanguageModel;
 
-/** 内置 provider 默认读取的环境变量 */
-export const DEFAULT_KEY_ENV: Partial<Record<ProviderType, string>> = {
-  anthropic: 'ANTHROPIC_API_KEY',
-  openai: 'OPENAI_API_KEY',
-  google: 'GOOGLE_GENERATIVE_AI_API_KEY',
-  deepseek: 'DEEPSEEK_API_KEY',
-};
-
 export const builtinFactories: Record<ProviderType, ProviderFactory> = {
   anthropic: (s) => createAnthropic({ apiKey: s.apiKey, baseURL: s.baseURL })(s.modelId),
   openai: (s) => createOpenAI({ apiKey: s.apiKey, baseURL: s.baseURL })(s.modelId),

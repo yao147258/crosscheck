@@ -4,7 +4,7 @@ import path from 'node:path';
 import YAML from 'yaml';
 import type { z } from 'zod';
 import { ModuleCasesSchema, ModuleClausesSchema, type Clause, type TestCase } from '../schema/artifacts';
-import { ConfigSchema, type Config } from '../schema/config';
+import { ProjectConfigSchema, type ProjectConfig } from '../schema/config';
 
 export class ArtifactError extends Error {
   override name = 'ArtifactError';
@@ -170,9 +170,10 @@ export class ArtifactStore {
   async listModules(kind: 'requirements' | 'cases'): Promise<string[]> {
     return (await this.list(kind)).filter((n) => n.endsWith('.yaml')).map((n) => n.slice(0, -'.yaml'.length)).sort();
   }
-  async loadConfig(): Promise<Config> {
-    const cfg = await this.readYaml('config.yaml', ConfigSchema);
+  async loadProjectConfig(): Promise<ProjectConfig> {
+    const cfg = await this.readYaml('config.yaml', ProjectConfigSchema);
     if (!cfg) throw new ArtifactError('找不到 .crosscheck/config.yaml，请先运行 crosscheck init');
     return cfg;
   }
+  async loadConfig(): Promise<ProjectConfig> { return this.loadProjectConfig(); }
 }

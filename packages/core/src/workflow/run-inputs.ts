@@ -1,9 +1,10 @@
 import { Approvals, type ApprovalState } from '../approvals/approvals';
 import { contentHash } from '../approvals/hash';
 import type { Clause, TestCase } from '../schema/artifacts';
-import type { Config } from '../schema/config';
+import { containsModelSecret, publicModelConfig, type Config, type UserModelConfig } from '../schema/config';
 import { PROFILE_FILES, type Profile, type ProfileFile } from '../schema/profile';
 import { ArtifactError, type ArtifactStore } from '../store/artifact-store';
+import { loadUserModelConfig } from '../store/user-config';
 import { assertStoredProfileApproved, selectExecutableCases, type Selection } from './gate';
 
 export interface RunInputOptions { environment?: string; modules?: string[]; caseIds?: string[] }
@@ -36,10 +37,11 @@ function assertKnown(requested: string[] | undefined, available: string[], label
 }
 
 /** 纯读取和验证入口；只有此函数成功返回后，宿主才能启动进程、网络或真实模型。 */
-export async function loadVerifiedRunInputs(store: ArtifactStore, options: RunInputOptions = {}): Promise<VerifiedRunInputs> {
+export async function loadVerifiedRunInputs(store: ArtifactStore, options: RunInputOptions = {}, userConfig?: UserModelConfig): Promise<VerifiedRunInputs> {
   const approvals = await Approvals.load(store);
   const profile = await assertStoredProfileApproved(store, approvals);
-  const config = await store.loadConfig();
+  const user = userConfig ?? await loadUserModelConfig();
+  const config = { ...await store.loadProjectConfig(), ...publicModelConfig(user) };
   const environment = options.environment ?? config.defaultEnvironment;
   if (!environment || !Object.hasOwn(profile['environments.yaml'].environments, environment)) throw new ArtifactError(`运行环境不存在或未指定：${environment ?? '未指定'}`);
   const modules = [...new Set([...(await store.listModules('requirements')), ...(await store.listModules('cases'))])].sort();
@@ -65,5 +67,6 @@ export async function loadVerifiedRunInputs(store: ArtifactStore, options: RunIn
   };
   const selection = selectExecutableCases(cases, clauses, approvals);
   const input = { config, profile, clauses, cases, environment, modules: chosenModules, selection, missingFixtures: [...missingFixtures].sort(), approvals: states };
+  if (containsModelSecret(input, Object.values(user.providers).flatMap(provider => provider.apiKey ? [provider.apiKey] : []))) throw new ArtifactError('运行输入包含模型密钥，拒绝创建指纹');
   return { ...input, fingerprint: contentHash(input) };
 }

@@ -1,4 +1,4 @@
-import { mkdtemp, rm, readdir, readFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, readdir, readFile, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -19,6 +19,11 @@ beforeAll(async () => { await exec(process.execPath, ['scripts/build.mjs'], { cw
 afterEach(async () => { for (const close of closers.splice(0)) await close(); await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))); });
 const secret = 'PRIVATE_SENTINEL_TASK10_8734';
 const attack = '</script><svg onload="globalThis.pwned=1"><img src="https://forbidden.invalid/x" onerror="globalThis.pwned=2">';
+async function makeUserHome(root: string) {
+  const home = path.join(root, 'user'); await mkdir(path.join(home, '.crosscheck'), { recursive: true });
+  await writeFile(path.join(home, '.crosscheck', 'config.yaml'), JSON.stringify({ models: { extractor: 'mock:x', planner: 'mock:p', executor: 'mock:executor', reviewer: 'mock:reviewer' }, providers: { mock: { type: 'ollama' } } }));
+  return home;
+}
 async function server(handler: RequestListener) {
   const s = createServer(handler); s.listen(0, '127.0.0.1'); await once(s, 'listening');
   closers.push(async () => { s.closeAllConnections(); await new Promise<void>(resolve => s.close(() => resolve())); });
@@ -35,8 +40,8 @@ async function setup(options: { browser?: boolean; count?: number; approved?: bo
     res.end(JSON.stringify({ value: 'ok', text: attack, password: secret, access_token: secret }));
   });
   const root = await mkdtemp(path.join(os.tmpdir(), 'cli10-')); roots.push(root);
-  const artifacts = new ArtifactStore(root);
-  await artifacts.writeYaml('config.yaml', { models: { extractor: 'mock:x', planner: 'mock:p', executor: 'mock:executor', reviewer: 'mock:reviewer' }, providers: { mock: { type: 'ollama' } }, defaultEnvironment: 'local', budget: { perCase: { steps: 20, tokens: 10000, minutes: 1 } } });
+  const artifacts = new ArtifactStore(root); await makeUserHome(root);
+  await artifacts.writeYaml('config.yaml', { defaultEnvironment: 'local', budget: { perCase: { steps: 20, tokens: 10000, minutes: 1 } } });
   const files = { 'environments.yaml': { version: 1, environments: { local: { baseURL: base, healthcheck: `${base}/health`, reset: null } } }, 'auth.yaml': { version: 1, actors: { guest: { kind: 'token', env: 'TEST_TOKEN', inject: { kind: 'header', name: 'Authorization' } } } }, 'api-catalog.yaml': { version: 1, operations: {} }, 'pages.yaml': { version: 1, pages: {} }, 'data-model.yaml': { version: 1, queries: {} }, 'fixtures.yaml': { version: 1, fixtures: {} }, 'guardrails.yaml': { allowedHosts: [new URL(base).host] } };
   for (const [name, value] of Object.entries(files)) await artifacts.writeYaml(`system/${name}`, value);
   const clause = ClauseSchema.parse({ id: 'M-AC-1', text: attack, source: { file: '需求.md', line: 1, excerpt: attack } });
@@ -50,7 +55,7 @@ async function setup(options: { browser?: boolean; count?: number; approved?: bo
   return { root, artifacts, base, counts: () => ({ forbidden, actions, active }), clause, approvals };
 }
 async function launch(s: Awaited<ReturnType<typeof setup>>, mode = 'pass', extra: string[] = []) {
-  try { const out = await exec(runtime, [harness, 'run', '--project', s.root, ...extra], { env: { ...process.env, CROSSCHECK_TEST_MODE: mode, CROSSCHECK_TEST_BASE: s.base, TEST_TOKEN: secret }, timeout: 20000 }); return { code: 0, stdout: out.stdout }; }
+  try { const out = await exec(runtime, [harness, 'run', '--project', s.root, ...extra], { env: { ...process.env, USERPROFILE: path.join(s.root, 'user'), HOME: path.join(s.root, 'user'), CROSSCHECK_TEST_MODE: mode, CROSSCHECK_TEST_BASE: s.base, TEST_TOKEN: secret }, timeout: 20000 }); return { code: 0, stdout: out.stdout }; }
   catch (error: any) { if (typeof error.code !== 'number') throw error; return { code: error.code as number, stdout: error.stdout as string }; }
 }
 async function result(s: Awaited<ReturnType<typeof setup>>) {
@@ -132,7 +137,7 @@ it('删除当前画像条款后生产CLI仍离线重建，file浏览器安全且
 }, 30000);
 it('第二case中断后resume只重跑incomplete，保留第一case提交与历史attempt', async () => {
   const s = await setup({ count: 2 });
-  const child = fork(harness, ['run', '--project', s.root], { execPath: runtime, execArgv: [], silent: true, env: { ...process.env, CROSSCHECK_TEST_MODE: 'second-hang', CROSSCHECK_TEST_BASE: s.base, TEST_TOKEN: secret } });
+  const child = fork(harness, ['run', '--project', s.root], { execPath: runtime, execArgv: [], silent: true, env: { ...process.env, USERPROFILE: path.join(s.root, 'user'), HOME: path.join(s.root, 'user'), CROSSCHECK_TEST_MODE: 'second-hang', CROSSCHECK_TEST_BASE: s.base, TEST_TOKEN: secret } });
   const [message] = await once(child, 'message'); expect(message).toBe('model-waiting'); child.send('SIGINT');
   expect((await once(child, 'exit'))[0]).toBe(2);
   const saved = await result(s); expect(saved.data.cases.map((c: any) => [c.complete, c.attempt])).toEqual([[true, 1], [false, 1]]);
@@ -146,8 +151,8 @@ it('init → reqs → review 人工确认 → plan → review 人工确认 → r
   const { scriptedModel } = await import('../../agent/src/testing/scripted-model');
   const base = await server((_req, res) => { res.setHeader('content-type', 'application/json'); res.end(JSON.stringify({ value: 'ok' })); });
   const root = await mkdtemp(path.join(os.tmpdir(), 'flow14-')); roots.push(root);
-  const artifacts = new ArtifactStore(root);
-  await artifacts.writeYaml('config.yaml', { models: { extractor: 'mock:x', planner: 'mock:p', executor: 'mock:executor', reviewer: 'mock:reviewer' }, providers: { mock: { type: 'ollama' } }, defaultEnvironment: 'local', requirementsDocs: ['需求.md'], budget: { perCase: { steps: 20, tokens: 100000, minutes: 1 } } });
+  const artifacts = new ArtifactStore(root); const userHome = await makeUserHome(root);
+  await artifacts.writeYaml('config.yaml', { defaultEnvironment: 'local', requirementsDocs: ['需求.md'], budget: { perCase: { steps: 20, tokens: 100000, minutes: 1 } } });
   await import('node:fs/promises').then((fs) => fs.writeFile(path.join(root, '需求.md'), '下单接口返回 ok\n'));
   const finish = (input: unknown) => ({ toolCalls: [{ name: 'finish', input }] });
   const extractor = scriptedModel([
@@ -160,6 +165,7 @@ it('init → reqs → review 人工确认 → plan → review 人工确认 → r
   ]);
   const planner = scriptedModel([finish([{ id: 'M-TC-1', covers: ['M-AC-1'], fixtures: [], actor: 'guest', steps: ['POST /api/action', 'GET /item'], expectations: ['E1', 'E2'].map((id) => ({ id, text: '返回真实ok', evidence: ['network'] })) }])]);
   const dependencies = {
+    userConfigHome: userHome,
     modelOptions: { env: {}, factories: { ollama: ({ modelId }: { modelId: string }) => modelId === 'x' ? extractor : planner } },
     resilience: { retries: 0, baseDelayMs: 0 }, env: { CROSSCHECK_REVIEWER: '流程测试' },
     // 仅模型及人工键盘选择用测试替身；审核状态函数、落盘和门禁均使用真实实现。
@@ -182,7 +188,7 @@ it('init → reqs → review 人工确认 → plan → review 人工确认 → r
   expect(await command(['plan', '--module', 'M'])).toBe(2);
   expect(await command(['review', 'clauses', '--module', 'M'])).toBe(0);
   expect(await command(['plan', '--module', 'M'])).toBe(0);
-  const env = { ...process.env, CROSSCHECK_TEST_MODE: 'pass', CROSSCHECK_TEST_BASE: base };
+  const env = { ...process.env, USERPROFILE: userHome, HOME: userHome, CROSSCHECK_TEST_MODE: 'pass', CROSSCHECK_TEST_BASE: base };
   await expect(exec(runtime, [harness, 'run', '--project', root], { env, timeout: 20000 })).rejects.toMatchObject({ code: 2 });
   expect(await command(['review', 'cases', '--module', 'M'])).toBe(0);
   const out = await exec(runtime, [harness, 'run', '--project', root], { env, timeout: 20000 });
@@ -201,7 +207,7 @@ it('生产 CLI help 可用且非 TTY review 拒绝 2', async () => {
 
 it.each(['abort', 'SIGINT', 'SIGTERM'])('Windows等价IPC控制%s中断真实HTTP资源，await保存incomplete，resume新attempt', async control => {
   const s = await setup({ slow: true });
-  const child = fork(harness, ['run', '--project', s.root], { execPath: runtime, execArgv: [], silent: true, env: { ...process.env, CROSSCHECK_TEST_BASE: s.base, TEST_TOKEN: secret } });
+  const child = fork(harness, ['run', '--project', s.root], { execPath: runtime, execArgv: [], silent: true, env: { ...process.env, USERPROFILE: path.join(s.root, 'user'), HOME: path.join(s.root, 'user'), CROSSCHECK_TEST_BASE: s.base, TEST_TOKEN: secret } });
   let stdout = ''; child.stdout!.on('data', chunk => { stdout += chunk; });
   const started = Date.now();
   while (s.counts().active === 0 && Date.now() - started < 10000) await new Promise(resolve => setTimeout(resolve, 20));
