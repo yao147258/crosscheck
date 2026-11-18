@@ -217,7 +217,7 @@ const completionOptions = (overrides?: Partial<RunSessionOptions>): RunSessionOp
 // ink 的 useInput 在挂载后才订阅 stdin，首次写入前需让事件循环先转一圈。
 const mounted = () => new Promise<void>((resolve) => setTimeout(resolve, 50));
 
-it('输入斜杠前缀时在输入框上方显示匹配命令与描述', async () => {
+it('输入斜杠前缀时在输入框下方显示匹配命令与描述', async () => {
   const ui = render(<SessionApp options={completionOptions()} />);
   await mounted();
   ui.stdin.write('/');
@@ -228,7 +228,8 @@ it('输入斜杠前缀时在输入框上方显示匹配命令与描述', async (
   await waitFor(() => frame(ui).includes('/review 交互审核') && !frame(ui).includes('/exit 退出会话'));
   expect(frame(ui)).toContain('/reqs 提取条款草稿');
   const lines = frame(ui).split('\n');
-  expect(lines.findIndex(line => line.includes('/reqs'))).toBeLessThan(lines.findIndex(line => line.includes('> /r')));
+  // 提示列表位于输入框下方。
+  expect(lines.findIndex(line => line.includes('/reqs'))).toBeGreaterThan(lines.findIndex(line => line.includes('> /r')));
 });
 
 it('输入非斜杠文本时不显示命令提示', async () => {

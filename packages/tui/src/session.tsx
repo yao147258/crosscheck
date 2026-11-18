@@ -46,7 +46,7 @@ export function SessionApp({ options }: { options: RunSessionOptions }) {
   const [review, setReview] = useState<{ env: ReviewEnv; args: Extract<SlashCommandResult, { kind: 'review' }>['args'] }>();
   const reviewActive = useRef(false);
   const externalAbort = useRef(false);
-  // 提示列表占据输入框上方的行数，相应压缩消息视口。
+  // 提示列表占据输入框下方的行数，相应压缩消息视口。
   const hintItems = busy ? [] : completions.current?.items ?? matchCommands(input);
   const hintHeight = hintItems.length;
   const viewport = Math.min(height || Math.max(0, rows - inputHeight - hintHeight), Math.max(0, rows - inputHeight - hintHeight));
@@ -146,10 +146,10 @@ export function SessionApp({ options }: { options: RunSessionOptions }) {
           : <Text key={i}>{safeText(m.content)}</Text>)}
       </Box>
     </Box>
+    <Box borderStyle="single" borderColor="white" borderLeft={false} borderRight={false} borderTop={inputHeight >= 3} borderBottom={inputHeight >= 2} flexShrink={0}><Text wrap="truncate-start">{busy ? '执行中，Ctrl+C 中断并等待清理' : `> ${safeText(input)}`}</Text></Box>
     {hintHeight > 0 && <Box flexDirection="column" flexShrink={0}>
       {hintItems.map((item, i) => <Text key={item.name} bold={i === (completions.current?.index ?? 0)} color={i === (completions.current?.index ?? 0) ? 'white' : 'gray'}>/{item.name} {item.description}</Text>)}
     </Box>}
-    <Box borderStyle="single" borderColor="white" borderLeft={false} borderRight={false} borderTop={inputHeight >= 3} borderBottom={inputHeight >= 2} flexShrink={0}><Text wrap="truncate-start">{busy ? '执行中，Ctrl+C 中断并等待清理' : `> ${safeText(input)}`}</Text></Box>
   </Box>;
 }
 
