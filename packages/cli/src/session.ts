@@ -1,6 +1,6 @@
 import { Approvals, ArtifactStore, loadUserModelConfig, resolveReviewer } from '@crosscheck/core';
 import { builtinFactories, callWithFallback } from '@crosscheck/models';
-import { createEditorHost, createOpener, loadHomeSummary, ReviewSession, runSession, type ChatMessage, type SlashCommandResult } from '@crosscheck/tui';
+import { createEditorHost, createOpener, loadHomeSummary, loadStatus, ReviewSession, runSession, type ChatMessage, type SlashCommandResult } from '@crosscheck/tui';
 import { APICallError, generateText } from 'ai';
 import { appendFile, mkdir } from 'node:fs/promises';
 import os from 'node:os';
@@ -41,6 +41,7 @@ export const sessionSlashCommands = [
   { name: 'review', description: '交互审核画像、条款、用例与结果' },
   { name: 'run', description: '执行已确认用例' },
   { name: 'report', description: '离线重建运行报告' },
+  { name: 'status', description: '查看项目阶段、待审核任务与最近测试' },
   { name: 'help', description: '显示命令帮助' },
   { name: 'clear', description: '清空对话历史' },
   { name: 'exit', description: '退出会话' },
@@ -51,6 +52,37 @@ export function createSlashDispatcher(deps: CommandDependencies) {
     if (!tokens.length || !tokens[0]) return { kind: 'log', code: 2, lines: ['斜杠命令不能为空'] };
     if (tokens[0] === 'exit') return tokens.length === 1 ? { kind: 'exit' } : { kind: 'log', code: 2, lines: ['exit 不接受参数'] };
     if (tokens[0] === 'clear') return tokens.length === 1 ? { kind: 'clear' } : { kind: 'log', code: 2, lines: ['clear 不接受参数'] };
+    if (tokens[0] === 'status') {
+      if (tokens.length !== 1 && !(tokens.length === 3 && tokens[1] === '--project' && tokens[2] && !tokens[2].startsWith('--'))) {
+        return { kind: 'log', code: 2, lines: ['用法：/status [--project <目录>]'] };
+      }
+      try {
+        signal.throwIfAborted();
+        const artifacts = new ArtifactStore(tokens[2] ?? process.cwd());
+        const status = await loadStatus({ artifacts, approvals: await Approvals.load(artifacts) });
+        signal.throwIfAborted();
+        const stages = { profile: '画像准备与审核', clauses: '需求条款准备与审核', cases: '测试用例准备与审核', run: '准备或执行测试', results: '查看和审核测试结果' };
+        const lines = [`当前阶段（根据工件推断）：${stages[status.stage]}`, '待审核任务：'];
+        for (const [label, count] of [['画像', status.profile], ['条款', status.clauses], ['用例', status.cases]] as const) {
+          lines.push(`  ${label}：${count.pending ?? '未知'} / ${count.total ?? '未知'}`);
+          for (const issue of count.issues) lines.push(`    ${issue.location}：${issue.message}`);
+        }
+        const run = status.latestRun;
+        if (run.state === 'ready') {
+          lines.push(`  最新运行待裁决预期：${run.pendingDispositions}`);
+          lines.push(`上一次测试：${run.runId}，开始时间 ${run.start}，运行状态 ${run.status}，结果 ${run.resultStatus}`);
+          lines.push(`  用例结果：${Object.entries(run.counts).map(([key, value]) => `${key} ${value}`).join('，')}`);
+        } else {
+          lines.push('  最新运行待裁决预期：未知');
+          const label = run.state === 'missing' ? '缺失' : run.state === 'incomplete' ? '未完成' : '损坏';
+          lines.push(`上一次测试：${label}${run.runId ? `（${run.runId}）` : ''}${run.start ? `，开始时间 ${run.start}` : ''}${run.status ? `，运行状态 ${run.status}` : ''}${run.error ? `：${run.error}` : ''}`);
+        }
+        return { kind: 'log', code: 0, lines };
+      } catch (error) {
+        if (signal.aborted) throw error;
+        return { kind: 'log', code: 3, lines: [`状态读取失败：${error instanceof Error ? error.message : String(error)}`] };
+      }
+    }
     if (tokens[0] === 'review') {
       try { return { kind: 'review', args: parseArgs(tokens) }; }
       catch (error) { return { kind: 'log', code: 2, lines: [error instanceof Error ? error.message : String(error)] }; }

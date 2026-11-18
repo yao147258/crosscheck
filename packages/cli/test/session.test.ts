@@ -149,8 +149,21 @@ it('clear 指令分发给会话清空且不接受参数', async () => {
   expect(await dispatch(['clear', 'extra'], signal)).toMatchObject({ kind: 'log', code: 2 });
 });
 
+it('status 指令读取指定项目状态且拒绝无效参数', async () => {
+  const { root } = await createProject();
+  const dispatch = createSlashDispatcher({});
+  const signal = new AbortController().signal;
+  const result = await dispatch(['status', '--project', root], signal);
+  expect(result).toMatchObject({ kind: 'log', code: 0 });
+  if (result.kind !== 'log') throw new Error('状态命令应返回日志');
+  expect(result.lines.join('\n')).toContain('当前阶段');
+  expect(result.lines.join('\n')).toContain('待审核');
+  expect(result.lines.join('\n')).toContain('上一次测试');
+  expect(await dispatch(['status', '--unknown'], signal)).toMatchObject({ kind: 'log', code: 2 });
+});
+
 it('会话命令清单覆盖全部斜杠命令且带描述', () => {
-  expect(sessionSlashCommands.map((command) => command.name)).toEqual(['init', 'reqs', 'plan', 'review', 'run', 'report', 'help', 'clear', 'exit']);
+  expect(sessionSlashCommands.map((command) => command.name)).toEqual(['init', 'reqs', 'plan', 'review', 'run', 'report', 'status', 'help', 'clear', 'exit']);
   for (const command of sessionSlashCommands) expect(command.description.length).toBeGreaterThan(0);
 });
 

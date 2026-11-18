@@ -19,6 +19,7 @@ export * from './state/clauses';
 export * from './state/cases';
 export * from './state/results';
 export * from './state/home';
+export * from './state/status';
 
 export interface RunReviewOptions {
   artifacts: ArtifactStore;

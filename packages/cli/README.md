@@ -12,7 +12,9 @@ crosscheck --help
 
 ## 用法
 
-无参数运行 `crosscheck` 在 stdin、stdout 均为 TTY 时进入交互会话。使用 `/init`、`/reqs`、`/plan`、`/review`、`/run`、`/report`、`/help` 和 `/exit`；参数与独立命令相同，含空格的路径使用引号，例如 `/review --project "my project"`。审核每次重新读取所选项目的确认记录，`q` 或顶层 `Esc` 返回聊天。命令失败显示退出码但不退出会话；Ctrl+C 取消当前操作并等待清理，空闲时使用 `/exit`。
+无参数运行 `crosscheck` 在 stdin、stdout 均为 TTY 时进入交互会话。使用 `/init`、`/reqs`、`/plan`、`/review`、`/run`、`/report`、`/status`、`/help`、`/clear` 和 `/exit`；参数与独立命令相同，含空格的路径使用引号，例如 `/review --project "my project"`。审核每次重新读取所选项目的确认记录，`q` 或顶层 `Esc` 返回聊天。命令失败显示退出码但不退出会话；Ctrl+C 取消当前操作并等待清理，空闲时使用 `/exit`。
+
+`/status [--project <目录>]` 只读展示推断的项目阶段、待审核数量和最新测试运行；运行缺失、未完成或损坏时明确提示。结果待裁决数量仅针对最新运行，阶段为推断而非完成保证。
 
 普通文本通过当前工作目录项目配置的 `planner` 模型回答，只提供当前磁盘上的待审核数量和运行次数摘要及有限聊天历史，不需要确认人，也不提供工具或人工确认权限。模型配置和摘要错误会显示在会话中；聊天历史不持久化。带参数的一次性调用及退出码不变。
 
