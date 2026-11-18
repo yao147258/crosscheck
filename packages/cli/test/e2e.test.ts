@@ -145,9 +145,9 @@ it('第二case中断后resume只重跑incomplete，保留第一case提交与历�
   expect(s.counts().actions).toBe(2); expect((await result(s)).data.cases.map((c: any) => c.attempt)).toEqual([1, 2]);
   expect(await s.artifacts.readBytes(`runs/${saved.id}/cases/M-TC-2/attempts/1/result.json`)).toBeDefined();
 }, 30000);
-it('init → reqs → review 人工确认 → plan → review 人工确认 → run 全链路', async () => {
+it('init → review notes → profile → review profile → reqs → plan → review → run 全链路', async () => {
   const { cliMain } = await import('../src/main');
-  const { ReviewSession, approveProfileFile, approveAllClauses, approveAllCases, loadProfileOverview } = await import('@crosscheck/tui');
+  const { ReviewSession, approveNotes, approveProfileFile, approveAllClauses, approveAllCases, loadNotesOverview, loadProfileOverview } = await import('@crosscheck/tui');
   const { scriptedModel } = await import('../../agent/src/testing/scripted-model');
   const base = await server((_req, res) => { res.setHeader('content-type', 'application/json'); res.end(JSON.stringify({ value: 'ok' })); });
   const root = await mkdtemp(path.join(os.tmpdir(), 'flow14-')); roots.push(root);
@@ -156,6 +156,7 @@ it('init → reqs → review 人工确认 → plan → review 人工确认 → r
   await import('node:fs/promises').then((fs) => fs.writeFile(path.join(root, '需求.md'), '下单接口返回 ok\n'));
   const finish = (input: unknown) => ({ toolCalls: [{ name: 'finish', input }] });
   const extractor = scriptedModel([
+    finish({ markdown: '# 项目笔记\n\n本地回环服务，下单接口返回 ok。' }),
     finish({ 'environments.yaml': { version: 1, environments: { local: { baseURL: base, healthcheck: `${base}/health`, reset: null } } } }),
     finish({ 'auth.yaml': { version: 1, actors: { guest: { kind: 'anonymous' } } } }),
     finish({ 'api-catalog.yaml': { version: 1, operations: {} }, 'pages.yaml': { version: 1, pages: {} } }),
@@ -171,20 +172,27 @@ it('init → reqs → review 人工确认 → plan → review 人工确认 → r
     // 仅模型及人工键盘选择用测试替身；审核状态函数、落盘和门禁均使用真实实现。
     review: { isTTY: true, runReview: async (options: import('@crosscheck/tui').RunReviewOptions) => {
       const session = await ReviewSession.open(options.artifacts, options.reviewer);
-      if (options.view === 'profile') for (const row of (await loadProfileOverview(session)).rows) await approveProfileFile(session, row.name);
+      if (options.view === 'notes') expect(await approveNotes(session, (await loadNotesOverview(session)).text)).toBe('已确认项目笔记');
+      else if (options.view === 'profile') for (const row of (await loadProfileOverview(session)).rows) await approveProfileFile(session, row.name);
       else if (options.view === 'clauses') expect(await approveAllClauses(session, options.module!)).toBe('已确认 1 条条款');
       else if (options.view === 'cases') expect(await approveAllCases(session, options.module!)).toBe('已确认 1 个用例');
       else throw new Error('测试未安排的审核视图');
       return 0;
     } },
   };
-  const log = () => {};
-  const command = (argv: string[]) => cliMain([...argv, '--project', root], { log, dependencies });
+  const logs: string[] = [];
+  const command = (argv: string[]) => { logs.length = 0; return cliMain([...argv, '--project', root], { log: (line) => logs.push(line), dependencies }); };
   expect(await command(['init'])).toBe(0);
-  expect(await command(['reqs', '--module', 'M'])).toBe(0);
+  expect((await artifacts.readBytes('notes.md'))?.toString()).toContain('项目笔记');
   expect(await artifacts.readBytes('approvals.json')).toBeUndefined();
+  expect(await command(['profile'])).toBe(2);
+  expect(await command(['review', 'notes'])).toBe(0);
+  expect(await artifacts.readBytes('approvals.json')).toBeDefined();
+  expect(await command(['profile'])).toBe(0);
   expect(await command(['plan', '--module', 'M'])).toBe(2);
+  expect(logs.join('\n')).toContain('系统画像尚未全部确认');
   expect(await command(['review', 'profile'])).toBe(0);
+  expect(await command(['reqs', '--module', 'M'])).toBe(0);
   expect(await command(['plan', '--module', 'M'])).toBe(2);
   expect(await command(['review', 'clauses', '--module', 'M'])).toBe(0);
   expect(await command(['plan', '--module', 'M'])).toBe(0);

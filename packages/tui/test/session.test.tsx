@@ -1,6 +1,7 @@
 import { cleanup, render } from 'ink-testing-library';
 import { afterEach, expect, it, vi } from 'vitest';
 import { Approvals, loadProfile } from '@crosscheck/core';
+import { sessionSlashCommands, tokenizeCommand } from '../../cli/src/session';
 import { ReviewSession } from '../src/io/session';
 import { SessionApp, type RunSessionOptions } from '../src/session';
 import { cleanupProjects, createProject } from './fixture';
@@ -251,6 +252,20 @@ it('Tab 在匹配命令间循环补全', async () => {
   await waitFor(() => frame(ui).includes('> /review'));
   ui.stdin.write(KEYS.tab);
   await waitFor(() => frame(ui).includes('> /reqs'));
+});
+
+it('真实命令清单中 /profile 可提示、补全并提交', async () => {
+  const runSlashCommand = vi.fn(async (_tokens: string[]) => ({ kind: 'log' as const, code: 0, lines: ['画像命令完成'] }));
+  const options = completionOptions({ slashCommands: sessionSlashCommands, tokenize: tokenizeCommand, runSlashCommand });
+  const ui = render(<SessionApp options={options} />);
+  await mounted();
+  ui.stdin.write('/pro');
+  await waitFor(() => frame(ui).includes('/profile 根据已确认笔记生成画像草稿'));
+  ui.stdin.write(KEYS.tab);
+  await waitFor(() => frame(ui).includes('> /profile'));
+  ui.stdin.write(KEYS.enter);
+  await waitFor(() => frame(ui).includes('画像命令完成'));
+  expect(runSlashCommand.mock.calls[0]?.[0]).toEqual(['profile']);
 });
 
 it('非斜杠输入按 Tab 不修改输入内容', async () => {

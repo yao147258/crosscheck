@@ -1,4 +1,10 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import * as fs from 'node:fs/promises';
+
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const original = await importOriginal<typeof import('node:fs/promises')>();
+  return { ...original, lstat: vi.fn(original.lstat) };
+});
 import { mkdtemp, mkdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -13,6 +19,46 @@ beforeEach(async () => {
 afterEach(async () => {
   await rm(root, { recursive: true, force: true });
   await rm(outside, { recursive: true, force: true });
+});
+
+describe('目录枚举', () => {
+  it('列出直接子项并对缺失目录返回空', async () => {
+    await mkdir(join(root, 'sub'));
+    await writeFile(join(root, 'sub', 'a.txt'), '12345');
+    const reader = createProjectReader(root);
+    expect(await reader.list('sub')).toEqual([{ name: 'a.txt', type: 'file', size: 5 }]);
+    expect(await reader.list('missing')).toEqual([]);
+  });
+  it('保留路径安全边界并标记符号链接', async () => {
+    await mkdir(join(root, '.env.dir'));
+    await symlink(outside, join(root, 'link'), 'junction');
+    const reader = createProjectReader(root);
+    for (const dir of ['../', '.env.dir', 'link', 'CON']) await expect(reader.list(dir)).rejects.toThrow();
+    expect((await reader.list('')).find((entry) => entry.name === 'link')).toMatchObject({ link: true });
+  });
+  it('条目元数据读取失败时保留其他条目并报告安全诊断', async () => {
+    await writeFile(join(root, 'a.txt'), 'a');
+    await writeFile(join(root, 'b.txt'), 'b');
+    const original = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises');
+    const spy = vi.mocked(fs.lstat);
+    spy.mockImplementation(((file: Parameters<typeof fs.lstat>[0], options?: unknown) => {
+      if (String(file).replaceAll('\\', '/').endsWith('/a.txt')) return Promise.reject(new Error('password=secret'));
+      return (original.lstat as (input: Parameters<typeof fs.lstat>[0], options?: unknown) => ReturnType<typeof fs.lstat>)(file, options);
+    }) as typeof fs.lstat);
+    const diagnostics: string[] = [];
+    try {
+      const entries = await createProjectReader(root).list('', undefined, { onDiagnostic: (message) => diagnostics.push(message) });
+      expect(entries.map((entry) => entry.name)).toEqual(['b.txt']);
+      expect(diagnostics.length).toBe(1);
+      expect(diagnostics.join('\n')).not.toContain('secret');
+      expect(diagnostics.join('\n')).not.toContain(root);
+    } finally { spy.mockImplementation(original.lstat); }
+  });
+  it('传播取消而不当作缺失目录', async () => {
+    const controller = new AbortController();
+    controller.abort(new Error('取消枚举'));
+    await expect(createProjectReader(root).list('missing', controller.signal)).rejects.toThrow('取消枚举');
+  });
 });
 
 describe('项目读取边界', () => {

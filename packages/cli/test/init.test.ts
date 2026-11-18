@@ -4,12 +4,13 @@ import path from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
 import { Approvals, ArtifactError, ArtifactStore, ConfigSchema, ProjectConfigSchema, readProfileFile } from '@crosscheck/core';
 import { scriptedModel, type ScriptStep } from '../../agent/src/testing/scripted-model';
+import * as discovery from '@crosscheck/discovery';
 import { cliMain as realCliMain } from '../src/main';
 const cliMain: typeof realCliMain = (argv, options = {}) => {
   const index = argv.indexOf('--project');
   return realCliMain(argv, { ...options, dependencies: { ...options.dependencies, userConfigHome: index >= 0 ? path.join(argv[index + 1]!, 'user') : undefined } });
 };
-import { CONFIG_TEMPLATE } from '../src/init';
+import { CONFIG_TEMPLATE, NOTES_FILE } from '../src/init';
 import { InterruptedError, resolveModels, withInterrupt } from '../src/context';
 
 const roots: string[] = [];
@@ -17,16 +18,6 @@ afterEach(async () => {
   vi.restoreAllMocks();
   await Promise.all(roots.splice(0).map((r) => rm(r, { recursive: true, force: true })));
 });
-const FILES = {
-  'environments.yaml': { version: 1, environments: { local: { baseURL: 'http://localhost:3000', healthcheck: 'http://localhost:3000/health', reset: null } } },
-  'auth.yaml': { version: 1, actors: { guest: { kind: 'anonymous' } } },
-  'api-catalog.yaml': { version: 1, operations: {} }, 'pages.yaml': { version: 1, pages: {} },
-  'data-model.yaml': { version: 1, queries: {} }, 'fixtures.yaml': { version: 1, fixtures: {} },
-  'guardrails.yaml': { allowedHosts: ['localhost:3000'] },
-};
-const finish = (names: (keyof typeof FILES)[]): ScriptStep => ({ toolCalls: [{ name: 'finish', input: Object.fromEntries(names.map((n) => [n, FILES[n]])) }] });
-const STEPS = [finish(['environments.yaml']), finish(['auth.yaml']), finish(['api-catalog.yaml', 'pages.yaml']), finish(['data-model.yaml', 'fixtures.yaml']), finish(['guardrails.yaml'])];
-
 async function project(withConfig: boolean) {
   const root = await mkdtemp(path.join(os.tmpdir(), 'cli-init-')); roots.push(root);
   const artifacts = new ArtifactStore(root);
@@ -47,186 +38,121 @@ it('没有 config.yaml 时写入合法模板并退出 2，不调用模型', asyn
   expect(model.doGenerateCalls).toHaveLength(0);
 });
 
-it('生成 7 份画像草稿且不写确认记录；重跑时保留已确认文件的原字节和确认记录', async () => {
+it('生成笔记草稿且不创建确认记录', async () => {
   const { root, artifacts } = await project(true);
-  const model = scriptedModel(STEPS); const out: string[] = [];
-  expect(await cliMain(['init', '--project', root], { log: (s) => out.push(s), dependencies: deps(model) })).toBe(0);
-  for (const name of Object.keys(FILES)) expect(await readProfileFile(artifacts, name as keyof typeof FILES)).toMatchObject({ present: true, ok: true });
-  expect(await artifacts.readBytes('approvals.json')).toBeUndefined();
+  const model = scriptedModel([{ toolCalls: [{ name: 'finish', input: { markdown: `# 项目笔记
 
-  const env = await readProfileFile(artifacts, 'environments.yaml');
-  if (!env.present || !env.ok) throw new Error('环境画像应合法');
-  const approvals = Approvals.empty();
-  approvals.approve('profile', 'environments.yaml', env.value, '人工');
-  await approvals.save(artifacts);
-  const envBytes = await artifacts.readBytes('system/environments.yaml');
-  const approvalBytes = await artifacts.readBytes('approvals.json');
-  const second = scriptedModel(STEPS.slice(1));
-  expect(await cliMain(['init', '--project', root], { log: (s) => out.push(s), dependencies: deps(second) })).toBe(0);
-  expect(second.doGenerateCalls).toHaveLength(4);
-  expect(await artifacts.readBytes('system/environments.yaml')).toEqual(envBytes);
-  expect(await artifacts.readBytes('approvals.json')).toEqual(approvalBytes);
-  expect(out.join('\n')).toContain('跳过（已确认）');
-});
-
-it.each([false, true])('七画像已确认时 auth 一次读取故障（并发取消=%s）退出3，零模型且字节全不变', async (cancel) => {
-  const { root, artifacts } = await project(true);
-  const approvals = Approvals.empty();
-  for (const [name, value] of Object.entries(FILES)) {
-    await artifacts.writeYaml(`system/${name}`, value);
-    const file = await readProfileFile(artifacts, name as keyof typeof FILES);
-    if (!file.present || !file.ok) throw new Error('画像应合法');
-    approvals.approve('profile', name, file.value, '人工');
-  }
-  await approvals.save(artifacts);
-  const paths = ['config.yaml', ...Object.keys(FILES).map((n) => `system/${n}`), 'approvals.json'];
-  const before = await Promise.all(paths.map((p) => artifacts.readBytes(p)));
-  const controller = new AbortController(); let failed = false;
-  const read = ArtifactStore.prototype.readBytes;
-  vi.spyOn(ArtifactStore.prototype, 'readBytes').mockImplementation(async function (this: ArtifactStore, rel) {
-    if (rel === 'system/auth.yaml' && !failed) {
-      failed = true;
-      if (cancel) controller.abort();
-      throw new ArtifactError('工件读取失败', { cause: Object.assign(new Error('auth 瞬时拒绝访问'), { code: 'EACCES' }) });
-    }
-    return read.call(this, rel);
-  });
-  const model = scriptedModel([{ toolCalls: [{ name: 'finish', input: { 'auth.yaml': { version: 1, actors: { replacement: { kind: 'anonymous' } } } } }] }]); const logs: string[] = [];
-  const code = await cliMain(['init', '--project', root], { log: (s) => logs.push(s), dependencies: deps(model), signal: controller.signal });
-  expect(code).toBe(3);
-  expect(model.doGenerateCalls).toHaveLength(0);
-  expect(await Promise.all(paths.map((p) => artifacts.readBytes(p)))).toEqual(before);
-  expect(logs.join('\n')).toContain('工件读取失败');
-});
-
-it('草稿、过期确认与无效画像不能作为已确认上下文跳过', async () => {
-  const { root, artifacts } = await project(true);
-  await artifacts.writeYaml('system/environments.yaml', FILES['environments.yaml']);
-  const env = await readProfileFile(artifacts, 'environments.yaml');
-  if (!env.present || !env.ok) throw new Error('环境画像应合法');
-  const approvals = Approvals.empty();
-  approvals.approve('profile', 'environments.yaml', env.value, '人工');
-  approvals.approve('profile', 'auth.yaml', { invalid: true }, '人工');
-  await approvals.save(artifacts);
-  await artifacts.writeYaml('system/environments.yaml', { version: 1, environments: { local: { baseURL: 'http://localhost:4000' } } });
-  await artifacts.writeYaml('system/auth.yaml', { invalid: true });
-  await artifacts.writeYaml('system/pages.yaml', FILES['pages.yaml']);
-  const model = scriptedModel(STEPS);
+扫描结果` } }] }]);
   expect(await cliMain(['init', '--project', root], { log: () => {}, dependencies: deps(model) })).toBe(0);
-  expect(model.doGenerateCalls).toHaveLength(5);
-  const first = JSON.stringify(model.doGenerateCalls[0]!.prompt);
-  expect(first).not.toContain('localhost:4000');
-  expect(first).not.toContain('invalid');
-  expect(await readProfileFile(artifacts, 'auth.yaml')).toMatchObject({ ok: true });
+  expect((await artifacts.readBytes(NOTES_FILE))?.toString()).toBe(`# 项目笔记
+
+扫描结果`);
+  expect(await artifacts.readBytes('approvals.json')).toBeUndefined();
 });
 
-it('某步失败时退出 2，其余文件照常写入', async () => {
+it('已确认笔记跳过时无需全局模型配置', async () => {
+  const { root, artifacts } = await project(true); const text = '# 已确认';
+  await artifacts.writeBytes('notes.md', Buffer.from(text));
+  const approvals = Approvals.empty(); approvals.approve('notes', 'project', text, '人工'); await approvals.save(artifacts);
+  await rm(path.join(root, 'user', '.crosscheck', 'config.yaml'));
+  expect(await cliMain(['init', '--project', root], { log: () => {} })).toBe(0);
+});
+
+it.each(['无标题内容', '# 标题\n' + 'a'.repeat(65536)])('刷新时拒绝非法旧笔记且不调用模型', async (text) => {
   const { root, artifacts } = await project(true);
-  const bad: ScriptStep = { text: '不调用工具' };
-  const model = scriptedModel([STEPS[0]!, bad, bad, bad, ...STEPS.slice(2)]);
-  expect(await cliMain(['init', '--project', root], { log: () => {}, dependencies: deps(model) })).toBe(2);
-  expect(await readProfileFile(artifacts, 'auth.yaml')).toEqual({ name: 'auth.yaml', present: false });
-  expect(await readProfileFile(artifacts, 'guardrails.yaml')).toMatchObject({ ok: true });
-});
-
-it.each([false, true])('预先取消时不写模板或草稿、不解析模型（已有配置：%s）', async (withConfig) => {
-  const { root, artifacts } = await project(withConfig);
-  const before = await artifacts.readBytes('config.yaml');
-  const model = scriptedModel([]);
-  const factories = { openai: vi.fn(() => model) };
-  expect(await cliMain(['init', '--project', root], {
-    log: () => {}, signal: AbortSignal.abort(), dependencies: { modelOptions: { env: {}, factories } },
-  })).toBe(2);
-  expect(await artifacts.readBytes('config.yaml')).toEqual(before);
-  expect(await artifacts.list('system')).toEqual([]);
-  expect(factories.openai).not.toHaveBeenCalled();
+  await artifacts.writeBytes('notes.md', Buffer.from(text));
+  const model = scriptedModel([]); const logs: string[] = [];
+  expect(await cliMain(['init', '--refresh', '--project', root], { log: (line) => logs.push(line), dependencies: deps(model) })).toBe(2);
+  expect(logs.join(' ')).toContain('笔记');
   expect(model.doGenerateCalls).toHaveLength(0);
+  expect((await artifacts.readBytes('notes.md'))!.toString()).toBe(text);
 });
 
-it('扫描后取消不再解析模型或写入草稿', async () => {
-  const { root, artifacts } = await project(true);
-  const controller = new AbortController();
-  const factory = vi.fn(() => scriptedModel([]));
-  expect(await cliMain(['init', '--project', root], {
-    log: () => controller.abort(), signal: controller.signal,
-    dependencies: { modelOptions: { env: {}, factories: { openai: factory } } },
-  })).toBe(2);
-  expect(factory).not.toHaveBeenCalled();
+it('刷新时检测模型执行期间笔记发生修改', async () => {
+  const { root, artifacts } = await project(true); await artifacts.writeBytes('notes.md', Buffer.from('# 原内容'));
+  const model = scriptedModel([{ toolCalls: [{ name: 'finish', input: { markdown: '# 新草稿' } }] }]);
+  const generate = model.doGenerate.bind(model);
+  vi.spyOn(model, 'doGenerate').mockImplementation(async (options) => { await artifacts.writeBytes('notes.md', Buffer.from('# 并发修改')); return generate(options); });
+  expect(await cliMain(['init', '--refresh', '--project', root], { log: () => {}, dependencies: deps(model) })).toBe(2);
+  expect((await artifacts.readBytes('notes.md'))?.toString()).toBe('# 并发修改');
+});
+
+it('画像缺少确认笔记时即使模型配置缺失也返回门禁', async () => {
+  const { root, artifacts } = await project(true); await rm(path.join(root, 'user', '.crosscheck', 'config.yaml'));
+  const logs: string[] = [];
+  expect(await cliMain(['profile', '--project', root], { log: (line) => logs.push(line) })).toBe(2);
+  expect(logs.join(' ')).toContain('review notes');
   expect(await artifacts.list('system')).toEqual([]);
 });
 
-it('模型执行中取消退出 2，不再调用后续模型或创建草稿', async () => {
-  const { root, artifacts } = await project(true);
-  const controller = new AbortController();
-  const model = scriptedModel([]);
-  vi.spyOn(model, 'doGenerate').mockImplementation(async (options) => {
-    controller.abort();
-    options.abortSignal!.throwIfAborted();
-    throw new Error('取消应阻止继续执行');
-  });
-  expect(await cliMain(['init', '--project', root], { log: () => {}, dependencies: deps(model), signal: controller.signal })).toBe(2);
-  expect(model.doGenerate).toHaveBeenCalledTimes(1);
-  expect(await artifacts.list('system')).toEqual([]);
+it('刷新已确认笔记时脱敏旧内容并保留原确认记录', async () => {
+  const { root, artifacts } = await project(true); const text = '# 笔记\n\nfixture-key';
+  await artifacts.writeBytes('notes.md', Buffer.from(text));
+  const approvals = Approvals.empty(); approvals.approve('notes', 'project', text, '人工'); await approvals.save(artifacts);
+  const before = await artifacts.readBytes('approvals.json');
+  const model = scriptedModel([{ toolCalls: [{ name: 'finish', input: { markdown: '# 新笔记\n\nfixture-key' } }] }]);
+  expect(await cliMain(['init', '--refresh', '--project', root], { log: () => {}, dependencies: deps(model) })).toBe(0);
+  expect(JSON.stringify(model.doGenerateCalls[0]!.prompt)).not.toContain('fixture-key');
+  const updated = (await artifacts.readBytes('notes.md'))!.toString();
+  expect(updated).not.toContain('fixture-key');
+  expect((await Approvals.load(artifacts)).state('notes', 'project', updated)).toBe('stale');
+  expect(await artifacts.readBytes('approvals.json')).toEqual(before);
 });
 
-it('T6 Minor：第1步已合成但第2步中断时丢弃未落盘草稿，退出2且保留既有写入', async () => {
+it('模型笔记里的未知密码、认证头、URL 和多行秘密不落盘', async () => {
   const { root, artifacts } = await project(true);
-  await artifacts.writeYaml('system/pages.yaml', FILES['pages.yaml']);
-  const before = await artifacts.readBytes('system/pages.yaml');
-  const controller = new AbortController();
-  const model = scriptedModel([STEPS[0]!]);
+  const markdown = '# 项目笔记\n\nPASSWORD=unknownpassword\nAuthorization: Bearer unknownbearer\nhttp://unknownuser:unknownpass@localhost:3000/?x=unknownquery\nsecret: |\n  unknownmultiline\n  unknownsecondline\n\n正常说明';
+  const model = scriptedModel([{ toolCalls: [{ name: 'finish', input: { markdown } }] }]);
+  expect(await cliMain(['init', '--project', root], { log: () => {}, dependencies: deps(model) })).toBe(0);
+  const text = (await artifacts.readBytes('notes.md'))!.toString();
+  for (const secret of ['unknownpassword', 'unknownbearer', 'unknownuser', 'unknownpass', 'unknownquery', 'unknownmultiline', 'unknownsecondline']) expect(text).not.toContain(secret);
+  expect(text).toContain('正常说明');
+});
+
+it('脱敏后格式不合规则不覆盖原笔记', async () => {
+  const { root, artifacts } = await project(true);
+  await writeFile(path.join(root, 'user', '.crosscheck', 'config.yaml'), JSON.stringify({ models: { extractor: 'mock:x', planner: 'mock:p', executor: 'mock:e', reviewer: 'mock:r' }, providers: { mock: { type: 'openai', baseURL: 'https://example.invalid/v1', apiKey: '# secret' } } }));
+  await artifacts.writeBytes('notes.md', Buffer.from('# 原笔记'));
+  const model = scriptedModel([{ toolCalls: [{ name: 'finish', input: { markdown: '# secret' } }] }]);
+  expect(await cliMain(['init', '--project', root], { log: () => {}, dependencies: deps(model) })).toBe(2);
+  expect((await artifacts.readBytes('notes.md'))!.toString()).toBe('# 原笔记');
+});
+
+it('生成笔记同时发生取消与宿主异常时保留宿主错误', async () => {
+  const { root } = await project(true); const controller = new AbortController();
+  vi.spyOn(discovery, 'synthesizeNotes').mockImplementation(async () => { controller.abort(); throw new Error('真实宿主异常'); });
+  const logs: string[] = [];
+  expect(await cliMain(['init', '--project', root], { log: (line) => logs.push(line), signal: controller.signal, dependencies: deps(scriptedModel([])) })).toBe(3);
+  expect(logs.join(' ')).toContain('真实宿主异常');
+});
+
+it('笔记生成期间草稿被确认时不覆盖', async () => {
+  const { root, artifacts } = await project(true); const text = '# 人工确认';
+  await artifacts.writeBytes('notes.md', Buffer.from(text));
+  const model = scriptedModel([{ toolCalls: [{ name: 'finish', input: { markdown: '# 新笔记' } }] }]);
   const generate = model.doGenerate.bind(model);
   vi.spyOn(model, 'doGenerate').mockImplementation(async (options) => {
-    if (model.doGenerateCalls.length === 1) { controller.abort(); options.abortSignal!.throwIfAborted(); }
+    const approvals = await Approvals.load(artifacts); approvals.approve('notes', 'project', text, '人工'); await approvals.save(artifacts);
     return generate(options);
   });
-  expect(await cliMain(['init', '--project', root], { log: () => {}, dependencies: deps(model), signal: controller.signal })).toBe(2);
-  expect(model.doGenerate).toHaveBeenCalledTimes(2);
-  expect(await artifacts.readBytes('system/environments.yaml')).toBeUndefined();
-  expect(await artifacts.readBytes('system/pages.yaml')).toEqual(before);
-  expect(await artifacts.list('system')).toEqual(['pages.yaml']);
-  expect(await artifacts.readBytes('approvals.json')).toBeUndefined();
+  expect(await cliMain(['init', '--project', root], { log: () => {}, dependencies: deps(model) })).toBe(2);
+  expect((await artifacts.readBytes('notes.md'))!.toString()).toBe(text);
 });
 
-it.each(['environments.yaml', 'guardrails.yaml'])('写入 %s 期间取消保留已完整写入文件，退出 2 并停止后续写入', async (cancelAt) => {
+it.each(['init', 'profile'] as const)('%s 拒绝非法 UTF-8 笔记，不调用模型或覆盖笔记', async (command) => {
   const { root, artifacts } = await project(true);
-  const controller = new AbortController();
-  const original = ArtifactStore.prototype.writeYaml;
-  vi.spyOn(ArtifactStore.prototype, 'writeYaml').mockImplementation(async function (this: ArtifactStore, rel, value) {
-    await original.call(this, rel, value);
-    if (rel === `system/${cancelAt}`) controller.abort();
-  });
-  expect(await cliMain(['init', '--project', root], { log: () => {}, dependencies: deps(scriptedModel(STEPS)), signal: controller.signal })).toBe(2);
-  expect(await readProfileFile(artifacts, 'environments.yaml')).toMatchObject({ ok: true });
-  if (cancelAt === 'environments.yaml') expect(await artifacts.list('system')).toEqual(['environments.yaml']);
-  else expect(await artifacts.list('system')).toHaveLength(7);
-  expect(await artifacts.readBytes('approvals.json')).toBeUndefined();
-});
-
-it('配置缺密钥是宿主错误，保留具体诊断', async () => {
-  const { root, artifacts } = await project(true);
-  await writeFile(path.join(root, 'user', '.crosscheck', 'config.yaml'), JSON.stringify({ models: { extractor: 'openai:x', planner: 'openai:x', executor: 'openai:x', reviewer: 'openai:x' }, providers: { openai: { type: 'openai', baseURL: 'https://example.invalid/v1' } } }));
-  const out: string[] = [];
-  expect(await cliMain(['init', '--project', root], { log: (s) => out.push(s), dependencies: { env: {} } })).toBe(3);
-  expect(out.join('\n')).toContain('apiKey');
-  expect(await artifacts.list('system')).toEqual([]);
-});
-
-it('真实草稿写入失败即使信号同时取消也退出 3，保留已写文件', async () => {
-  const { root, artifacts } = await project(true);
-  const controller = new AbortController();
-  const original = ArtifactStore.prototype.writeYaml;
-  vi.spyOn(ArtifactStore.prototype, 'writeYaml').mockImplementation(async function (this: ArtifactStore, rel, value) {
-    if (rel === 'system/auth.yaml') await mkdir(this.resolve(rel), { recursive: true });
-    try { await original.call(this, rel, value); }
-    catch (error) { controller.abort(); throw error; }
-  });
-  const out: string[] = [];
-  expect(await cliMain(['init', '--project', root], { log: (s) => out.push(s), dependencies: deps(scriptedModel(STEPS)), signal: controller.signal })).toBe(3);
-  expect(out.join('\n')).toContain('宿主错误');
-  expect(out.join('\n')).toContain('工件写入失败');
-  expect(await readProfileFile(artifacts, 'environments.yaml')).toMatchObject({ ok: true });
-  expect(await artifacts.readBytes('approvals.json')).toBeUndefined();
+  const bytes = Buffer.from([0x23, 0x20, 0xff]);
+  await artifacts.writeBytes('notes.md', bytes);
+  const approvals = Approvals.empty();
+  approvals.approve('notes', 'project', bytes.toString('utf8'), '人工');
+  await approvals.save(artifacts);
+  const before = await artifacts.readBytes('approvals.json');
+  const model = scriptedModel([]); const logs: string[] = [];
+  expect(await cliMain([command, '--project', root], { log: (line) => logs.push(line), dependencies: deps(model) })).toBe(2);
+  expect(logs.join(' ')).toContain('UTF-8');
+  expect(model.doGenerateCalls).toHaveLength(0);
+  expect(await artifacts.readBytes('notes.md')).toEqual(bytes);
+  expect(await artifacts.readBytes('approvals.json')).toEqual(before);
 });
 
 it('withInterrupt 预先取消不执行回调，结束后移除监听器', async () => {

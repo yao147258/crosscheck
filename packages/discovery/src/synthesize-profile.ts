@@ -1,7 +1,8 @@
 import { runAgent, type RunAgentOptions } from '@crosscheck/agent';
 import { PROFILE_FILES, PROFILE_SCHEMAS, ProfileSchema, type BudgetTracker, type ProfileFile } from '@crosscheck/core';
 import { z } from 'zod';
-import type { DiscoveryFact } from './types';
+import { sanitizeContext, sanitizeMultiline } from './sanitize';
+import type { DiscoveryFact, DiscoverySource } from './types';
 
 interface SynthesisStep {
   files: ProfileFile[];
@@ -34,6 +35,10 @@ export interface SynthesizeProfileOptions {
   facts: DiscoveryFact[];
   /** 已确认且带默认值的画像解析结果，只作为上下文使用。 */
   existing: Partial<Record<ProfileFile, unknown>>;
+  /** 已确认的项目笔记，仅作为上下文，不能作为来源依据。 */
+  notes?: string;
+  /** 对每步模型上下文应用调用方的已知密钥脱敏。 */
+  cleanContext?: (value: unknown) => unknown;
   models: RunAgentOptions<unknown>['models'];
   budget: () => BudgetTracker;
   signal?: AbortSignal;
@@ -45,6 +50,27 @@ export interface SynthesizeProfileResult {
   steps: SynthesisStepReport[];
   crossCheck: string[];
   interrupted: boolean;
+}
+
+function validateSources(output: Record<string, unknown>, facts: DiscoveryFact[]) {
+  const matches = (a: DiscoverySource, b: DiscoverySource) => a.file === b.file && a.line === b.line && a.excerpt === b.excerpt;
+  if (output['api-catalog.yaml']) {
+    const catalog = PROFILE_SCHEMAS['api-catalog.yaml'].parse(output['api-catalog.yaml']);
+    for (const [name, operation] of Object.entries(catalog.operations)) {
+      if (operation.sources.some((source) => !facts.some((fact) => fact.kind === 'api' && fact.method === operation.method && fact.path === operation.path && matches(source, fact.source)))) {
+        return { ok: false as const, error: `API 操作 ${name} 的来源或 method/path 与事实不匹配` };
+      }
+    }
+  }
+  if (output['pages.yaml']) {
+    const pages = PROFILE_SCHEMAS['pages.yaml'].parse(output['pages.yaml']);
+    for (const [name, page] of Object.entries(pages.pages)) {
+      if (page.sources.some((source) => !facts.some((fact) => matches(source, fact.source)))) {
+        return { ok: false as const, error: `页面 ${name} 的来源不在事实中` };
+      }
+    }
+  }
+  return { ok: true as const };
 }
 
 export async function synthesizeProfile(options: SynthesizeProfileOptions): Promise<SynthesizeProfileResult> {
@@ -76,9 +102,10 @@ export async function synthesizeProfile(options: SynthesizeProfileOptions): Prom
       system: SYNTHESIS_SYSTEM,
       messages: [{
         role: 'user',
-        content: JSON.stringify({ files: pending, hint: step.hint, facts: options.facts.filter((fact) => step.facts.includes(fact.kind)), context: known }),
+        content: JSON.stringify({ files: pending, hint: step.hint, facts: options.facts.filter((fact) => step.facts.includes(fact.kind)), notes: options.notes === undefined ? undefined : sanitizeMultiline(options.notes), context: sanitizeContext(options.cleanContext ? options.cleanContext(structuredClone(known)) : known) }),
       }],
       output,
+      validateOutput: (value) => validateSources(value, options.facts),
     });
     if (result.status === 'done') {
       for (const file of pending) {

@@ -3,6 +3,7 @@ export * from './schema/config';
 export * from './schema/guardrails';
 export * from './schema/verdict';
 export * from './schema/profile';
+export * from './schema/notes';
 export * from './schema/evidence';
 export * from './schema/run';
 export * from './schema/disposition';

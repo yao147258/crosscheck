@@ -32,6 +32,17 @@ export interface ProjectReader {
   readText(file: string, signal?: AbortSignal): Promise<string | undefined>;
 }
 
+export interface ProjectEntry {
+  name: string;
+  type: 'file' | 'directory';
+  size: number;
+  link?: boolean;
+}
+
+export interface ProjectLister extends ProjectReader {
+  list(dir: string, signal?: AbortSignal, options?: { maxEntries?: number; onEntry?: () => void; onDiagnostic?: (message: string) => void }): Promise<ProjectEntry[]>;
+}
+
 export interface DiscoveryContext {
   files: ProjectReader;
   signal?: AbortSignal;

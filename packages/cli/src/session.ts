@@ -35,10 +35,11 @@ export function tokenizeCommand(text: string): string[] {
 
 // 会话斜杠命令清单，供输入框 Tab 补全提示使用；顺序即补全列表顺序。
 export const sessionSlashCommands = [
-  { name: 'init', description: '初始化配置并生成画像草稿' },
+  { name: 'init', description: '扫描项目并生成项目笔记草稿' },
+  { name: 'profile', description: '根据已确认笔记生成画像草稿' },
   { name: 'reqs', description: '提取需求条款草稿' },
   { name: 'plan', description: '生成用例草稿' },
-  { name: 'review', description: '交互审核画像、条款、用例与结果' },
+  { name: 'review', description: '交互审核笔记、画像、条款、用例与结果' },
   { name: 'run', description: '执行已确认用例' },
   { name: 'report', description: '离线重建运行报告' },
   { name: 'help', description: '显示命令帮助' },

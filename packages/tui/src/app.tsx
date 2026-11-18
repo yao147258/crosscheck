@@ -6,6 +6,7 @@ import { CasesView } from './views/cases';
 import { ClausesView } from './views/clauses';
 import { HomeView } from './views/home';
 import { ModulesView } from './views/modules';
+import { NotesView } from './views/notes';
 import { ProfileView } from './views/profile';
 import { ResultsView } from './views/results';
 import { RunsView } from './views/runs';
@@ -13,6 +14,7 @@ import { RunsView } from './views/runs';
 function RouteView({ route, nav }: { route: Route; nav: Nav }) {
   switch (route.name) {
     case 'home': return <HomeView nav={nav} />;
+    case 'notes': return <NotesView nav={nav} />;
     case 'profile': return <ProfileView nav={nav} />;
     case 'modules': return <ModulesView nav={nav} kind={route.kind} />;
     case 'clauses': return <ClausesView nav={nav} module={route.module} />;

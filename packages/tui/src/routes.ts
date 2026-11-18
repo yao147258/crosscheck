@@ -2,6 +2,7 @@ import type { Key } from 'ink';
 
 export type Route =
   | { name: 'home' }
+  | { name: 'notes' }
   | { name: 'profile' }
   | { name: 'modules'; kind: 'clauses' | 'cases' }
   | { name: 'clauses'; module: string }
@@ -9,7 +10,7 @@ export type Route =
   | { name: 'runs' }
   | { name: 'results'; runId: string };
 
-export type ReviewView = 'profile' | 'clauses' | 'cases' | 'results';
+export type ReviewView = 'notes' | 'profile' | 'clauses' | 'cases' | 'results';
 export interface Nav { push(route: Route): void; back(): void; quit(): void }
 
 export function navKey(input: string, key: Key, nav: Nav): boolean {
@@ -20,6 +21,7 @@ export function navKey(input: string, key: Key, nav: Nav): boolean {
 
 export function initialRoute(view?: ReviewView, module?: string, runId?: string): Route {
   switch (view) {
+    case 'notes': return { name: 'notes' };
     case 'profile': return { name: 'profile' };
     case 'clauses': return module ? { name: 'clauses', module } : { name: 'modules', kind: 'clauses' };
     case 'cases': return module ? { name: 'cases', module } : { name: 'modules', kind: 'cases' };

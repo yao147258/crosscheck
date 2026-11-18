@@ -2,6 +2,7 @@ import { ArtifactStore, GateError } from '@crosscheck/core';
 import { HELP, parseArgs, type CliArgs } from './args';
 import { InterruptedError, type CommandDependencies } from './context';
 import { initCommand } from './init';
+import { profileCommand } from './profile';
 import { planCommand } from './plan';
 import { reqsCommand } from './reqs';
 import { reviewCommand } from './review';
@@ -21,6 +22,7 @@ export async function cliMain(argv: string[], options: { log?: (s: string) => vo
       case 'session': return await sessionCommand(args, log, deps, options.signal);
       case 'run': return await runCommand(args, log, deps, options.signal);
       case 'report': await writeReport(new ArtifactStore(args.project), args.runId!, args.open, log); return 0;
+      case 'profile': return await profileCommand(args, log, deps, options.signal);
       case 'init': return await initCommand(args, log, deps, options.signal);
       case 'reqs': return await reqsCommand(args, log, deps, options.signal);
       case 'plan': return await planCommand(args, log, deps, options.signal);

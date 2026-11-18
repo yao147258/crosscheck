@@ -1,7 +1,11 @@
-export type { DiscoveryContext, DiscoveryDiagnostic, DiscoveryFact, DiscoveryPlugin, DiscoveryResult, DiscoverySource, ProjectReader } from './types';
+export type { DiscoveryContext, DiscoveryDiagnostic, DiscoveryFact, DiscoveryPlugin, DiscoveryResult, DiscoverySource, ProjectEntry, ProjectLister, ProjectReader } from './types';
+export { DEFAULT_IGNORES, WALK_LIMITS, parseGitignore, walkProject } from './walk';
+export type { FileEntry, WalkResult } from './walk';
 export { createProjectReader } from './files';
 export { discover } from './discover';
 export { staticScanPlugin } from './static-scan';
 export { openApiPlugin } from './openapi';
 export { SYNTHESIS_STEPS, SYNTHESIS_SYSTEM, synthesizeProfile } from './synthesize-profile';
 export type { SynthesisStepReport, SynthesizeProfileOptions, SynthesizeProfileResult } from './synthesize-profile';
+export { NOTES_SYSTEM, synthesizeNotes } from './synthesize-notes';
+export type { SynthesizeNotesOptions, SynthesizeNotesResult } from './synthesize-notes';

@@ -21,7 +21,10 @@ it('help不读取项目，参数错误退出2而非成功', async () => {
   expect(await cliMain(['run', '--force'], { log: s => output.push(s) })).toBe(2);
 });
 it('解析新命令的参数', () => {
-  expect(parseArgs(['init', '--openapi', 'a.yaml', '--openapi', 'b.yaml', '--openapi', 'a.yaml'])).toMatchObject({ command: 'init', openapi: ['a.yaml', 'b.yaml'] });
+  expect(parseArgs(['profile', '--openapi', 'a.yaml', '--openapi', 'b.yaml', '--openapi', 'a.yaml'])).toMatchObject({ command: 'profile', openapi: ['a.yaml', 'b.yaml'] });
+  expect(parseArgs(['init', '--refresh'])).toMatchObject({ command: 'init', refresh: true });
+  expect(parseArgs(['review', 'notes'])).toMatchObject({ view: 'notes' });
+  expect(() => parseArgs(['init', '--openapi', 'a.yaml'])).toThrow();
   expect(parseArgs(['reqs', '--module', 'M09'])).toMatchObject({ command: 'reqs', modules: ['M09'] });
   expect(parseArgs(['plan', '--module', 'M09', '--project', 'p'])).toMatchObject({ command: 'plan', modules: ['M09'], project: 'p' });
   expect(parseArgs(['review'])).toMatchObject({ command: 'review' });
