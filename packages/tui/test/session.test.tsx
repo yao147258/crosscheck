@@ -17,6 +17,60 @@ const editor = { async edit() { throw new Error('unused'); } };
 const open = async () => {};
 const frame = (ui: ReturnType<typeof render>) => ui.lastFrame() ?? '';
 
+it('启动时展示版本与各角色模型并过滤控制字符', () => {
+  const options: RunSessionOptions = { info: { version: '1.2.3', models: { extractor: 'mock:extract', planner: 'mock:plan', executor: 'mock:execute', reviewer: 'mock:review\u001b' } }, tokenize: text => [text], runSlashCommand: async () => ({ kind: 'exit' }), resolveReview: async () => { throw new Error('unused'); }, chatReply: async () => '' };
+  const ui = render(<SessionApp options={options} />);
+  for (const value of ['1.2.3', 'extractor', 'mock:extract', 'planner', 'mock:plan', 'executor', 'mock:execute', 'reviewer', 'mock:review']) expect(frame(ui)).toContain(value);
+  expect(frame(ui)).not.toContain('\u001b');
+});
+
+it('未配置模型时启动界面显示未配置', () => {
+  const options: RunSessionOptions = { info: { version: '1.2.3', models: undefined }, tokenize: text => [text], runSlashCommand: async () => ({ kind: 'exit' }), resolveReview: async () => { throw new Error('unused'); }, chatReply: async () => '' };
+  const ui = render(<SessionApp options={options} />);
+  expect(frame(ui)).toContain('未配置');
+});
+
+it('对话显示无角色称谓，输入区固定在终端底部并响应高度变化', async () => {
+  const options: RunSessionOptions = { tokenize: text => [text], runSlashCommand: async () => ({ kind: 'exit' }), resolveReview: async () => { throw new Error('unused'); }, chatReply: async () => '助手回复' };
+  const ui = render(<SessionApp options={options} />);
+  Object.defineProperty(ui.stdout, 'rows', { value: 12, configurable: true });
+  ui.stdout.emit('resize');
+  ui.stdin.write('用户消息'); ui.stdin.write(KEYS.enter);
+  await waitFor(() => frame(ui).includes('助手回复'));
+  expect(frame(ui)).toContain('用户消息');
+  expect(frame(ui)).not.toContain('你：');
+  expect(frame(ui)).not.toContain('助手：');
+  expect(frame(ui).split('\n')).toHaveLength(12);
+  expect(frame(ui).split('\n').at(-1)).toContain('>');
+  Object.defineProperty(ui.stdout, 'rows', { value: 8, configurable: true });
+  ui.stdout.emit('resize');
+  await waitFor(() => frame(ui).split('\n').length === 8);
+  expect(frame(ui).split('\n').at(-1)).toContain('>');
+});
+
+it.skipIf(process.env.FORCE_COLOR !== '3')('用户消息与输入区使用灰白背景和深色文字', async () => {
+  const options: RunSessionOptions = { tokenize: text => [text], runSlashCommand: async () => ({ kind: 'exit' }), resolveReview: async () => { throw new Error('unused'); }, chatReply: async () => '回答' };
+  const ui = render(<SessionApp options={options} />);
+  ui.stdin.write('用户消息'); ui.stdin.write(KEYS.enter);
+  await waitFor(() => frame(ui).includes('用户消息'));
+  const output = frame(ui);
+  expect(output).toMatch(/\x1b\[48;2;211;211;211m[^\n]*用户消息/);
+  expect(output).toMatch(/\x1b\[48;2;211;211;211m[^\n]*>/);
+  expect(output).toContain('\x1b[30m');
+});
+
+it('长回复超出终端高度时仍显示最新内容和底部输入区', async () => {
+  const options: RunSessionOptions = { tokenize: text => [text], runSlashCommand: async () => ({ kind: 'exit' }), resolveReview: async () => { throw new Error('unused'); }, chatReply: async () => Array.from({ length: 30 }, (_, i) => `回复行${i}`).join('\n') };
+  const ui = render(<SessionApp options={options} />);
+  Object.defineProperty(ui.stdout, 'rows', { value: 8, configurable: true });
+  ui.stdout.emit('resize');
+  ui.stdin.write('你好'); ui.stdin.write(KEYS.enter);
+  await waitFor(() => frame(ui).includes('回复行29'));
+  expect(frame(ui)).not.toContain('回复行0');
+  expect(frame(ui).split('\n')).toHaveLength(8);
+  expect(frame(ui).split('\n').at(-1)).toContain('>');
+});
+
 it('审核退出返回聊天并重新解析会话', async () => {
   const project = await createProject();
   const resolveReview = vi.fn(async () => ({ session: project.session, editor, open }));
@@ -54,7 +108,7 @@ it('会话显示去除不可信文本中的终端控制字符并保留换行', a
   const options: RunSessionOptions = { tokenize: text => [text], runSlashCommand: async () => ({ kind: 'log', code: 0, lines: [payload] }), resolveReview: async () => { throw new Error('unused'); }, chatReply: async () => payload };
   const ui = render(<SessionApp options={options} />);
   ui.stdin.write('hello'); ui.stdin.write(KEYS.enter);
-  await waitFor(() => frame(ui).includes('助手：'));
+  await waitFor(() => frame(ui).includes('丁\n戊'));
   expect(frame(ui)).toContain('丁\n戊');
   expect(frame(ui)).not.toMatch(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/);
   ui.stdin.write('/log'); ui.stdin.write(KEYS.enter);
@@ -72,7 +126,7 @@ it('显示用户输入和错误时过滤控制字符，但不改变提交的原�
   expect(frame(ui)).not.toContain('\u009b');
   ui.stdin.write(KEYS.enter);
   await waitFor(() => frame(ui).includes('失败隐藏文本'));
-  expect(frame(ui)).toContain('你：用户输入');
+  expect(frame(ui)).toContain('用户输入');
   expect(frame(ui)).not.toMatch(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/);
   expect(chatReply.mock.calls[0]?.[1]).toBe('用户\u009b输入');
 });

@@ -5,6 +5,16 @@ import { generateText } from 'ai';
 import { parseArgs, type CliArgs } from './args';
 import { resolveModels, withInterrupt, type CommandDependencies } from './context';
 import { cliMain } from './main';
+import cliPackage from '../package.json';
+
+export async function loadSessionInfo(project: string) {
+  try {
+    const { models } = await new ArtifactStore(project).loadConfig();
+    return { version: cliPackage.version, models: { extractor: models.extractor, planner: models.planner, executor: models.executor, reviewer: models.reviewer } };
+  } catch {
+    return { version: cliPackage.version, models: undefined };
+  }
+}
 
 export function tokenizeCommand(text: string): string[] {
   const tokens: string[] = [];
@@ -55,6 +65,7 @@ export async function sessionCommand(args: CliArgs, log: (s: string) => void, de
     return 2;
   }
   return withInterrupt(signal, async (sig) => runSession({
+    info: await loadSessionInfo(args.project),
     signal: sig,
     tokenize: tokenizeCommand,
     runSlashCommand: createSlashDispatcher(deps),

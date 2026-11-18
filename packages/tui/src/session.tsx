@@ -1,4 +1,4 @@
-import { Box, Text, render, useApp, useInput } from 'ink';
+import { Box, Text, render, useApp, useBoxMetrics, useInput, useWindowSize, type DOMElement } from 'ink';
 import { createElement, useCallback, useEffect, useRef, useState } from 'react';
 import { App } from './app';
 import type { ReviewEnv } from './context';
@@ -12,6 +12,7 @@ export type SlashCommandResult =
   | { kind: 'review'; args: { project: string; view?: ReviewView; modules?: string[]; runId?: string } }
   | { kind: 'log'; code: number; lines: string[] };
 export interface RunSessionOptions {
+  info?: { version: string; models: { extractor: string; planner: string; executor: string; reviewer: string } | undefined };
   tokenize: (text: string) => string[];
   runSlashCommand: (tokens: string[], signal: AbortSignal) => Promise<SlashCommandResult>;
   resolveReview: (args: Extract<SlashCommandResult, { kind: 'review' }>['args'], signal: AbortSignal) => Promise<ReviewEnv>;
@@ -21,6 +22,10 @@ export interface RunSessionOptions {
 
 export function SessionApp({ options }: { options: RunSessionOptions }) {
   const { exit } = useApp();
+  const { rows, columns } = useWindowSize();
+  const content = useRef<DOMElement>(null);
+  const { height } = useBoxMetrics(content);
+  const viewport = Math.max(0, rows - 1);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const history = useRef<ChatMessage[]>([]);
   const [input, setInput] = useState('');
@@ -100,7 +105,18 @@ export function SessionApp({ options }: { options: RunSessionOptions }) {
     if (error) append('assistant', `审核错误：${error.message}`);
     if (externalAbort.current) exit(error ?? 2);
   }} />;
-  return <Box flexDirection="column"><Text bold>Crosscheck 交互会话</Text>{messages.map((m, i) => <Text key={i}>{m.role === 'user' ? '你' : '助手'}：{safeText(m.content)}</Text>)}<Text>{busy ? '执行中，Ctrl+C 中断并等待清理' : `> ${safeText(input)}`}</Text></Box>;
+  return <Box flexDirection="column" height={Math.max(1, rows)}>
+    <Box height={viewport} overflow="hidden" flexShrink={0}>
+      <Box ref={content} position="absolute" top={-Math.max(0, height - viewport)} width={columns} flexDirection="column">
+        <Text bold>Crosscheck 交互会话{options.info ? ` · v${safeText(options.info.version)}` : ''}</Text>
+        {options.info && (['extractor', 'planner', 'executor', 'reviewer'] as const).map(role => <Text key={role}>{role}：{safeText(options.info?.models?.[role] ?? '未配置')}</Text>)}
+        {messages.map((m, i) => m.role === 'user'
+          ? <Box key={i} backgroundColor="#d3d3d3"><Text color="black">{safeText(m.content)}</Text></Box>
+          : <Text key={i}>{safeText(m.content)}</Text>)}
+      </Box>
+    </Box>
+    <Box backgroundColor="#d3d3d3" flexShrink={0}><Text color="black" wrap="truncate-start">{busy ? '执行中，Ctrl+C 中断并等待清理' : `> ${safeText(input)}`}</Text></Box>
+  </Box>;
 }
 
 export async function runSession(options: RunSessionOptions): Promise<number> {

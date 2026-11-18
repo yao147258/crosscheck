@@ -5,7 +5,8 @@ import { ReviewSession, approveClause } from '@crosscheck/tui';
 import { clause } from '../../tui/test/fixture';
 import { scriptedModel } from '../../agent/src/testing/scripted-model';
 import { cleanupProjects, createProject } from '../../tui/test/fixture';
-import { chatReply, createSlashDispatcher, tokenizeCommand } from '../src/session';
+import { chatReply, createSlashDispatcher, loadSessionInfo, tokenizeCommand } from '../src/session';
+import cliPackage from '../package.json';
 
 afterEach(async () => { vi.restoreAllMocks(); await cleanupProjects(); });
 
@@ -51,6 +52,24 @@ it('缺少模型配置时聊天显示错误且不影响命令分发', async () =
   const signal = new AbortController().signal;
   await expect(chatReply(root, [], '你好', {}, signal)).rejects.toThrow();
   expect(await createSlashDispatcher({})(['help'], signal)).toMatchObject({ kind: 'log', code: 0 });
+});
+
+it('启动信息读取项目模型配置和 CLI 版本', async () => {
+  const { root } = await createProject();
+  expect(await loadSessionInfo(root)).toEqual({ version: cliPackage.version, models: { extractor: 'mock:x', planner: 'mock:p', executor: 'mock:e', reviewer: 'mock:r' } });
+});
+
+it('配置文件不存在时启动信息不阻止会话', async () => {
+  const { root } = await createProject();
+  const { unlink } = await import('node:fs/promises');
+  await unlink(new (await import('@crosscheck/core')).ArtifactStore(root).resolve('config.yaml'));
+  expect(await loadSessionInfo(root)).toEqual({ version: cliPackage.version, models: undefined });
+});
+
+it('配置无效时启动信息不阻止会话', async () => {
+  const { root, artifacts } = await createProject();
+  await artifacts.writeYaml('config.yaml', {});
+  expect(await loadSessionInfo(root)).toEqual({ version: cliPackage.version, models: undefined });
 });
 
 it('识别引号包围的含空格项目路径', () => {
