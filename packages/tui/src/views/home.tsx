@@ -16,6 +16,7 @@ export function HomeView({ nav }: { nav: Nav }) {
     { label: `条款审核（待处理 ${n(data?.clausesPending)}）`, route: { name: 'modules', kind: 'clauses' } },
     { label: `用例审核（待处理 ${n(data?.casesPending)}）`, route: { name: 'modules', kind: 'cases' } },
     { label: `结果审核（运行 ${n(data?.runs)} 次）`, route: { name: 'runs' } },
+    { label: '项目笔记审核', route: { name: 'notes' } },
   ];
   useInput((input, key) => {
     if (navKey(input, key, nav)) return;

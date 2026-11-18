@@ -3,7 +3,7 @@ import { access, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { discover, staticScanPlugin } from '../src/index';
-import { sanitize } from '../src/sanitize';
+import { sanitize, sanitizeMultiline } from '../src/sanitize';
 
 let root: string;
 beforeEach(async () => { root = await mkdtemp(join(tmpdir(), 'static-scan-')); });
@@ -11,6 +11,35 @@ afterEach(async () => { await rm(root, { recursive: true, force: true }); });
 const scan = () => discover({ projectRoot: root, plugins: [staticScanPlugin] });
 
 describe('静态扫描', () => {
+  it('整段清理 YAML 块标量、跨行引号及 Markdown 示例，保持行数', () => {
+    const text = ['# 配置', '```yaml', 'password: |-', '  first-secret', '  second-secret', 'safe: yes', 'api_key: >', '  folded-secret', '  more-secret', 'token: "first-line', '  second-line-secret', '  last-secret"', 'authorization: Bearer direct-secret', 'url: https://user:url-secret@example.com/?key=query-secret', '```', '保留普通文字'].join('\n');
+    const cleaned = sanitizeMultiline(text);
+    for (const secret of ['first-secret', 'second-secret', 'folded-secret', 'more-secret', 'first-line', 'second-line-secret', 'last-secret', 'direct-secret', 'url-secret', 'query-secret']) expect(cleaned).not.toContain(secret);
+    expect(cleaned.split('\n')).toHaveLength(text.split('\n').length);
+    expect(cleaned).toContain('safe: yes');
+    expect(cleaned).toContain('保留普通文字');
+  });
+
+  it.each(['|2-', '|+2', '>3+', '>-3', '', 'plain-first'])('敏感字段 %s 的缩进续行不会泄漏', (indicator) => {
+    const text = `password: ${indicator}\n  continuation-secret\n  nested-secret\nsafe: yes`;
+    const cleaned = sanitizeMultiline(text);
+    expect(cleaned).not.toMatch(/continuation-secret|nested-secret|plain-first/);
+    expect(cleaned).toContain('safe: yes');
+    expect(cleaned.split('\n')).toHaveLength(4);
+  });
+
+  it.each([
+    'https://example.test/?payload=["first-secret","tail-sensitive"]',
+    '前缀 "https://example.test/?payload=["first-secret","tail-sensitive"]" 后缀',
+    '//example.test/?payload=["first-secret","tail-sensitive"]',
+  ])('清理含引号查询参数的完整 URL：%s', (text) => {
+    expect(sanitizeMultiline(text)).not.toMatch(/first-secret|tail-sensitive/);
+  });
+
+  it('未闭合多行敏感值时保守清除余下文本', () => {
+    const text = 'password: "one-secret\nstill-secret\nend-secret';
+    expect(sanitizeMultiline(text)).not.toMatch(/one-secret|still-secret|end-secret/);
+  });
   it('读取有限清单并保留真实来源，不执行脚本，不读取真实环境文件', async () => {
     await writeFile(join(root, 'package.json'), JSON.stringify({ name: 'shop', scripts: { dev: 'node server.js', danger: 'node -e "require(\'fs\').writeFileSync(\'marker\',\'x\')"' }, dependencies: { express: '5' } }, null, 2));
     await writeFile(join(root, 'README.md'), '# 项目\n运行 npm start\n');

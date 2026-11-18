@@ -37,6 +37,131 @@ function options(model: ReturnType<typeof scriptedModel>, existing = {}) {
 }
 
 describe('synthesizeProfile', () => {
+  it('每步注入脱敏后的确认笔记，不改变调用方文本', async () => {
+    const model = scriptedModel(ALL_STEPS);
+    const notes = '# 项目笔记\npassword=secret123\n普通说明';
+    const result = await synthesizeProfile({ ...options(model), notes });
+    for (const index of [0, 1, 2, 3, 4]) {
+      expect(payload(model, index).notes).toContain('普通说明');
+      expect(payload(model, index).notes).not.toContain('secret123');
+      expect(payload(model, index).notes).toContain('[已隐藏]');
+    }
+    expect(notes).toContain('secret123');
+    expect(result.crossCheck).toEqual([]);
+  });
+
+  it('发送前递归脱敏已确认与前步生成上下文，但不修改原始画像', async () => {
+    const url = 'http://user:generated-secret@example.test:3000/path?token=hidden-query#hidden-fragment';
+    const existing = { 'pages.yaml': { version: 1, pages: { existing: { environment: 'local', path: '/x', description: '跳转 //user:relative-secret@example.test/path?token=relative-query', knowledge: ['https:\\/\\/user:escaped-secret@example.test/path?token=escaped-query'], sources: [facts[1]!.source] } }, 'https://user:key-secret@example.test/?token=key-query': '安全内容' } };
+    const before = structuredClone(existing);
+    const env = { version: 1, environments: { local: { baseURL: url, healthcheck: 'http://example.test:3000/health', reset: null } } };
+    const model = scriptedModel([finish({ 'environments.yaml': env }), ALL_STEPS[1]!, finish(pick('api-catalog.yaml')), ...ALL_STEPS.slice(3)]);
+    const result = await synthesizeProfile(options(model, existing));
+    const sent = JSON.stringify(payload(model, 1).context);
+    for (const secret of ['generated-secret', 'hidden-query', 'hidden-fragment', 'relative-secret', 'relative-query', 'escaped-secret', 'escaped-query', 'key-secret', 'key-query']) expect(sent).not.toContain(secret);
+    expect(sent).toContain('安全内容');
+    expect(result.generated['environments.yaml']).toEqual(env);
+    expect(existing).toEqual(before);
+  });
+
+  it('确认笔记的多行凭据在每次模型调用前清理', async () => {
+    const model = scriptedModel(ALL_STEPS);
+    await synthesizeProfile({ ...options(model), notes: '# 项目\npassword: |\n  multiline-secret\n安全文字' });
+    for (let index = 0; index < 5; index++) {
+      expect(payload(model, index).notes).not.toContain('multiline-secret');
+      expect(payload(model, index).notes).toContain('安全文字');
+    }
+  });
+
+  it('每步对之前模型生成的上下文应用注入的已知密钥清洗', async () => {
+    const env = { version: 1, environments: { local: { baseURL: 'http://localhost:3000', healthcheck: 'http://localhost:3000/health', reset: null, start: { program: 'fixture-key', argv: [], env: {} } } } };
+    const model = scriptedModel([finish({ 'environments.yaml': env }), ...ALL_STEPS.slice(1)]);
+    const cleanContext = (value: unknown) => JSON.parse(JSON.stringify(value).replaceAll('fixture-key', '[密钥]'));
+    const result = await synthesizeProfile({ ...options(model), cleanContext });
+    expect(JSON.stringify(payload(model, 1).context)).not.toContain('fixture-key');
+    expect(JSON.stringify(payload(model, 1).context)).toContain('[密钥]');
+    expect(result.generated['environments.yaml']).toEqual(env);
+    expect(result.crossCheck).toEqual([]);
+  });
+
+  it('未提供笔记时载荷不含 notes', async () => {
+    const model = scriptedModel(ALL_STEPS);
+    await synthesizeProfile(options(model));
+    for (const index of [0, 1, 2, 3, 4]) expect(Object.hasOwn(payload(model, index), 'notes')).toBe(false);
+  });
+
+  it('接受与事实完全匹配的 API 和页面来源', async () => {
+    const model = scriptedModel([...ALL_STEPS.slice(0, 2), finish({
+      'api-catalog.yaml': { version: 1, operations: { orders: { environment: 'local', method: 'GET', path: '/orders', description: '订单', sources: [facts[1]!.source] } } },
+      'pages.yaml': { version: 1, pages: { orders: { environment: 'local', path: '/orders', description: '订单页面', sources: [facts[0]!.source] } } },
+    }), ...ALL_STEPS.slice(3)]);
+    const result = await synthesizeProfile(options(model));
+    expect(result.steps[2]!.status).toBe('generated');
+    expect(result.crossCheck).toEqual([]);
+  });
+
+  it.each([
+    ['API 来源不存在', 'GET', '/orders', { file: 'other.yaml', line: 5, excerpt: '/orders' }],
+    ['API method 不匹配', 'POST', '/orders', facts[1]!.source],
+    ['API path 不匹配', 'GET', '/other', facts[1]!.source],
+    ['API 摘录不匹配', 'GET', '/orders', { ...facts[1]!.source, excerpt: '伪造' }],
+  ])('%s 时拒绝输出并允许修正重试', async (_label, method, path, source) => {
+    const bad = finish({
+      'api-catalog.yaml': { version: 1, operations: { orders: { environment: 'local', method, path, description: '订单', sources: [source] } } },
+      ...pick('pages.yaml'),
+    });
+    const model = scriptedModel([...ALL_STEPS.slice(0, 2), bad, ALL_STEPS[2]!, ...ALL_STEPS.slice(3)]);
+    const result = await synthesizeProfile(options(model));
+    expect(model.doGenerateCalls).toHaveLength(6);
+    expect(result.generated['api-catalog.yaml']).toEqual(FILES['api-catalog.yaml']);
+    expect(result.crossCheck).toEqual([]);
+  });
+
+  it('每个 API 来源都必须对应相同 method 和 path 的事实', async () => {
+    const other = { ...facts[1]!, method: 'POST', source: { file: 'other.yaml', line: 8, excerpt: 'POST /orders' } } as DiscoveryFact;
+    const bad = finish({ 'api-catalog.yaml': { version: 1, operations: { orders: {
+      environment: 'local', method: 'GET', path: '/orders', description: '订单', sources: [facts[1]!.source, other.source],
+    } } }, ...pick('pages.yaml') });
+    const model = scriptedModel([...ALL_STEPS.slice(0, 2), bad, ALL_STEPS[2]!, ...ALL_STEPS.slice(3)]);
+    const result = await synthesizeProfile({ ...options(model), facts: [...facts, other] });
+    expect(result.generated['api-catalog.yaml']).toEqual(FILES['api-catalog.yaml']);
+    expect(result.steps[2]!.status).toBe('generated');
+    expect(model.doGenerateCalls).toHaveLength(6);
+  });
+
+  it('页面来源错误后可重试生成正确草稿', async () => {
+    const bad = finish({ ...pick('api-catalog.yaml'), 'pages.yaml': { version: 1, pages: {
+      orders: { environment: 'local', path: '/orders', description: '订单', sources: [{ ...facts[1]!.source, line: 99 }] },
+    } } });
+    const model = scriptedModel([...ALL_STEPS.slice(0, 2), bad, ALL_STEPS[2]!, ...ALL_STEPS.slice(3)]);
+    const result = await synthesizeProfile(options(model));
+    expect(model.doGenerateCalls).toHaveLength(6);
+    expect(result.generated['pages.yaml']).toEqual(FILES['pages.yaml']);
+    expect(result.crossCheck).toEqual([]);
+  });
+
+  it('页面引用不存在的来源时整步失败，后续上下文不包含草稿', async () => {
+    const bad = finish({ ...pick('api-catalog.yaml'), 'pages.yaml': { version: 1, pages: {
+      orders: { environment: 'local', path: '/orders', description: '订单', sources: [{ ...facts[1]!.source, line: 99 }] },
+    } } });
+    const model = scriptedModel([...ALL_STEPS.slice(0, 2), bad, bad, bad, ...ALL_STEPS.slice(3)]);
+    const result = await synthesizeProfile(options(model));
+    expect(result.steps[2]).toMatchObject({ status: 'failed', detail: expect.stringContaining('invalid-output') });
+    expect(result.generated['pages.yaml']).toBeUndefined();
+    expect(payload(model, 5).context['api-catalog.yaml']).toBeUndefined();
+  });
+
+  it('保留旧的已确认画像，即使其来源不在当前事实中', async () => {
+    const existing = { 'api-catalog.yaml': { version: 1, operations: { legacy: {
+      environment: 'local', method: 'GET', path: '/legacy', description: '旧接口', knowledge: [],
+      sources: [{ file: 'old.yaml', line: 1, excerpt: '旧来源' }],
+    } } } };
+    const model = scriptedModel([...ALL_STEPS.slice(0, 2), finish(pick('pages.yaml')), ...ALL_STEPS.slice(3)]);
+    const result = await synthesizeProfile(options(model, existing));
+    expect(result.steps[2]!.status).toBe('generated');
+    expect(result.crossCheck).toEqual([]);
+    expect(payload(model, 2).context['api-catalog.yaml']).toEqual(existing['api-catalog.yaml']);
+  });
   it('按依赖顺序分 5 步生成，每步独立预算并携带前序结果和相关事实', async () => {
     const model = scriptedModel(ALL_STEPS);
     const opts = options(model);

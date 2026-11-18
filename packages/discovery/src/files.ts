@@ -1,19 +1,75 @@
 import { constants } from 'node:fs';
-import { lstat, open, realpath } from 'node:fs/promises';
+import { lstat, open, opendir, realpath } from 'node:fs/promises';
 import path from 'node:path';
-import type { ProjectReader } from './types';
+import type { ProjectEntry, ProjectLister } from './types';
 
 const MAX_BYTES = 1024 * 1024;
 
-function isCredential(name: string): boolean {
+export function isCredential(name: string): boolean {
   const lower = name.toLowerCase();
   return (lower.startsWith('.env') && lower !== '.env.example') ||
     /^(?:\.ssh|\.aws|\.gnupg|\.npmrc|\.pypirc|\.netrc|\.dockerconfigjson|(?:credentials|secrets?|tokens?)(?:\..*)?|id_(?:rsa|dsa|ecdsa|ed25519)(?:\..*)?)$/.test(lower) ||
     /\.(?:pem|key|p12|pfx|keystore)$/.test(lower);
 }
 
-export function createProjectReader(projectRoot: string): ProjectReader {
+export function createProjectReader(projectRoot: string): ProjectLister {
   return {
+    async list(dir, signal, options) {
+      signal?.throwIfAborted();
+      const normalized = (dir || '.').replaceAll('\\', '/');
+      const parts = normalized.split('/');
+      if (path.posix.isAbsolute(normalized) || path.win32.isAbsolute(dir) || /^[a-z]:/i.test(normalized) ||
+          parts.some((part) => part === '..' || (part !== '.' && /[. ]$/.test(part)) || isCredential(part) || part.includes(':') || /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?$/i.test(part))) {
+        throw new Error('不允许读取该路径');
+      }
+      let root: string;
+      try { root = await realpath(projectRoot); }
+      catch { signal?.throwIfAborted(); throw new Error('读取项目文件失败'); }
+      signal?.throwIfAborted();
+      let current = root;
+      try {
+        for (const part of parts) {
+          if (!part || part === '.') continue;
+          current = path.join(current, part);
+          const stat = await lstat(current);
+          signal?.throwIfAborted();
+          if (stat.isSymbolicLink()) throw new Error('不允许读取符号链接');
+        }
+        const resolved = await realpath(current);
+        signal?.throwIfAborted();
+        const relative = path.relative(root, resolved);
+        if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) throw new Error('不允许读取项目外文件');
+        if (options?.maxEntries !== undefined && (!Number.isSafeInteger(options.maxEntries) || options.maxEntries < 0)) throw new Error('目录条目上限必须为非负整数');
+        const directory = await opendir(current);
+        const entries: ProjectEntry[] = [];
+        let seen = 0;
+        for await (const entry of directory) {
+          signal?.throwIfAborted();
+          if (options?.maxEntries !== undefined && seen >= options.maxEntries) {
+            options.onDiagnostic?.('目录条目达到上限，已截断；受底层目录顺序影响，可能遗漏关键文件');
+            break;
+          }
+          seen++;
+          options?.onEntry?.();
+          let stat;
+          try { stat = await lstat(path.join(current, entry.name)); }
+          catch { signal?.throwIfAborted(); options?.onDiagnostic?.('部分目录条目读取失败'); continue; }
+          signal?.throwIfAborted();
+          const item: ProjectEntry = { name: entry.name, type: stat.isDirectory() ? 'directory' : 'file', size: stat.isDirectory() ? 0 : stat.size };
+          if (stat.isSymbolicLink()) item.link = true;
+          entries.push(item);
+        }
+        return entries;
+      } catch (error) {
+        signal?.throwIfAborted();
+        if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') {
+          options?.onDiagnostic?.('目录已不存在，扫描不完整');
+          return [];
+        }
+        if (error instanceof Error && !('code' in error)) throw error;
+        throw new Error('读取项目文件失败');
+      }
+    },
     async readText(file, signal) {
       signal?.throwIfAborted();
       const normalized = file.replaceAll('\\', '/');

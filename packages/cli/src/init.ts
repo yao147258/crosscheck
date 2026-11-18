@@ -1,14 +1,10 @@
-import { Approvals, ArtifactStore, BudgetTracker, ProjectConfigSchema, readProfileFiles, type ProfileFile } from '@crosscheck/core';
-import { discover, openApiPlugin, staticScanPlugin, synthesizeProfile } from '@crosscheck/discovery';
+import { Approvals, ArtifactStore, BudgetTracker, decodeNotesUtf8, NotesTextSchema, ProjectConfigSchema } from '@crosscheck/core';
+import { synthesizeNotes, walkProject } from '@crosscheck/discovery';
+import { sanitizeMultiline } from '@crosscheck/discovery/sanitize';
 import type { CliArgs } from './args';
 import { loadModelContext, resolveModels, withInterrupt, type CommandDependencies } from './context';
 
-export const DEFAULT_OPENAPI_FILES = [
-  'openapi.yaml', 'openapi.yml', 'openapi.json', 'swagger.yaml', 'swagger.yml', 'swagger.json',
-  'docs/openapi.yaml', 'docs/openapi.json', 'api/openapi.yaml',
-];
-
-/** 模型引用只是示例，需按实际可用的厂商与模型修改。 */
+export const NOTES_FILE = 'notes.md';
 export const CONFIG_TEMPLATE = {
   budget: { perCase: { steps: 60, tokens: 400000, minutes: 10 } },
   requirementsDocs: [] as string[],
@@ -21,45 +17,54 @@ export async function initCommand(args: CliArgs, log: (s: string) => void, deps:
     sig.throwIfAborted();
     if (!projectConfig) {
       await artifacts.writeYaml('config.yaml', CONFIG_TEMPLATE);
-      log('已写入 .crosscheck/config.yaml 模板：请配置 requirementsDocs 和全局 ~/.crosscheck/config.yaml，然后重新运行 crosscheck init');
+      log('已写入 .crosscheck/config.yaml 模板：请配置后重新运行 crosscheck init');
       return 2;
+    }
+    const approvals = await Approvals.load(artifacts);
+    const original = await artifacts.readBytes(NOTES_FILE);
+    let existing: string | undefined;
+    try { existing = original === undefined ? undefined : decodeNotesUtf8(original); }
+    catch { log('notes.md 不是有效的 UTF-8，请修复后重试'); return 2; }
+    sig.throwIfAborted();
+    if (existing !== undefined && approvals.state('notes', 'project', existing) === 'approved' && !args.refresh) {
+      log('项目笔记已确认，跳过生成（需要更新时使用 --refresh）');
+      return 0;
+    }
+    if (args.refresh && existing !== undefined && !NotesTextSchema.safeParse(existing).success) {
+      log('旧笔记格式不合法或超过大小限制，请修复后刷新'); return 2;
     }
     const context = await loadModelContext(artifacts, deps);
     const { config, redactor } = context;
-    const scan = await discover({ projectRoot: args.project, plugins: [staticScanPlugin, openApiPlugin(args.openapi ?? DEFAULT_OPENAPI_FILES)], signal: sig });
-    log(`发现事实 ${scan.facts.length} 条`);
-    for (const d of scan.diagnostics) log(redactor.text(`诊断 [${d.plugin}]${d.file ? ` ${d.file}` : ''}：${d.message}`));
-
-    const approvals = await Approvals.load(artifacts);
-    const existing: Partial<Record<ProfileFile, unknown>> = {};
-    for (const file of await readProfileFiles(artifacts)) {
-      if (file.present && file.ok && approvals.state('profile', file.name, file.value) === 'approved') existing[file.name] = file.value;
-    }
+    const walk = await walkProject(args.project, { signal: sig });
+    for (const diagnostic of walk.diagnostics) log(redactor.text(`扫描诊断：${diagnostic}`));
+    log(`登记文件 ${walk.files.length} 个，摘录 ${walk.files.filter((file) => file.excerpt).length} 个`);
     sig.throwIfAborted();
     const models = resolveModels(config, 'extractor', context.deps, (line) => log(redactor.text(line)));
+    const result = await synthesizeNotes({
+      files: redactor.value(walk.files), diagnostics: walk.diagnostics.map((line) => redactor.text(line)),
+      previous: args.refresh && existing !== undefined ? redactor.text(existing) : undefined,
+      models, budget: () => new BudgetTracker(config.budget.perCase), signal: sig, resilience: deps.resilience,
+    }).catch((error: unknown) => {
+      if (sig.aborted && (error === sig.reason || error instanceof Error && error.name === 'AbortError')) throw error;
+      throw new Error(redactor.text(error instanceof Error ? error.message : '模型调用失败'));
+    });
     sig.throwIfAborted();
-    const result = await synthesizeProfile({
-      facts: scan.facts,
-      existing,
-      models,
-      budget: () => new BudgetTracker(config.budget.perCase),
-      signal: sig,
-      resilience: deps.resilience,
-    }).catch((error: unknown) => { throw new Error(redactor.text(error instanceof Error ? error.message : '模型调用失败')); });
+    if (result.status !== 'done') { log(redactor.text(`笔记生成失败：${result.detail}`)); return 2; }
+    const text = redactor.text(sanitizeMultiline(result.text));
+    if (!NotesTextSchema.safeParse(text).success) { log('脱敏后的笔记格式不合法，未写入'); return 2; }
+    const current = await artifacts.readBytes(NOTES_FILE);
     sig.throwIfAborted();
-    for (const [name, value] of Object.entries(result.generated)) {
-      sig.throwIfAborted();
-      await artifacts.writeYaml(`system/${name}`, redactor.value(value));
+    if (original === undefined ? current !== undefined : current === undefined || !original.equals(current)) {
+      log('项目笔记在生成期间发生修改，未覆盖；请重试'); return 2;
+    }
+    const latestApprovals = await Approvals.load(artifacts);
+    if (JSON.stringify(latestApprovals.record('notes', 'project')) !== JSON.stringify(approvals.record('notes', 'project'))) {
+      log('笔记审核记录在生成期间发生变化，未覆盖；请重试'); return 2;
     }
     sig.throwIfAborted();
-    for (const step of result.steps) {
-      const files = step.files.join('、');
-      if (step.status === 'generated') log(`已生成 ${files}`);
-      else if (step.status === 'skipped') log(`跳过（已确认）${files}`);
-      else log(redactor.text(`生成失败 ${files}：${step.detail ?? ''}`));
-    }
-    for (const issue of result.crossCheck) log(redactor.text(`交叉校验：${issue}`));
-    log('画像草稿已写入 .crosscheck/system/，请运行 crosscheck review profile 审核');
-    return result.interrupted || result.steps.some((s) => s.status === 'failed') ? 2 : 0;
+    await artifacts.writeBytes(NOTES_FILE, Buffer.from(text));
+    sig.throwIfAborted();
+    log('项目笔记草稿已写入 .crosscheck/notes.md，请运行 crosscheck review notes 审核');
+    return 0;
   });
 }

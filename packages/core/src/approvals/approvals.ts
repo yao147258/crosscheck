@@ -13,7 +13,7 @@ export function caseApprovalPayload(tc: TestCase, clauses: Clause[]) {
   return { version: 1 as const, testCase: { ...tc, covers: [...tc.covers].sort() }, clauses: covered };
 }
 
-export type ApprovalKind = 'clause' | 'case' | 'profile';
+export type ApprovalKind = 'clause' | 'case' | 'profile' | 'notes';
 export type ApprovalState = 'approved' | 'stale' | 'none';
 
 const ApprovalRecordSchema = z.object({ hash: z.string(), by: z.string(), at: z.string() });

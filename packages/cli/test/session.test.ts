@@ -163,8 +163,18 @@ it('status 指令读取指定项目状态且拒绝无效参数', async () => {
 });
 
 it('会话命令清单覆盖全部斜杠命令且带描述', () => {
-  expect(sessionSlashCommands.map((command) => command.name)).toEqual(['init', 'reqs', 'plan', 'review', 'run', 'report', 'status', 'help', 'clear', 'exit']);
+  expect(sessionSlashCommands.map((command) => command.name)).toEqual(['init', 'profile', 'reqs', 'plan', 'review', 'run', 'report', 'status', 'help', 'clear', 'exit']);
+  expect(sessionSlashCommands.find((command) => command.name === 'init')?.description).toContain('笔记');
+  expect(sessionSlashCommands.find((command) => command.name === 'profile')?.description).toContain('画像');
+  expect(sessionSlashCommands.find((command) => command.name === 'review')?.description).toContain('笔记');
   for (const command of sessionSlashCommands) expect(command.description.length).toBeGreaterThan(0);
+});
+
+it('profile 斜杠命令交给 CLI 并执行笔记确认门禁', async () => {
+  const { root } = await createProject();
+  const dispatch = createSlashDispatcher({});
+  const result = await dispatch(['profile', '--project', root], new AbortController().signal);
+  expect(result).toMatchObject({ kind: 'log', code: 2, lines: expect.arrayContaining([expect.stringContaining('笔记尚未确认')]) });
 });
 
 it('审核参数保留项目路径并校验错误参数', async () => {

@@ -20,7 +20,30 @@ node packages/cli/dist/index.js --help
 
 以下示例假设用户自己启动了 `http://127.0.0.1:3000` 测试应用，`GET /health` 返回成功，`POST /api/action` 改变状态，`GET /api/item` 返回完整 JSON `{ "status": "done" }`。服务不存在时必须先人工提供适配，Crosscheck 不会替用户启动未知系统。
 
-## 2. 手填配置、全部七画像
+## 2. 生成笔记与画像，或手填配置
+
+自动接入可在项目目录使用以下流程（也可为每条命令添加 `--project E:/my-test-project`）。先按下文配置全局模型；首次 `init` 若缺少项目配置，会写入 `.crosscheck/config.yaml` 模板并退出 2，需检查、补充配置后重跑。
+
+```powershell
+crosscheck init
+# 查看并按需编辑 .crosscheck/notes.md，人工审核确认
+crosscheck review notes
+crosscheck profile --openapi openapi.yaml
+crosscheck review profile
+crosscheck reqs --module M
+crosscheck review clauses --module M
+crosscheck plan --module M
+crosscheck review cases --module M
+crosscheck run --module M
+```
+
+`init` 只生成项目笔记草稿，不再生成画像。`profile` 要求笔记存在且已确认，结合该笔记与结构化事实扫描生成 `.crosscheck/system/` 的七份画像草稿；`--openapi` 可重复，省略时使用默认候选文件。旧用法 `init --openapi <文件>` 应迁移到 `profile --openapi <文件>`。画像、条款和用例仍需人工审核；`plan` 要求七画像与相关条款已确认，`run` 还要求用例确认及凭证、网络授权等执行门禁。
+
+已确认笔记默认在 `init` 时跳过；`init --refresh` 强制重新生成，并将旧笔记提供给模型以尝试合并人工补充，不保证完整保留，结果须人工核对并重新确认。未确认或修改后失效的笔记直接重跑 `init` 会覆盖；编辑笔记后也须重新 `review notes`。旧项目已有画像和有效确认不受影响，但运行 `profile` 前仍须补生成并确认笔记；已确认画像在重跑时跳过。
+
+扫描是预算内的最佳努力，不保证扫描整个项目或完整摘录：内置忽略、文件数量与大小、目录深度及摘录预算等均可能造成遗漏。项目扫描仅处理根目录 `.gitignore` 的有限子集，不保证支持子目录规则、`**` 或取反语义；按有限名称及扩展名规则忽略常见凭证文件，`.env.example` 是例外，无法识别非标准凭证文件，因此可能扫描本应忽略的非标准秘密。脱敏使用有限规则，不能保证识别所有秘密。文件名、摘录、已确认笔记和其他相关内容可能发送给配置的模型服务；运行前应检查内容和服务授权，分享生成物前须人工检查。
+
+也可不使用生成流程，按以下步骤手工准备配置、七画像、条款和用例。
 
 在用户主目录创建 `~/.crosscheck/config.yaml`，以下模型 ID、URL 和密钥均为占位示例，必须替换。此文件包含明文模型密钥：不要提交、共享或粘贴到日志；POSIX 系统应限制目录和文件权限（例如 `chmod 700 ~/.crosscheck && chmod 600 ~/.crosscheck/config.yaml`），Windows 应由用户自行设置文件 ACL，程序不会自动提供 ACL 保护。现有全局文件不会被自动创建或覆盖。
 
