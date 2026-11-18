@@ -44,6 +44,12 @@ pricing: {}
 
 升级时须手动修改旧全局配置：将不再支持的 `google`、`deepseek`、`ollama`、`openai-compatible` 类型改为目标服务实际支持的 `openai` 或 `anthropic` 协议，补齐 provider 声明、地址和密钥；不能仅凭类型改名假定兼容。`openai` 使用 OpenAI Responses API，`anthropic` 使用 Anthropic Messages API；仅兼容旧版 Chat Completions 的服务不兼容 `openai` 类型。请确认服务支持对应协议，无法支持时需更换服务。运行开始时固定配置；仅轮换密钥不会改变恢复指纹，其他公开模型配置变化会阻止不兼容的 resume。离线报告和审核不需要全局模型密钥。
 
+### 聊天请求诊断
+
+聊天模型请求默认记录到 `%USERPROFILE%\.crosscheck\chat-requests.jsonl`，包含 SDK 交给 fetch 的方法、地址、请求头和请求体；查询参数全部省略，已知模型密钥和常见认证字段会脱敏。底层网络层自动添加的请求头及重定向后的请求不在记录范围内。
+
+**请求体可能包含对话历史、项目摘要或其他敏感数据，脱敏不能保证识别所有秘密。** 不要随意分享日志；排查完成后建议删除日志。Windows 用户应自行限制日志文件的访问权限。
+
 在被测项目创建 `.crosscheck/system`、`.crosscheck/requirements`、`.crosscheck/cases`。项目配置和其他工件不要写模型密钥。以下各代码块分别保存为标注文件。
 
 项目 `.crosscheck/config.yaml`

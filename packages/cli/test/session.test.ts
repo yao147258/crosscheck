@@ -1,5 +1,5 @@
 import { expect, it, vi } from 'vitest';
-import { rm, writeFile } from 'node:fs/promises';
+import { readFile, rm, writeFile, mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import { afterEach } from 'vitest';
 import { APICallError } from 'ai';
@@ -11,7 +11,7 @@ import { chatReply as realChatReply, createSlashDispatcher, loadSessionInfo, tok
 import cliPackage from '../package.json';
 const chatReply: typeof realChatReply = (root, history, text, deps, signal) => realChatReply(root, history, text, { ...deps, userConfigHome: path.join(root, 'user') }, signal);
 
-afterEach(async () => { vi.restoreAllMocks(); await cleanupProjects(); });
+afterEach(async () => { vi.restoreAllMocks(); vi.unstubAllGlobals(); await cleanupProjects(); });
 
 it('聊天无需确认人或审核会话，读取已有确认且不写入确认记录', async () => {
   const { root, artifacts, session } = await createProject();
@@ -58,6 +58,53 @@ it('聊天首次读取摘要并回退模型，不授予工具且保留历史', a
   expect(JSON.stringify(call.prompt)).toContain('profilePending');
   expect(JSON.stringify(call.prompt)).toContain('上个问题');
   expect(JSON.stringify(call.prompt)).toContain('不可执行写入或确认');
+});
+
+it('记录主备模型的认证失败且不泄露敏感信息', async () => {
+  const { root } = await createProject();
+  const secret = 'secret-key-123';
+  await writeFile(path.join(root, 'user', '.crosscheck', 'config.yaml'), JSON.stringify({ models: { extractor: 'mock:x', planner: 'mock:primary', executor: 'mock:e', reviewer: 'mock:r', fallback: { planner: 'mock:backup' } }, providers: { mock: { type: 'openai', baseURL: 'https://example.invalid/private-path?token=hidden', apiKey: secret } } }));
+  const makeError = () => new APICallError({ message: `Unauthorized ${secret}`, url: 'https://example.invalid/private-path?token=hidden', requestBodyValues: { text: 'private-chat' }, statusCode: 401, isRetryable: false, responseHeaders: { 'x-request-id': 'request-123', authorization: secret }, responseBody: secret });
+  await expect(chatReply(root, [], 'private-chat', { resilience: { retries: 0 }, modelOptions: { factories: { openai: () => scriptedModel([{ error: makeError() }]) } } }, new AbortController().signal)).rejects.toThrow();
+  const content = await readFile(path.join(root, 'user', '.crosscheck', 'chat-errors.jsonl'), 'utf8');
+  const records = content.trim().split('\n').map((line) => JSON.parse(line));
+  expect(records).toHaveLength(2);
+  expect(records[0]).toMatchObject({ ref: 'mock:primary', endpoint: 'https://example.invalid', statusCode: 401, requestId: 'request-123', stage: 'model-request' });
+  expect(records[1]).toMatchObject({ ref: 'mock:backup', statusCode: 401 });
+  expect(content).not.toContain(secret);
+  expect(content).not.toContain('private-chat');
+  expect(content).not.toContain('private-path');
+  expect(content).not.toContain('hidden');
+});
+
+it('默认记录实际模型请求并隐藏凭据', async () => {
+  const { root } = await createProject();
+  const secret = 'TEST_SECRET_abc123';
+  await writeFile(path.join(root, 'user', '.crosscheck', 'config.yaml'), JSON.stringify({ models: { extractor: 'mock:x', planner: 'mock:p', executor: 'mock:e', reviewer: 'mock:r' }, providers: { mock: { type: 'anthropic', baseURL: 'https://example.invalid/v1', apiKey: secret } } }));
+  let sent: Request | undefined;
+  vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+    sent = new Request(input, init);
+    return new Response(JSON.stringify({ error: { type: 'invalid_request_error', message: 'Method Not Allowed' } }), { status: 405, headers: { 'content-type': 'application/json' } });
+  });
+  const log = path.join(root, 'user', '.crosscheck', 'chat-requests.jsonl');
+  const signal = new AbortController().signal;
+  await expect(chatReply(root, [], '这是测试问题', { env: {}, resilience: { retries: 0 } }, signal)).rejects.toThrow();
+  const content = await readFile(log, 'utf8');
+  const record = JSON.parse(content.trim());
+  expect(record.method).toBe('POST');
+  expect(record.url).toContain('/messages');
+  expect(JSON.stringify(record.body)).toContain('这是测试问题');
+  expect(content).not.toContain(secret);
+  expect(record.headers['x-api-key']).toBe('[REDACTED]');
+  expect(sent?.headers.get('x-api-key')).toBe(secret);
+  expect(await sent?.clone().text()).toContain('这是测试问题');
+});
+
+it('日志不可写时仍保留原始模型错误', async () => {
+  const { root } = await createProject();
+  await mkdir(path.join(root, 'user', '.crosscheck', 'chat-errors.jsonl'));
+  const model = scriptedModel([{ error: new Error('原始模型错误') }]);
+  await expect(chatReply(root, [], '你好', { resilience: { retries: 0 }, modelOptions: { factories: { openai: () => model } } }, new AbortController().signal)).rejects.toThrow('原始模型错误');
 });
 
 it('缺少模型配置时聊天显示错误且不影响命令分发', async () => {

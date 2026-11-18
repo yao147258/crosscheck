@@ -8,11 +8,12 @@ export interface ProviderSettings {
   modelId: string;
   apiKey?: string;
   baseURL: string;
+  fetch?: typeof globalThis.fetch;
 }
 
 export type ProviderFactory = (s: ProviderSettings) => LanguageModel;
 
 export const builtinFactories: Record<ProviderType, ProviderFactory> = {
-  anthropic: (s) => createAnthropic({ apiKey: s.apiKey, baseURL: s.baseURL })(s.modelId),
-  openai: (s) => createOpenAI({ apiKey: s.apiKey, baseURL: s.baseURL })(s.modelId),
+  anthropic: (s) => createAnthropic({ apiKey: s.apiKey, baseURL: s.baseURL, fetch: s.fetch })(s.modelId),
+  openai: (s) => createOpenAI({ apiKey: s.apiKey, baseURL: s.baseURL, fetch: s.fetch })(s.modelId),
 };
