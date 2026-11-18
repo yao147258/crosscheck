@@ -30,7 +30,7 @@ pnpm --filter crosscheck exec crosscheck --help
 | `plan --module <id>` | 画像全部确认、条款确认后，生成用例草稿 |
 | `run` / `report <runId>` | 执行已确认用例 / 从历史快照离线重建报告 |
 
-无参数运行 `crosscheck`（stdin 和 stdout 均需 TTY）进入常驻会话。输入 `/init`、`/reqs`、`/plan`、`/review`、`/run`、`/report`、`/help` 或 `/exit`；参数与独立命令相同，含空格的路径用引号包围，例如 `/review cases --project "E:/my project"`。每次进入审核都会重新读取对应项目的确认记录，`q` 或顶层 `Esc` 返回聊天。命令执行失败只显示退出码，不结束会话。运行中 Ctrl+C 请求取消并等待清理；空闲时使用 `/exit` 退出。
+无参数运行 `crosscheck`（stdin 和 stdout 均需 TTY）进入常驻会话。输入 `/init`、`/reqs`、`/plan`、`/review`、`/run`、`/report`、`/help`、`/clear` 或 `/exit`；参数与独立命令相同，含空格的路径用引号包围，例如 `/review cases --project "E:/my project"`。输入以 `/` 开头时输入框上方显示匹配命令与描述，Tab 在匹配命令间循环补全。`/clear` 清空对话消息与模型历史。每次进入审核都会重新读取对应项目的确认记录，`q` 或顶层 `Esc` 返回聊天。命令执行失败只显示退出码，不结束会话。运行中 Ctrl+C 请求取消并等待清理；空闲时使用 `/exit` 退出。
 
 普通文本使用当前工作目录项目的 `planner` 模型配置和当前磁盘摘要（待审核画像、条款、用例和运行次数），无需确认人身份；聊天模型没有工具或确认权限，不能修改项目。模型配置或摘要读取失败会显示错误，其他命令仍可使用。聊天历史仅保存在内存中。带参数的一次性 CLI 及其退出码保持不变。
 

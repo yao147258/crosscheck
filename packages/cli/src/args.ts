@@ -24,7 +24,7 @@ export const HELP = `Crosscheck 本地验收 CLI（Node >=22.12）
   crosscheck run [--module <id>]... [--case <id>]... [--resume [runId]] [--project <目录>] [--environment <名称>] [--open]
   crosscheck report <runId> [--project <目录>] [--open]
   crosscheck --help
-会话支持 /init /reqs /plan /review /run /report /help /exit；命令失败显示退出码但不结束会话。
+会话支持 /init /reqs /plan /review /run /report /help /clear /exit；输入以 / 开头时显示命令提示，Tab 在匹配命令间循环补全；命令失败显示退出码但不结束会话。
 普通文本使用 planner 模型和当前项目只读摘要，模型无工具；审核仍须人工确认。
 init/reqs/plan 只写草稿，不自动确认；确认只能在 review 中由人完成。
 review 需要交互式终端；编辑使用 VISUAL 或 EDITOR 指定的编辑器，确认人取 CROSSCHECK_REVIEWER 或系统用户名。

@@ -207,3 +207,89 @@ it('中断任务后等待清理，不接收重复输入并允许后续任务', a
   ui.stdin.write('hello'); ui.stdin.write(KEYS.enter);
   await waitFor(() => frame(ui).includes('回答'));
 });
+
+const completionCommands = [
+  { name: 'reqs', description: '提取条款草稿' },
+  { name: 'review', description: '交互审核' },
+  { name: 'exit', description: '退出会话' },
+];
+const completionOptions = (overrides?: Partial<RunSessionOptions>): RunSessionOptions => ({ slashCommands: completionCommands, tokenize: text => [text], runSlashCommand: async () => ({ kind: 'exit' }), resolveReview: async () => { throw new Error('unused'); }, chatReply: async () => '', ...overrides });
+// ink 的 useInput 在挂载后才订阅 stdin，首次写入前需让事件循环先转一圈。
+const mounted = () => new Promise<void>((resolve) => setTimeout(resolve, 50));
+
+it('输入斜杠前缀时在输入框上方显示匹配命令与描述', async () => {
+  const ui = render(<SessionApp options={completionOptions()} />);
+  await mounted();
+  ui.stdin.write('/');
+  await waitFor(() => frame(ui).includes('/exit 退出会话'));
+  expect(frame(ui)).toContain('/reqs 提取条款草稿');
+  expect(frame(ui)).toContain('/review 交互审核');
+  ui.stdin.write('r');
+  await waitFor(() => frame(ui).includes('/review 交互审核') && !frame(ui).includes('/exit 退出会话'));
+  expect(frame(ui)).toContain('/reqs 提取条款草稿');
+  const lines = frame(ui).split('\n');
+  expect(lines.findIndex(line => line.includes('/reqs'))).toBeLessThan(lines.findIndex(line => line.includes('> /r')));
+});
+
+it('输入非斜杠文本时不显示命令提示', async () => {
+  const ui = render(<SessionApp options={completionOptions()} />);
+  await mounted();
+  ui.stdin.write('hello');
+  await waitFor(() => frame(ui).includes('> hello'));
+  expect(frame(ui)).not.toContain('/reqs 提取条款草稿');
+});
+
+it('Tab 在匹配命令间循环补全', async () => {
+  const ui = render(<SessionApp options={completionOptions()} />);
+  await mounted();
+  ui.stdin.write('/r');
+  await waitFor(() => frame(ui).includes('> /r'));
+  ui.stdin.write(KEYS.tab);
+  await waitFor(() => frame(ui).includes('> /reqs'));
+  ui.stdin.write(KEYS.tab);
+  await waitFor(() => frame(ui).includes('> /review'));
+  ui.stdin.write(KEYS.tab);
+  await waitFor(() => frame(ui).includes('> /reqs'));
+});
+
+it('非斜杠输入按 Tab 不修改输入内容', async () => {
+  const ui = render(<SessionApp options={completionOptions()} />);
+  await mounted();
+  ui.stdin.write('abc');
+  await waitFor(() => frame(ui).includes('> abc'));
+  ui.stdin.write(KEYS.tab);
+  await new Promise<void>((resolve) => setTimeout(resolve, 50));
+  expect(frame(ui)).toContain('> abc');
+});
+
+it('补全后继续编辑会重置循环顺序', async () => {
+  const ui = render(<SessionApp options={completionOptions()} />);
+  await mounted();
+  ui.stdin.write('/r');
+  await waitFor(() => frame(ui).includes('> /r'));
+  ui.stdin.write(KEYS.tab);
+  await waitFor(() => frame(ui).includes('> /reqs'));
+  ui.stdin.write(KEYS.tab);
+  await waitFor(() => frame(ui).includes('> /review'));
+  // 退格回到裸斜杠：三个命令都匹配；若循环未重置会从 index 1 选中 /review。
+  for (let i = 0; i < '/review'.length - 1; i++) ui.stdin.write('\u007f');
+  ui.stdin.write(KEYS.tab);
+  await waitFor(() => frame(ui).includes('> /reqs'));
+});
+
+it('clear 指令清空对话消息与模型历史', async () => {
+  const chatReply = vi.fn(async (_history: unknown[], _text: string) => '回答');
+  const runSlashCommand = vi.fn(async () => ({ kind: 'clear' as const }));
+  const ui = render(<SessionApp options={completionOptions({ runSlashCommand, chatReply })} />);
+  await mounted();
+  ui.stdin.write('第一句'); ui.stdin.write(KEYS.enter);
+  await waitFor(() => frame(ui).includes('回答'));
+  ui.stdin.write('/clear'); ui.stdin.write(KEYS.enter);
+  await waitFor(() => frame(ui).includes('已清空对话历史'));
+  expect(frame(ui)).not.toContain('第一句');
+  expect(frame(ui)).not.toContain('/clear');
+  ui.stdin.write('第二句'); ui.stdin.write(KEYS.enter);
+  await waitFor(() => frame(ui).includes('回答'));
+  expect(chatReply.mock.calls[0]?.[0]).toEqual([]);
+  expect(chatReply.mock.calls[1]?.[0]).toEqual([]);
+});

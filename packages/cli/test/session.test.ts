@@ -7,7 +7,7 @@ import { ReviewSession, approveClause } from '@crosscheck/tui';
 import { clause } from '../../tui/test/fixture';
 import { scriptedModel } from '../../agent/src/testing/scripted-model';
 import { cleanupProjects, createProject } from '../../tui/test/fixture';
-import { chatReply as realChatReply, createSlashDispatcher, loadSessionInfo, tokenizeCommand } from '../src/session';
+import { chatReply as realChatReply, createSlashDispatcher, loadSessionInfo, sessionSlashCommands, tokenizeCommand } from '../src/session';
 import cliPackage from '../package.json';
 const chatReply: typeof realChatReply = (root, history, text, deps, signal) => realChatReply(root, history, text, { ...deps, userConfigHome: path.join(root, 'user') }, signal);
 
@@ -140,6 +140,18 @@ it('识别引号包围的含空格项目路径', () => {
 it('空斜杠不会递归启动会话', async () => {
   const dispatch = createSlashDispatcher({});
   expect(await dispatch([], new AbortController().signal)).toMatchObject({ kind: 'log', code: 2 });
+});
+
+it('clear 指令分发给会话清空且不接受参数', async () => {
+  const dispatch = createSlashDispatcher({});
+  const signal = new AbortController().signal;
+  expect(await dispatch(['clear'], signal)).toEqual({ kind: 'clear' });
+  expect(await dispatch(['clear', 'extra'], signal)).toMatchObject({ kind: 'log', code: 2 });
+});
+
+it('会话命令清单覆盖全部斜杠命令且带描述', () => {
+  expect(sessionSlashCommands.map((command) => command.name)).toEqual(['init', 'reqs', 'plan', 'review', 'run', 'report', 'help', 'clear', 'exit']);
+  for (const command of sessionSlashCommands) expect(command.description.length).toBeGreaterThan(0);
 });
 
 it('审核参数保留项目路径并校验错误参数', async () => {

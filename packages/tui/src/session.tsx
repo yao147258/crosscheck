@@ -9,10 +9,13 @@ const safeText = (text: string) => text.replace(/[\u0000-\u0009\u000b-\u001f\u00
 export interface ChatMessage { role: 'user' | 'assistant'; content: string }
 export type SlashCommandResult =
   | { kind: 'exit' }
+  | { kind: 'clear' }
   | { kind: 'review'; args: { project: string; view?: ReviewView; modules?: string[]; runId?: string } }
   | { kind: 'log'; code: number; lines: string[] };
+export interface SlashCommandMeta { name: string; description: string }
 export interface RunSessionOptions {
   info?: { version: string; models: { extractor: string; planner: string; executor: string; reviewer: string } | undefined };
+  slashCommands?: SlashCommandMeta[];
   tokenize: (text: string) => string[];
   runSlashCommand: (tokens: string[], signal: AbortSignal) => Promise<SlashCommandResult>;
   resolveReview: (args: Extract<SlashCommandResult, { kind: 'review' }>['args'], signal: AbortSignal) => Promise<ReviewEnv>;
@@ -26,17 +29,27 @@ export function SessionApp({ options }: { options: RunSessionOptions }) {
   const content = useRef<DOMElement>(null);
   const { height } = useBoxMetrics(content);
   const inputHeight = Math.min(3, Math.max(1, rows));
-  const viewport = Math.min(height || Math.max(0, rows - inputHeight), Math.max(0, rows - inputHeight));
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const history = useRef<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const inputRef = useRef('');
   const updateInput = (value: string) => { inputRef.current = value; setInput(value); };
+  // Tab 补全：首次按 Tab 冻结当前前缀的匹配列表，之后在冻结列表内循环；编辑输入时重置。
+  const completions = useRef<{ items: SlashCommandMeta[]; index: number } | undefined>(undefined);
+  const matchCommands = (text: string) => {
+    if (!text.startsWith('/')) return [];
+    const prefix = text.slice(1);
+    return (options.slashCommands ?? []).filter((command) => command.name.startsWith(prefix));
+  };
   const [busy, setBusy] = useState(false);
   const operation = useRef<AbortController | undefined>(undefined);
   const [review, setReview] = useState<{ env: ReviewEnv; args: Extract<SlashCommandResult, { kind: 'review' }>['args'] }>();
   const reviewActive = useRef(false);
   const externalAbort = useRef(false);
+  // 提示列表占据输入框上方的行数，相应压缩消息视口。
+  const hintItems = busy ? [] : completions.current?.items ?? matchCommands(input);
+  const hintHeight = hintItems.length;
+  const viewport = Math.min(height || Math.max(0, rows - inputHeight - hintHeight), Math.max(0, rows - inputHeight - hintHeight));
   const append = (role: ChatMessage['role'], content: string) => setMessages((items) => [...items, { role, content }]);
   const cancel = useCallback(() => {
     externalAbort.current = true;
@@ -60,6 +73,11 @@ export function SessionApp({ options }: { options: RunSessionOptions }) {
         const result = await options.runSlashCommand(options.tokenize(text.slice(1)), controller.signal);
         controller.signal.throwIfAborted();
         if (result.kind === 'exit') { exit(0); return; }
+        if (result.kind === 'clear') {
+          setMessages([{ role: 'assistant', content: '已清空对话历史' }]);
+          history.current = [];
+          return;
+        }
         if (result.kind === 'log') append('assistant', `退出码 ${result.code}\n${result.lines.join('\n')}`);
         if (result.kind === 'review') {
           const env = await options.resolveReview(result.args, controller.signal);
@@ -94,10 +112,22 @@ export function SessionApp({ options }: { options: RunSessionOptions }) {
     if (busy || operation.current) return;
     if (key.return) {
       const text = inputRef.current.trim();
+      completions.current = undefined;
       updateInput('');
       if (text) void submit(text);
-    } else if (key.backspace || key.delete) updateInput(inputRef.current.slice(0, -1));
-    else if (!key.ctrl && !key.meta && value) updateInput(inputRef.current + value);
+    } else if (key.tab) {
+      const current = completions.current ?? (matchCommands(inputRef.current).length ? { items: matchCommands(inputRef.current), index: -1 } : undefined);
+      if (!current) return;
+      const index = (current.index + 1) % current.items.length;
+      completions.current = { items: current.items, index };
+      updateInput(`/${current.items[index]!.name}`);
+    } else if (key.backspace || key.delete) {
+      completions.current = undefined;
+      updateInput(inputRef.current.slice(0, -1));
+    } else if (!key.ctrl && !key.meta && value) {
+      completions.current = undefined;
+      updateInput(inputRef.current + value);
+    }
   });
   if (review) return <App env={review.env} initial={initialRoute(review.args.view, review.args.modules?.[0], review.args.runId)} onExitToParent={(error) => {
     reviewActive.current = false;
@@ -116,6 +146,9 @@ export function SessionApp({ options }: { options: RunSessionOptions }) {
           : <Text key={i}>{safeText(m.content)}</Text>)}
       </Box>
     </Box>
+    {hintHeight > 0 && <Box flexDirection="column" flexShrink={0}>
+      {hintItems.map((item, i) => <Text key={item.name} bold={i === (completions.current?.index ?? 0)} color={i === (completions.current?.index ?? 0) ? 'white' : 'gray'}>/{item.name} {item.description}</Text>)}
+    </Box>}
     <Box borderStyle="single" borderColor="white" borderLeft={false} borderRight={false} borderTop={inputHeight >= 3} borderBottom={inputHeight >= 2} flexShrink={0}><Text wrap="truncate-start">{busy ? '执行中，Ctrl+C 中断并等待清理' : `> ${safeText(input)}`}</Text></Box>
   </Box>;
 }
