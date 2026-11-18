@@ -116,7 +116,7 @@ export function SessionApp({ options }: { options: RunSessionOptions }) {
           : <Text key={i}>{safeText(m.content)}</Text>)}
       </Box>
     </Box>
-    <Box backgroundColor="#b8b8b8" borderStyle="single" borderColor="white" borderLeft={false} borderRight={false} borderTop={inputHeight >= 3} borderBottom={inputHeight >= 2} flexShrink={0}><Text color="black" wrap="truncate-start">{busy ? '执行中，Ctrl+C 中断并等待清理' : `> ${safeText(input)}`}</Text></Box>
+    <Box borderStyle="single" borderColor="white" borderLeft={false} borderRight={false} borderTop={inputHeight >= 3} borderBottom={inputHeight >= 2} flexShrink={0}><Text wrap="truncate-start">{busy ? '执行中，Ctrl+C 中断并等待清理' : `> ${safeText(input)}`}</Text></Box>
   </Box>;
 }
 
