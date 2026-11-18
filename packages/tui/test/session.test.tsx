@@ -50,15 +50,15 @@ it('短对话输入区紧随消息并响应高度变化', async () => {
   expect(lines.findIndex(line => line.includes('>'))).toBe(lines.findIndex(line => line.includes('助手回复')) + 2);
 });
 
-it.skipIf(process.env.FORCE_COLOR !== '3')('输入区使用白色边线且不使用灰色背景', async () => {
+it.skipIf(process.env.FORCE_COLOR !== '3')('用户消息与输入区使用浅灰背景并保留白色边线', async () => {
   const options: RunSessionOptions = { tokenize: text => [text], runSlashCommand: async () => ({ kind: 'exit' }), resolveReview: async () => { throw new Error('unused'); }, chatReply: async () => '回答' };
   const ui = render(<SessionApp options={options} />);
   ui.stdin.write('用户消息'); ui.stdin.write(KEYS.enter);
   await waitFor(() => frame(ui).includes('用户消息'));
   const output = frame(ui);
-  expect(output).toMatch(/\x1b\[48;2;211;211;211m[^\n]*用户消息/);
-  const inputLine = output.split('\n').find(line => line.includes('>')) ?? '';
-  expect(inputLine).not.toContain('\x1b[48;2;211;211;211m');
+  expect(output).toMatch(/\x1b\[48;2;184;184;184m[^\n]*用户消息/);
+  expect(output).toMatch(/\x1b\[48;2;184;184;184m[^\n]*>/);
+  expect(output).toContain('\x1b[30m');
   expect(output).toMatch(/\x1b\[37m[^\n]*─/);
 });
 
