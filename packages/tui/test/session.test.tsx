@@ -30,7 +30,7 @@ it('未配置模型时启动界面显示未配置', () => {
   expect(frame(ui)).toContain('未配置');
 });
 
-it('对话显示无角色称谓，输入区固定在终端底部并响应高度变化', async () => {
+it('短对话输入区紧随消息并响应高度变化', async () => {
   const options: RunSessionOptions = { tokenize: text => [text], runSlashCommand: async () => ({ kind: 'exit' }), resolveReview: async () => { throw new Error('unused'); }, chatReply: async () => '助手回复' };
   const ui = render(<SessionApp options={options} />);
   Object.defineProperty(ui.stdout, 'rows', { value: 12, configurable: true });
@@ -40,23 +40,26 @@ it('对话显示无角色称谓，输入区固定在终端底部并响应高度�
   expect(frame(ui)).toContain('用户消息');
   expect(frame(ui)).not.toContain('你：');
   expect(frame(ui)).not.toContain('助手：');
-  expect(frame(ui).split('\n')).toHaveLength(12);
-  expect(frame(ui).split('\n').at(-1)).toContain('>');
+  let lines = frame(ui).split('\n');
+  expect(lines.findIndex(line => line.includes('>'))).toBe(lines.findIndex(line => line.includes('助手回复')) + 2);
+  expect(lines.findIndex(line => line.includes('>'))).toBeLessThan(11);
   Object.defineProperty(ui.stdout, 'rows', { value: 8, configurable: true });
   ui.stdout.emit('resize');
-  await waitFor(() => frame(ui).split('\n').length === 8);
-  expect(frame(ui).split('\n').at(-1)).toContain('>');
+  await waitFor(() => frame(ui).includes('助手回复'));
+  lines = frame(ui).split('\n');
+  expect(lines.findIndex(line => line.includes('>'))).toBe(lines.findIndex(line => line.includes('助手回复')) + 2);
 });
 
-it.skipIf(process.env.FORCE_COLOR !== '3')('用户消息与输入区使用灰白背景和深色文字', async () => {
+it.skipIf(process.env.FORCE_COLOR !== '3')('输入区使用白色边线且不使用灰色背景', async () => {
   const options: RunSessionOptions = { tokenize: text => [text], runSlashCommand: async () => ({ kind: 'exit' }), resolveReview: async () => { throw new Error('unused'); }, chatReply: async () => '回答' };
   const ui = render(<SessionApp options={options} />);
   ui.stdin.write('用户消息'); ui.stdin.write(KEYS.enter);
   await waitFor(() => frame(ui).includes('用户消息'));
   const output = frame(ui);
   expect(output).toMatch(/\x1b\[48;2;211;211;211m[^\n]*用户消息/);
-  expect(output).toMatch(/\x1b\[48;2;211;211;211m[^\n]*>/);
-  expect(output).toContain('\x1b[30m');
+  const inputLine = output.split('\n').find(line => line.includes('>')) ?? '';
+  expect(inputLine).not.toContain('\x1b[48;2;211;211;211m');
+  expect(output).toMatch(/\x1b\[37m[^\n]*─/);
 });
 
 it('长回复超出终端高度时仍显示最新内容和底部输入区', async () => {
@@ -68,7 +71,8 @@ it('长回复超出终端高度时仍显示最新内容和底部输入区', asyn
   await waitFor(() => frame(ui).includes('回复行29'));
   expect(frame(ui)).not.toContain('回复行0');
   expect(frame(ui).split('\n')).toHaveLength(8);
-  expect(frame(ui).split('\n').at(-1)).toContain('>');
+  expect(frame(ui).split('\n').at(-2)).toContain('>');
+  expect(frame(ui).split('\n').at(-1)).toContain('─');
 });
 
 it('审核退出返回聊天并重新解析会话', async () => {
