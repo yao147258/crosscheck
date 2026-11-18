@@ -48,14 +48,14 @@ it('对话显示无角色称谓，输入区固定在终端底部并响应高度�
   expect(frame(ui).split('\n').at(-1)).toContain('>');
 });
 
-it.skipIf(process.env.FORCE_COLOR !== '3')('用户消息与输入区使用灰白背景和深色文字', async () => {
+it.skipIf(process.env.FORCE_COLOR !== '3')('用户消息与输入区使用浅灰背景和深色文字', async () => {
   const options: RunSessionOptions = { tokenize: text => [text], runSlashCommand: async () => ({ kind: 'exit' }), resolveReview: async () => { throw new Error('unused'); }, chatReply: async () => '回答' };
   const ui = render(<SessionApp options={options} />);
   ui.stdin.write('用户消息'); ui.stdin.write(KEYS.enter);
   await waitFor(() => frame(ui).includes('用户消息'));
   const output = frame(ui);
-  expect(output).toMatch(/\x1b\[48;2;211;211;211m[^\n]*用户消息/);
-  expect(output).toMatch(/\x1b\[48;2;211;211;211m[^\n]*>/);
+  expect(output).toMatch(/\x1b\[48;2;184;184;184m[^\n]*用户消息/);
+  expect(output).toMatch(/\x1b\[48;2;184;184;184m[^\n]*>/);
   expect(output).toContain('\x1b[30m');
 });
 

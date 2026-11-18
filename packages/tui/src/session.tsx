@@ -111,11 +111,11 @@ export function SessionApp({ options }: { options: RunSessionOptions }) {
         <Text bold>Crosscheck 交互会话{options.info ? ` · v${safeText(options.info.version)}` : ''}</Text>
         {options.info && (['extractor', 'planner', 'executor', 'reviewer'] as const).map(role => <Text key={role}>{role}：{safeText(options.info?.models?.[role] ?? '未配置')}</Text>)}
         {messages.map((m, i) => m.role === 'user'
-          ? <Box key={i} backgroundColor="#d3d3d3"><Text color="black">{safeText(m.content)}</Text></Box>
+          ? <Box key={i} backgroundColor="#b8b8b8"><Text color="black">{safeText(m.content)}</Text></Box>
           : <Text key={i}>{safeText(m.content)}</Text>)}
       </Box>
     </Box>
-    <Box backgroundColor="#d3d3d3" flexShrink={0}><Text color="black" wrap="truncate-start">{busy ? '执行中，Ctrl+C 中断并等待清理' : `> ${safeText(input)}`}</Text></Box>
+    <Box backgroundColor="#b8b8b8" flexShrink={0}><Text color="black" wrap="truncate-start">{busy ? '执行中，Ctrl+C 中断并等待清理' : `> ${safeText(input)}`}</Text></Box>
   </Box>;
 }
 
