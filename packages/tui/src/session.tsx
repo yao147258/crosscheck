@@ -1,4 +1,4 @@
-import { Box, Text, render, useApp, useBoxMetrics, useInput, useWindowSize, type DOMElement } from 'ink';
+import { Box, Text, render, useApp, useBoxMetrics, useCursor, useInput, useWindowSize, type DOMElement } from 'ink';
 import { createElement, useCallback, useEffect, useRef, useState } from 'react';
 import { App } from './app';
 import type { ReviewEnv } from './context';
@@ -102,6 +102,19 @@ export function SessionApp({ options }: { options: RunSessionOptions }) {
       if (externalAbort.current && !reviewActive.current) exit(failure ?? 2);
     }
   };
+  // 把终端真实光标定位进输入框：空闲时显示在输入文本末尾，busy 或进入审核时隐藏。
+  // useCursor 要求在渲染期间调用（经 useInsertionEffect 在 commit 阶段传播）。
+  const cursor = useCursor();
+  if (busy || review || reviewActive.current) cursor.setCursorPosition(undefined);
+  else {
+    // 显示宽度：CJK 等全角字符按 2 列计，近似值足够光标定位。
+    const text = safeText(input);
+    const width = [...text].reduce((sum, ch) => sum + ((ch.codePointAt(0) ?? 0) > 0xFF ? 2 : 1), 0);
+    const x = Math.min(2 + width, Math.max(0, columns - 1));
+    // 输入文本行自输出顶部的行号 = 消息视口高度 + 顶边框。
+    const y = viewport + (inputHeight >= 3 ? 1 : 0);
+    cursor.setCursorPosition({ x, y });
+  }
   useInput((value, key) => {
     if (reviewActive.current) return;
     if (key.ctrl && value === 'c') {

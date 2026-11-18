@@ -4,7 +4,7 @@ import { Approvals, loadProfile } from '@crosscheck/core';
 import { ReviewSession } from '../src/io/session';
 import { SessionApp, type RunSessionOptions } from '../src/session';
 import { cleanupProjects, createProject } from './fixture';
-import { deferred, KEYS, waitFor } from './helpers';
+import { deferred, KEYS, renderInteractive, waitFor } from './helpers';
 
 const exit = vi.hoisted(() => vi.fn());
 vi.mock('ink', async (importOriginal) => {
@@ -276,6 +276,31 @@ it('补全后继续编辑会重置循环顺序', async () => {
   for (let i = 0; i < '/review'.length - 1; i++) ui.stdin.write('\u007f');
   ui.stdin.write(KEYS.tab);
   await waitFor(() => frame(ui).includes('> /reqs'));
+});
+
+it('空闲时终端光标定位到输入框内', async () => {
+  const ui = renderInteractive(<SessionApp options={completionOptions()} />);
+  await mounted();
+  ui.stdin.write('hi');
+  await new Promise<void>((resolve) => setTimeout(resolve, 100));
+  // 显示光标并定位到提示符与输入文本之后（debug=false 才产生光标转义）。
+  expect(ui.writes()).toContain('\u001B[?25h');
+  expect(ui.writes()).toMatch(/\u001B\[\d+A\u001B\[\d+G\u001B\[\?25h/);
+  ui.unmount();
+});
+
+it('执行中隐藏终端光标，结束后重新显示', async () => {
+  const release = deferred<void>();
+  const chatReply = vi.fn(async () => { await release.promise; return '回答'; });
+  const ui = renderInteractive(<SessionApp options={completionOptions({ chatReply })} />);
+  await mounted();
+  ui.stdin.write('问题'); ui.stdin.write(KEYS.enter);
+  await new Promise<void>((resolve) => setTimeout(resolve, 100));
+  const writes = ui.writes();
+  expect(writes.indexOf('\u001B[?25h')).toBeGreaterThan(-1);
+  expect(writes.indexOf('\u001B[?25l')).toBeGreaterThan(writes.indexOf('\u001B[?25h'));
+  release.resolve();
+  ui.unmount();
 });
 
 it('clear 指令清空对话消息与模型历史', async () => {
