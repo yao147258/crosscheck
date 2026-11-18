@@ -21,14 +21,12 @@ export class MissingModelKeyError extends ModelConfigError {}
 function descriptor(ref: string, config: Config) {
   const { provider, modelId } = parseModelRef(ref);
   const custom = config.providers[provider];
-  const type = custom?.type ?? (provider !== 'openai-compatible' && (PROVIDER_TYPES as readonly string[]).includes(provider) ? provider as ProviderType : undefined);
+  const type = custom?.type;
   if (!type || !(PROVIDER_TYPES as readonly string[]).includes(type)) throw new ModelConfigError(`未知的 provider：${provider}（请在 config.yaml 的 providers 中声明）`);
-  if (type === 'openai-compatible' && !custom?.baseURL) throw new ModelConfigError(`provider ${provider} 是 openai-compatible，必须配置 baseURL`);
-  if (custom?.baseURL) {
-    let url: URL;
-    try { url = new URL(custom.baseURL); } catch { throw new ModelConfigError(`provider ${provider} 的 baseURL 不合法`); }
-    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) throw new ModelConfigError(`provider ${provider} 的 baseURL 不合法`);
-  }
+  if (!custom.baseURL) throw new ModelConfigError(`provider ${provider} 必须配置 baseURL`);
+  let url: URL;
+  try { url = new URL(custom.baseURL); } catch { throw new ModelConfigError(`provider ${provider} 的 baseURL 不合法`); }
+  if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) throw new ModelConfigError(`provider ${provider} 的 baseURL 不合法`);
   return { provider, modelId, custom, type };
 }
 
@@ -36,9 +34,9 @@ export function resolveModelRef(ref: string, config: Config, opts: ResolveOption
   // 结构错误优先于缺 key，不能被 fallback 的跳过策略掩盖。
   const { provider, modelId, custom, type } = descriptor(ref, config);
   const apiKey = opts.apiKeys?.[provider];
-  if (type !== 'ollama' && !apiKey) throw new MissingModelKeyError(`模型 ${ref} 需要在全局配置中设置 apiKey`);
+  if (!apiKey) throw new MissingModelKeyError(`模型 ${ref} 需要在全局配置中设置 apiKey`);
   const factory = opts.factories?.[type] ?? builtinFactories[type];
-  return { ref, model: factory({ name: provider, modelId, apiKey, baseURL: custom?.baseURL }) };
+  return { ref, model: factory({ name: provider, modelId, apiKey, baseURL: custom.baseURL }) };
 }
 
 /** 角色候选按主、备排列；主模型缺 key 必须报错，仅备用缺 key 可跳过。 */
@@ -54,14 +52,9 @@ export function resolveRole(config: Config, role: Role, opts: ResolveOptions = {
   }
 }
 
-const DEFAULT_ENDPOINT: Record<ProviderType, string> = {
-  anthropic: 'https://api.anthropic.com/v1', openai: 'https://api.openai.com/v1',
-  google: 'https://generativelanguage.googleapis.com/v1beta', deepseek: 'https://api.deepseek.com/v1',
-  ollama: 'http://localhost:11434/v1', 'openai-compatible': '',
-};
 function source(ref: string, config: Config) {
   const { type, custom } = descriptor(ref, config);
-  const url = new URL(custom?.baseURL ?? DEFAULT_ENDPOINT[type]);
+  const url = new URL(custom.baseURL);
   url.hash = '';
   url.search = '';
   return { type, endpoint: url.toString().replace(/\/+$/, '') };
@@ -74,7 +67,7 @@ export function vendorWarnings(config: Config): string[] {
   const warnings: string[] = [];
   for (const a of exec) for (const b of review) {
     const left = source(a, config), right = source(b, config);
-    if ((left.type === right.type && left.type !== 'openai-compatible') || left.endpoint === right.endpoint) warnings.push(`executor ${a} 与 reviewer ${b} 同厂商或同源 endpoint，交叉复核的独立性会减弱，建议换成不同厂商`);
+    if (left.type === right.type || left.endpoint === right.endpoint) warnings.push(`executor ${a} 与 reviewer ${b} 同厂商或同源 endpoint，交叉复核的独立性会减弱，建议换成不同厂商`);
   }
   return warnings;
 }

@@ -68,13 +68,13 @@ describe('画像与运行输入', () => {
   });
   it('短密钥与普通业务文本部分重合不会阻止运行输入', async () => {
     const { store } = await setup();
-    const config = core.UserModelConfigSchema.parse({ models, providers: { test: { type: 'ollama', apiKey: 'a' } } });
+    const config = core.UserModelConfigSchema.parse({ models, providers: { test: { type: 'openai', baseURL: 'https://example.test/v1', apiKey: 'a' } } });
     expect((await core.loadVerifiedRunInputs(store, {}, config)).fingerprint).toMatch(/^sha256:/);
   });
   it('项目输入包含全局密钥时拒绝计算指纹', async () => {
     const { store } = await setup();
     await store.saveClauses('M', [{ ...clause, text: '泄漏 KEY_SENTINEL_94827' }]);
-    const secretConfig = core.UserModelConfigSchema.parse({ models, providers: { test: { type: 'ollama', apiKey: 'KEY_SENTINEL_94827' } } });
+    const secretConfig = core.UserModelConfigSchema.parse({ models, providers: { test: { type: 'openai', baseURL: 'https://example.test/v1', apiKey: 'KEY_SENTINEL_94827' } } });
     await expect(core.loadVerifiedRunInputs(store, {}, secretConfig)).rejects.toThrow(/密钥/);
   });
   it('未确认用例保留 BLOCKED，普通缺失 fixture 留待准备', async () => {

@@ -2,37 +2,39 @@ import { ConfigSchema } from '@crosscheck/core';
 import { describe, expect, it, vi } from 'vitest';
 import { callWithFallback, resolveRole, vendorWarnings, UsageMeter, builtinFactories } from '../src/index';
 
-const config = ConfigSchema.parse({ models: { extractor: 'openai:a', planner: 'ollama:a', executor: 'openai:a', reviewer: 'google:b', fallback: { executor: 'google:c' } } });
+const config = ConfigSchema.parse({ models: { extractor: 'openai:a', planner: 'openai:a', executor: 'openai:a', reviewer: 'anthropic:b', fallback: { executor: 'anthropic:c' } }, providers: { openai: { type: 'openai', baseURL: 'https://api.openai.com/v1' }, anthropic: { type: 'anthropic', baseURL: 'https://api.anthropic.com/v1' } } });
 describe('Task8 模型边界', () => {
   it('备用缺 key 仅跳过并警告，主模型缺 key 仍失败', () => {
     const warnings: string[] = [];
     const chain = resolveRole(config, 'executor', { apiKeys: { openai: 'test' }, onWarning: warning => warnings.push(warning) });
     expect(chain.map(c => c.ref)).toEqual(['openai:a']);
-    expect(warnings.join()).toMatch(/google:c.*apiKey/);
+    expect(warnings.join()).toMatch(/anthropic:c.*apiKey/);
     expect(() => resolveRole(config, 'executor', { env: {}, onWarning: warning => warnings.push(warning) })).toThrow(/apiKey/);
   });
   it('备用未知 provider 或缺 baseURL 不被缺 key 掩盖', () => {
-    const bad = ConfigSchema.parse({ ...config, providers: { broken: { type: 'openai-compatible', apiKeyEnv: 'MISSING_KEY' } }, models: { ...config.models, fallback: { executor: 'broken:x' } } });
-    expect(() => resolveRole(bad, 'executor', { apiKeys: { openai: 'test' } })).toThrow(/baseURL/);
+    for (const baseURL of [undefined, 'ftp://example.test', 'https://user:pass@example.test']) {
+      const bad = { ...config, providers: { ...config.providers, broken: { type: 'openai', baseURL } }, models: { ...config.models, fallback: { executor: 'broken:x' } } } as unknown as typeof config;
+      expect(() => resolveRole(bad, 'executor', { apiKeys: { openai: 'test' } })).toThrow(/baseURL/);
+    }
     const unknown = ConfigSchema.parse({ ...config, models: { ...config.models, fallback: { executor: 'unknown:x' } } });
     expect(() => resolveRole(unknown, 'executor', { apiKeys: { openai: 'test' } })).toThrow(/未知/);
   });
   it('别名、规范 endpoint 和备用模型均参与同源警告', () => {
-    const alias = ConfigSchema.parse({ ...config, providers: { alias: { type: 'openai', baseURL: 'https://API.OPENAI.COM:443/v1/' } }, models: { ...config.models, reviewer: 'alias:b' } });
+    const alias = ConfigSchema.parse({ ...config, providers: { ...config.providers, alias: { type: 'openai', baseURL: 'https://API.OPENAI.COM:443/v1/' } }, models: { ...config.models, reviewer: 'alias:b' } });
     expect(vendorWarnings(alias).join()).toMatch(/独立性/);
     const fallback = ConfigSchema.parse({ ...config, models: { ...config.models, fallback: { reviewer: 'openai:b' } } });
     expect(vendorWarnings(fallback).join()).toMatch(/openai:b/);
-    expect(vendorWarnings(config).join()).toMatch(/google:c/);
+    expect(vendorWarnings(config).join()).toMatch(/anthropic:c/);
   });
-  it('openai-compatible 不是厂商名，不同实际 endpoint 不误报同源', () => {
-    const distinct = ConfigSchema.parse({ ...config, providers: {
-      vendor_a: { type: 'openai-compatible', baseURL: 'https://a.example/v1' },
-      vendor_b: { type: 'openai-compatible', baseURL: 'https://b.example/v1' },
+  it('不同类型的别名使用同一规范 endpoint 时警告', () => {
+    const same = ConfigSchema.parse({ ...config, providers: {
+      vendor_a: { type: 'openai', baseURL: 'https://example.test/v1/' },
+      vendor_b: { type: 'anthropic', baseURL: 'https://EXAMPLE.TEST:443/v1' },
     }, models: { ...config.models, executor: 'vendor_a:x', reviewer: 'vendor_b:y', fallback: {} } });
-    expect(vendorWarnings(distinct)).toEqual([]);
+    expect(vendorWarnings(same)).toHaveLength(1);
   });
-  it.each(['openai', 'google', 'deepseek', 'ollama', 'openai-compatible'] as const)('实际 %s 工厂只构造模型不联网', type => {
-    const model = builtinFactories[type]({ name: type, modelId: 'local-test', apiKey: 'not-a-real-key', baseURL: type === 'openai-compatible' ? 'https://example.invalid/v1' : undefined });
+  it.each(['openai', 'anthropic'] as const)('实际 %s 工厂只构造模型不联网', type => {
+    const model = builtinFactories[type]({ name: type, modelId: 'local-test', apiKey: 'not-a-real-key', baseURL: 'https://example.invalid/v1' });
     expect(model).toMatchObject({ modelId: 'local-test' });
   });
   it('已中止的 fallback 链在任何外部调用前拒绝', async () => {

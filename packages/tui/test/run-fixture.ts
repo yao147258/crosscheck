@@ -43,7 +43,7 @@ export async function createFailedRun(clauseCount = 2) {
   ]).doGenerate(opts) });
   const outcome = await runSuite({
     artifacts, userConfigHome: project.userHome,
-    modelOptions: { env: {}, factories: { ollama: ({ modelId }: { modelId: string }) => modelId === 'e' ? executor : reviewer } },
+    modelOptions: { env: {}, factories: { openai: ({ modelId }: { modelId: string }) => modelId === 'e' ? executor : reviewer } },
     resilience: { retries: 0, baseDelayMs: 0 },
     env: {},
     transport: async () => new Response(JSON.stringify({ value: 'ok' }), { headers: { 'content-type': 'application/json' } }),

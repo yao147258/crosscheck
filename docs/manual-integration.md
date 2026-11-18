@@ -33,14 +33,16 @@ models:
   fallback: {}
 providers:
   custom:
-    type: openai-compatible
+    type: openai
     baseURL: https://example.test/v1
     apiKey: 替换为实际密钥
 capabilities: {}
 pricing: {}
 ```
 
-全局配置是唯一模型配置来源；项目中旧的模型配置不迁移、不覆盖全局配置。非 ollama 模型应配置非空 apiKey，openai-compatible 必须配置 HTTP(S) baseURL，不允许 URL 用户信息。运行开始时固定配置；仅轮换密钥不会改变恢复指纹，其他公开模型配置变化会阻止不兼容的 resume。离线报告和审核不需要全局模型密钥。
+全局配置是唯一模型配置来源；项目中旧的模型配置不迁移、不覆盖全局配置。每个模型引用的 provider 名称（包括 openai、anthropic）必须在 `providers` 显式声明；名称可自定义，但 `type` 只能是 `openai` 或 `anthropic`。每项均需填写 HTTP(S) `baseURL`，不得包含 URL 用户名或密码；使用模型时还需非空 `apiKey`。仅备用模型缺密钥会跳过并警告，配置结构错误不会跳过。
+
+升级时须手动修改旧全局配置：将不再支持的 `google`、`deepseek`、`ollama`、`openai-compatible` 类型改为目标服务实际支持的 `openai` 或 `anthropic` 协议，补齐 provider 声明、地址和密钥；不能仅凭类型改名假定兼容。`openai` 使用 OpenAI Responses API，`anthropic` 使用 Anthropic Messages API；仅兼容旧版 Chat Completions 的服务不兼容 `openai` 类型。请确认服务支持对应协议，无法支持时需更换服务。运行开始时固定配置；仅轮换密钥不会改变恢复指纹，其他公开模型配置变化会阻止不兼容的 resume。离线报告和审核不需要全局模型密钥。
 
 在被测项目创建 `.crosscheck/system`、`.crosscheck/requirements`、`.crosscheck/cases`。项目配置和其他工件不要写模型密钥。以下各代码块分别保存为标注文件。
 

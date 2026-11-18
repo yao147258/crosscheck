@@ -21,7 +21,7 @@ const secret = 'PRIVATE_SENTINEL_TASK10_8734';
 const attack = '</script><svg onload="globalThis.pwned=1"><img src="https://forbidden.invalid/x" onerror="globalThis.pwned=2">';
 async function makeUserHome(root: string) {
   const home = path.join(root, 'user'); await mkdir(path.join(home, '.crosscheck'), { recursive: true });
-  await writeFile(path.join(home, '.crosscheck', 'config.yaml'), JSON.stringify({ models: { extractor: 'mock:x', planner: 'mock:p', executor: 'mock:executor', reviewer: 'mock:reviewer' }, providers: { mock: { type: 'ollama' } } }));
+  await writeFile(path.join(home, '.crosscheck', 'config.yaml'), JSON.stringify({ models: { extractor: 'mock:x', planner: 'mock:p', executor: 'mock:executor', reviewer: 'mock:reviewer' }, providers: { mock: { type: 'openai', baseURL: 'https://example.invalid/v1', apiKey: 'fixture-key' } } }));
   return home;
 }
 async function server(handler: RequestListener) {
@@ -166,7 +166,7 @@ it('init → reqs → review 人工确认 → plan → review 人工确认 → r
   const planner = scriptedModel([finish([{ id: 'M-TC-1', covers: ['M-AC-1'], fixtures: [], actor: 'guest', steps: ['POST /api/action', 'GET /item'], expectations: ['E1', 'E2'].map((id) => ({ id, text: '返回真实ok', evidence: ['network'] })) }])]);
   const dependencies = {
     userConfigHome: userHome,
-    modelOptions: { env: {}, factories: { ollama: ({ modelId }: { modelId: string }) => modelId === 'x' ? extractor : planner } },
+    modelOptions: { env: {}, factories: { openai: ({ modelId }: { modelId: string }) => modelId === 'x' ? extractor : planner } },
     resilience: { retries: 0, baseDelayMs: 0 }, env: { CROSSCHECK_REVIEWER: '流程测试' },
     // 仅模型及人工键盘选择用测试替身；审核状态函数、落盘和门禁均使用真实实现。
     review: { isTTY: true, runReview: async (options: import('@crosscheck/tui').RunReviewOptions) => {

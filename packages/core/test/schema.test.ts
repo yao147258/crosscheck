@@ -94,7 +94,7 @@ describe('ConfigSchema', () => {
       models,
       providers: {
         qwen: {
-          type: 'openai-compatible',
+          type: 'openai',
           baseURL: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
           apiKeyEnv: 'DASHSCOPE_API_KEY',
         },

@@ -34,7 +34,7 @@ pnpm --filter crosscheck exec crosscheck --help
 
 普通文本使用当前工作目录项目的 `planner` 模型配置和当前磁盘摘要（待审核画像、条款、用例和运行次数），无需确认人身份；聊天模型没有工具或确认权限，不能修改项目。模型配置或摘要读取失败会显示错误，其他命令仍可使用。聊天历史仅保存在内存中。带参数的一次性 CLI 及其退出码保持不变。
 
-模型的四个角色、`providers`（含明文 `apiKey`、`baseURL`）、`capabilities` 和 `pricing` 配置于用户级 `~/.crosscheck/config.yaml`；项目 `.crosscheck/config.yaml` 只负责预算、`requirementsDocs` 与默认环境，不能覆盖模型配置。文件格式、权限及安全注意事项见[手工接入指南](docs/manual-integration.md)。程序不会自动覆盖全局文件或迁移旧项目；报告和审核可离线运行。全局密钥为明文，务必限制文件权限并避免分享；POSIX 可使用 `chmod 600`，Windows 须自行配置 ACL。
+模型的四个角色、`providers`（含明文 `apiKey`、`baseURL`）、`capabilities` 和 `pricing` 配置于用户级 `~/.crosscheck/config.yaml`；每个引用的 provider 必须显式声明，类型仅支持 `openai` 和 `anthropic`，且必须提供不含用户凭据的 HTTP(S) `baseURL`。`openai` 使用 Responses API，不兼容仅支持旧 Chat Completions 的服务。项目 `.crosscheck/config.yaml` 只负责预算、`requirementsDocs` 与默认环境，不能覆盖模型配置。文件格式、权限及安全注意事项见[手工接入指南](docs/manual-integration.md)。程序不会自动覆盖全局文件或迁移旧项目；报告和审核可离线运行。全局密钥为明文，务必限制文件权限并避免分享；POSIX 可使用 `chmod 600`，Windows 须自行配置 ACL。
 
 各命令支持 `--project <目录>`。重跑生成命令保留仍有效的已确认条目；中断丢弃尚未写盘的合成草稿，保留已经完整写入的文件，不承诺跨文件事务回滚。
 

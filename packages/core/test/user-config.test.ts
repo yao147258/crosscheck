@@ -2,12 +2,27 @@ import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { contentHash, loadUserModelConfig, publicModelConfig, ProjectConfigSchema } from '../src/index';
+import { ConfigSchema, UserModelConfigSchema, contentHash, loadUserModelConfig, publicModelConfig, ProjectConfigSchema } from '../src/index';
 
 const homes: string[] = [];
 async function home() { const dir = await mkdtemp(path.join(os.tmpdir(), 'crosscheck-user-')); homes.push(dir); return dir; }
 afterEach(async () => { await Promise.all(homes.splice(0).map(dir => rm(dir, { recursive: true, force: true }))); });
-const valid = `models:\n  extractor: custom:a\n  planner: custom:a\n  executor: custom:a\n  reviewer: custom:b\nproviders:\n  custom:\n    type: openai-compatible\n    baseURL: https://example.test/v1\n    apiKey: secret-value\n`;
+const valid = `models:\n  extractor: custom:a\n  planner: custom:a\n  executor: custom:a\n  reviewer: custom:b\nproviders:\n  custom:\n    type: openai\n    baseURL: https://example.test/v1\n    apiKey: secret-value\n`;
+
+describe('provider 配置约束', () => {
+  const models = { extractor: 'p:a', planner: 'p:a', executor: 'p:a', reviewer: 'p:b' };
+  for (const schema of [ConfigSchema, UserModelConfigSchema]) {
+    it.each(['google', 'deepseek', 'ollama', 'openai-compatible'])('拒绝不支持的类型 %s', type => {
+      expect(schema.safeParse({ models, providers: { p: { type, baseURL: 'https://example.test/v1' } } }).success).toBe(false);
+    });
+    it.each([undefined, 'ftp://example.test/v1', 'https://user:pass@example.test/v1', 'not-a-url'])('拒绝缺失或不安全的 baseURL：%s', baseURL => {
+      expect(schema.safeParse({ models, providers: { p: { type: 'openai', baseURL } } }).success).toBe(false);
+    });
+    it.each(['openai', 'anthropic'])('接受支持的类型 %s 和安全地址', type => {
+      expect(schema.safeParse({ models, providers: { p: { type, baseURL: 'http://localhost:11434/v1' } } }).success).toBe(true);
+    });
+  }
+});
 
 describe('全局模型配置', () => {
   it('从独立的用户目录读取模型配置，公开投影不包含密钥', async () => {
