@@ -20,7 +20,7 @@ it('聊天无需确认人或审核会话，读取已有确认且不写入确认�
   const before = await artifacts.readBytes('approvals.json');
   const open = vi.spyOn(ReviewSession, 'open').mockRejectedValue(new Error('聊天不能打开审核会话'));
   const model = scriptedModel([{ text: '只读回答' }]);
-  const reply = await chatReply(root, [], '还有多少', { env: {}, modelOptions: { env: {}, factories: { ollama: () => model } } }, new AbortController().signal);
+  const reply = await chatReply(root, [], '还有多少', { env: {}, modelOptions: { env: {}, factories: { openai: () => model } } }, new AbortController().signal);
   expect(reply).toBe('只读回答');
   expect(open).not.toHaveBeenCalled();
   expect(model.doGenerateCalls[0]!.prompt[0]).toMatchObject({ role: 'system', content: expect.stringContaining('"clausesPending":1') });
@@ -31,27 +31,27 @@ it('可重试模型错误只由 fallback 控制重试次数', async () => {
   const { root } = await createProject();
   const error = new APICallError({ message: '服务不可用', url: 'https://example.test', requestBodyValues: {}, statusCode: 503, isRetryable: true });
   const model = scriptedModel([{ error }, { text: '不应重试' }]);
-  await expect(chatReply(root, [], '你好', { resilience: { retries: 0 }, modelOptions: { env: {}, factories: { ollama: () => model } } }, new AbortController().signal)).rejects.toThrow();
+  await expect(chatReply(root, [], '你好', { resilience: { retries: 0 }, modelOptions: { env: {}, factories: { openai: () => model } } }, new AbortController().signal)).rejects.toThrow();
   expect(model.doGenerateCalls).toHaveLength(1);
 });
 
 it('聊天结果和模型错误均清除全局密钥', async () => {
   const { root } = await createProject();
   const secret = 'CHAT_SECRET_829761';
-  await writeFile(path.join(root, 'user', '.crosscheck', 'config.yaml'), JSON.stringify({ models: { extractor: 'mock:x', planner: 'mock:p', executor: 'mock:e', reviewer: 'mock:r' }, providers: { mock: { type: 'ollama', apiKey: secret } } }));
+  await writeFile(path.join(root, 'user', '.crosscheck', 'config.yaml'), JSON.stringify({ models: { extractor: 'mock:x', planner: 'mock:p', executor: 'mock:e', reviewer: 'mock:r' }, providers: { mock: { type: 'openai', baseURL: 'https://example.invalid/v1', apiKey: secret } } }));
   const model = scriptedModel([{ text: `回复 ${secret}` }]);
-  const reply = await chatReply(root, [], '你好', { modelOptions: { factories: { ollama: () => model } } }, new AbortController().signal);
+  const reply = await chatReply(root, [], '你好', { modelOptions: { factories: { openai: () => model } } }, new AbortController().signal);
   expect(reply).not.toContain(secret);
   const failed = scriptedModel([{ error: new Error(`错误 ${secret}`) }]);
-  await expect(chatReply(root, [], '你好', { resilience: { retries: 0 }, modelOptions: { factories: { ollama: () => failed } } }, new AbortController().signal)).rejects.not.toThrow(secret);
+  await expect(chatReply(root, [], '你好', { resilience: { retries: 0 }, modelOptions: { factories: { openai: () => failed } } }, new AbortController().signal)).rejects.not.toThrow(secret);
 });
 
 it('聊天首次读取摘要并回退模型，不授予工具且保留历史', async () => {
   const { root, artifacts } = await createProject();
-  await writeFile(path.join(root, 'user', '.crosscheck', 'config.yaml'), JSON.stringify({ models: { extractor: 'mock:x', planner: 'mock:primary', executor: 'mock:e', reviewer: 'mock:r', fallback: { planner: 'mock:backup' } }, providers: { mock: { type: 'ollama' } } }));
+  await writeFile(path.join(root, 'user', '.crosscheck', 'config.yaml'), JSON.stringify({ models: { extractor: 'mock:x', planner: 'mock:primary', executor: 'mock:e', reviewer: 'mock:r', fallback: { planner: 'mock:backup' } }, providers: { mock: { type: 'openai', baseURL: 'https://example.invalid/v1', apiKey: 'fixture-key' } } }));
   const primary = scriptedModel([{ error: new Error('模型故障') }]);
   const backup = scriptedModel([{ text: '只读回答' }]);
-  const reply = await chatReply(root, [{ role: 'user', content: '上个问题' }, { role: 'assistant', content: '上个回答' }], '还有多少', { resilience: { retries: 0 }, modelOptions: { env: {}, factories: { ollama: ({ modelId }) => modelId === 'primary' ? primary : backup } } }, new AbortController().signal);
+  const reply = await chatReply(root, [{ role: 'user', content: '上个问题' }, { role: 'assistant', content: '上个回答' }], '还有多少', { resilience: { retries: 0 }, modelOptions: { env: {}, factories: { openai: ({ modelId }) => modelId === 'primary' ? primary : backup } } }, new AbortController().signal);
   expect(reply).toBe('只读回答');
   const call = backup.doGenerateCalls[0]!;
   expect(call.tools ?? []).toHaveLength(0);

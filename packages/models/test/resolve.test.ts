@@ -18,22 +18,20 @@ const fake: ProviderFactory = (s) => {
 const factories = {
   anthropic: fake,
   openai: fake,
-  google: fake,
-  deepseek: fake,
-  ollama: fake,
-  'openai-compatible': fake,
 };
 
 const config = ConfigSchema.parse({
   models: {
     extractor: 'anthropic:claude-sonnet-4-6',
-    planner: 'ollama:qwen2.5:7b',
+    planner: 'qwen:qwen2.5:7b',
     executor: 'openai:gpt-5.4',
     reviewer: 'qwen:qwen-max',
     fallback: { executor: 'anthropic:claude-sonnet-4-6' },
   },
   providers: {
-    qwen: { type: 'openai-compatible', baseURL: 'https://dashscope.example/v1' },
+    qwen: { type: 'openai', baseURL: 'https://dashscope.example/v1' },
+    openai: { type: 'openai', baseURL: 'https://api.openai.com/v1' },
+    anthropic: { type: 'anthropic', baseURL: 'https://api.anthropic.com/v1' },
   },
 });
 
@@ -46,6 +44,13 @@ describe('parseModelRef', () => {
 
   it('格式错误时报错', () => {
     expect(() => parseModelRef('gpt')).toThrow(ModelConfigError);
+  });
+});
+
+describe('未声明的 provider', () => {
+  it.each(['openai', 'anthropic'])('内置名称 %s 也必须显式声明', provider => {
+    const missing = ConfigSchema.parse({ ...config, models: { ...config.models, reviewer: `${provider}:x` }, providers: {} });
+    expect(() => resolveRole(missing, 'reviewer', { apiKeys, factories })).toThrow(/provider/);
   });
 });
 
@@ -68,8 +73,8 @@ describe('resolveRole', () => {
     expect(seen[0]?.apiKey).toBe('direct-key');
   });
 
-  it('ollama 不需要密钥', () => {
-    expect(resolveRole(config, 'planner', { env: {}, factories })[0]?.ref).toBe('ollama:qwen2.5:7b');
+  it('本地 endpoint 同样需要密钥', () => {
+    expect(() => resolveRole(config, 'planner', { env: {}, factories })).toThrow(/apiKey/);
   });
 
   it('缺少全局密钥时给出可读错误', () => {
@@ -86,6 +91,6 @@ describe('vendorWarnings', () => {
   it('executor 与 reviewer 同厂商时警告', () => {
     const same = ConfigSchema.parse({ ...config, models: { ...config.models, reviewer: 'openai:gpt-5.4-mini' } });
     expect(vendorWarnings(same)).toHaveLength(1);
-    expect(vendorWarnings(config)).toEqual([]);
+    expect(vendorWarnings(config)).toHaveLength(1);
   });
 });

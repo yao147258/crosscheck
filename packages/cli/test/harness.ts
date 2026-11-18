@@ -69,5 +69,5 @@ const reviewer = new MockLanguageModelV4({ doGenerate: async opts => {
   }
   return scriptedModel([finish(mode === 'disputed' ? 'fail' : mode === 'fail' ? 'fail' : mode === 'invalid' ? 'unclear' : 'pass', evidenceIds(opts.prompt), '独立观察')]).doGenerate(opts);
 } });
-process.exitCode = await cliMain(process.argv.slice(2), { signal: controller.signal, dependencies: { resilience: { retries: 0, baseDelayMs: 0 }, modelOptions: { factories: { ollama: ({ modelId }) => modelId === 'executor' ? executor : reviewer } } } });
+process.exitCode = await cliMain(process.argv.slice(2), { signal: controller.signal, dependencies: { resilience: { retries: 0, baseDelayMs: 0 }, modelOptions: { factories: { openai: ({ modelId }) => modelId === 'executor' ? executor : reviewer } } } });
 if (process.connected) process.disconnect?.();

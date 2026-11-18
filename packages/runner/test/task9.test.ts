@@ -25,7 +25,7 @@ async function setup(extra: { evidence?: string; actor?: unknown; approved?: boo
   const root = await mkdtemp(path.join(os.tmpdir(), 'task9-')); roots.push(root);
   const artifacts = new ArtifactStore(root);
   const userHome = path.join(root, 'user'); await mkdir(path.join(userHome, '.crosscheck'), { recursive: true });
-  await writeFile(path.join(userHome, '.crosscheck', 'config.yaml'), JSON.stringify({ models: { extractor: 'mock:x', planner: 'mock:p', executor: 'mock:e', reviewer: 'mock:r', fallback: { reviewer: 'mock:f' } }, providers: { mock: { type: 'ollama' } } }));
+  await writeFile(path.join(userHome, '.crosscheck', 'config.yaml'), JSON.stringify({ models: { extractor: 'mock:x', planner: 'mock:p', executor: 'mock:e', reviewer: 'mock:r', fallback: { reviewer: 'mock:f' } }, providers: { mock: { type: 'openai', baseURL: 'https://example.invalid/v1', apiKey: 'fixture-key' } } }));
   await artifacts.writeYaml('config.yaml', { defaultEnvironment: 'local', budget: { perCase: { steps: extra.steps ?? 20, tokens: 10000, minutes: 1 } } });
   const files = { 'environments.yaml': { version: 1, environments: { local: { baseURL: 'http://localhost:39999', healthcheck: 'http://localhost:39999/health', reset: null, ...(extra.start ? { start: extra.start } : {}), ...(extra.stop ? { stop: extra.stop } : {}) } } }, 'auth.yaml': { version: 1, actors: { guest: extra.actor ?? { kind: 'anonymous' } } }, 'api-catalog.yaml': { version: 1, operations: {} }, 'pages.yaml': { version: 1, pages: {} }, 'data-model.yaml': { version: 1, queries: {} }, 'fixtures.yaml': { version: 1, fixtures: {} }, 'guardrails.yaml': { allowedHosts: ['localhost:39999'] } };
   for (const [name, value] of Object.entries(files)) await artifacts.writeYaml(`system/${name}`, value);
@@ -53,7 +53,7 @@ function harness(artifacts: ArtifactStore, execVerdict = 'pass', reviewVerdict =
   function requestsRunPrefix() { return `runs/${runId}/cases/M-TC-1/attempts/1`; }
   const reviewer = new MockLanguageModelV4({ doGenerate: async opts => { if (reviewerErrors-- > 0) throw new Error('暂时失败'); return scriptedModel([finish(reviewVerdict, evidenceIds)]).doGenerate(opts); } });
   const fallback = new MockLanguageModelV4({ doGenerate: async opts => scriptedModel([finish(reviewVerdict, evidenceIds)]).doGenerate(opts) });
-  return { executor, reviewer, fallback, requests, options: { artifacts, modelOptions: { factories: { ollama: ({ modelId }: { modelId: string }) => modelId === 'e' ? executor : modelId === 'r' ? reviewer : fallback } }, resilience: { retries: 1, baseDelayMs: 0 }, transport: async (url: string) => { requests.push(url); if (!runId) runId = (await artifacts.list('runs'))[0]!; return new Response(JSON.stringify({ value: 'ok' }), { headers: { 'content-type': 'application/json' } }); } } };
+  return { executor, reviewer, fallback, requests, options: { artifacts, modelOptions: { factories: { openai: ({ modelId }: { modelId: string }) => modelId === 'e' ? executor : modelId === 'r' ? reviewer : fallback } }, resilience: { retries: 1, baseDelayMs: 0 }, transport: async (url: string) => { requests.push(url); if (!runId) runId = (await artifacts.list('runs'))[0]!; return new Response(JSON.stringify({ value: 'ok' }), { headers: { 'content-type': 'application/json' } }); } } };
 }
 
 describe('Task9真实编排边界', () => {
@@ -101,7 +101,7 @@ describe('Task9真实编排边界', () => {
   it('浏览器启动业务失败返回错误证据而非host-error，HTTP-only可继续unclear', async () => {
     const { artifacts } = await setup({ evidence: 'dom' });
     const model = scriptedModel([{ toolCalls: [{ name: 'browser_action', input: { kind: 'navigate', url: '/' } }] }, finish('unclear', [], '启动失败'), finish('unclear', [], '观察不足')]);
-    const r = await runSuite({ artifacts, launchBrowser: async () => { throw new Error('缺少Chromium'); }, modelOptions: { factories: { ollama: () => model } }, transport: async () => new Response('{}', { headers: { 'content-type': 'application/json' } }) });
+    const r = await runSuite({ artifacts, launchBrowser: async () => { throw new Error('缺少Chromium'); }, modelOptions: { factories: { openai: () => model } }, transport: async () => new Response('{}', { headers: { 'content-type': 'application/json' } }) });
     expect(r.exitCode).toBe(2); expect(r.result?.status).toBe('UNCLEAR'); expect(r.result?.cases[0]?.reliability.errors).not.toContain('host-error');
     expect(JSON.stringify(model.doGenerateCalls)).toContain('浏览器启动失败');
   });
@@ -109,7 +109,7 @@ describe('Task9真实编排边界', () => {
     const { artifacts } = await setup(header ? { actor: { kind: 'token', env: 'TOKEN', inject: { kind: 'header', name: 'X-Actor' } } } : {});
     const requests: { url: string; actor: string | null }[] = [];
     const model = scriptedModel([{ toolCalls: [{ name: 'browser_action', input: { kind: 'navigate', url: '/' } }] }, { toolCalls: [{ name: 'http_request', input: { url: 'http://localhost:39999/value' } }] }, finish('unclear'), finish('unclear')]);
-    const r = await runSuite({ artifacts, env: { TOKEN: 'header-secret' }, launchBrowser: async () => { throw new Error('缺少Chromium'); }, modelOptions: { factories: { ollama: () => model } }, transport: async (url, init) => { requests.push({ url, actor: new Headers(init.headers).get('x-actor') }); return new Response('{}', { headers: { 'content-type': 'application/json' } }); } });
+    const r = await runSuite({ artifacts, env: { TOKEN: 'header-secret' }, launchBrowser: async () => { throw new Error('缺少Chromium'); }, modelOptions: { factories: { openai: () => model } }, transport: async (url, init) => { requests.push({ url, actor: new Headers(init.headers).get('x-actor') }); return new Response('{}', { headers: { 'content-type': 'application/json' } }); } });
     expect(requests).toEqual([{ url: 'http://localhost:39999/health', actor: null }, { url: 'http://localhost:39999/value', actor: header ? 'header-secret' : null }]);
     expect(r.result?.status).toBe('UNCLEAR'); expect(r.exitCode).toBe(2);
   });
@@ -121,7 +121,7 @@ describe('Task9真实编排边界', () => {
   it.each(['browser_action', 'http_request'] as const)('command认证前缺失夹具%s不误报host-error且保持载荷省略', async tool => {
     const { artifacts } = await setup({ fixtures: ['missing'], actor: { kind: 'command', command: { program: process.execPath, argv: ['-e', 'console.log(JSON.stringify({headers:{}}))'], env: {} } } }); let launches = 0;
     const model = scriptedModel([{ toolCalls: [{ name: tool, input: tool === 'browser_action' ? { kind: 'navigate', url: '/prepare' } : { url: 'http://localhost:39999/prepare' } }] }, { toolCalls: [{ name: 'report_blocked', input: { reason: '动态身份未解析，不能证明准备完成' } }] }]);
-    const r = await runSuite({ artifacts, launchBrowser: async () => { launches++; return { context: { setDefaultTimeout() {}, setDefaultNavigationTimeout() {}, on() {}, off() {}, cookies: async () => [] }, page: { evaluate: async () => ({ nodes: [], overflow: false }), screenshot: async () => Buffer.from('png'), locator: () => ({}) }, close: async () => {} } as any; }, modelOptions: { factories: { ollama: () => model } }, transport: async () => new Response('{}', { headers: { 'content-type': 'application/json' } }) });
+    const r = await runSuite({ artifacts, launchBrowser: async () => { launches++; return { context: { setDefaultTimeout() {}, setDefaultNavigationTimeout() {}, on() {}, off() {}, cookies: async () => [] }, page: { evaluate: async () => ({ nodes: [], overflow: false }), screenshot: async () => Buffer.from('png'), locator: () => ({}) }, close: async () => {} } as any; }, modelOptions: { factories: { openai: () => model } }, transport: async () => new Response('{}', { headers: { 'content-type': 'application/json' } }) });
     expect(r.exitCode).toBe(2); expect(r.result?.cases[0]?.complete).toBe(true); expect(r.result?.cases[0]?.reliability.errors).not.toContain('host-error'); expect(launches).toBe(0);
     const prefix = `runs/${r.result!.manifest.runId}/cases/M-TC-1/attempts/1`;
     expect((await artifacts.readBytes(`${prefix}/trace.jsonl`))!.toString()).toContain('动态身份认证前动作载荷省略');
@@ -147,7 +147,7 @@ describe('Task9真实编排边界', () => {
   });
   it('主模型缺少全局密钥时返回安全配置诊断及退出码2', async () => {
     const { artifacts } = await setup();
-    await changeUser(artifacts, config => { config.providers.mock.type = 'openai'; });
+    await changeUser(artifacts, config => { delete config.providers.mock.apiKey; });
     const outcome = await runSuite(harness(artifacts).options);
     expect(outcome.exitCode).toBe(2);
     expect(outcome.error).toMatch(/apiKey/);
@@ -194,7 +194,7 @@ describe('Task9恢复/证据/资源故障', () => {
       return scriptedModel([ids.length ? finish('pass', ids) : { toolCalls: [{ name: 'db_query', input: { name: 'value' } }] }]).doGenerate(opts);
     } });
     const factory = () => ({ connect: async () => {}, run: async (sql: string, _values: unknown[], row: (r: Record<string, unknown>) => void) => { queries.push(sql); if (sql.includes('pg_roles')) row({ privileged: false }); else if (sql === 'SELECT value FROM items') row({ value: 'ok' }); }, close: async () => { runId = (await artifacts.list('runs'))[0]!; expect(await artifacts.readBytes(`runs/${runId}/cases/M-TC-1/attempts/1/result.json`)).toBeUndefined(); closed = true; } });
-    const r = await runSuite({ artifacts, env: { READ_DB: 'postgres://reader:only-secret@localhost:5432/test?sslmode=disable' }, createConnection: factory, modelOptions: { factories: { ollama: () => executor } }, transport: async () => new Response('{}', { headers: { 'content-type': 'application/json' } }) });
+    const r = await runSuite({ artifacts, env: { READ_DB: 'postgres://reader:only-secret@localhost:5432/test?sslmode=disable' }, createConnection: factory, modelOptions: { factories: { openai: () => executor } }, transport: async () => new Response('{}', { headers: { 'content-type': 'application/json' } }) });
     expect(r.result?.status).toBe('PASS'); expect(closed).toBe(true); expect(queries).toContain('BEGIN READ ONLY'); expect(queries).toContain('ROLLBACK');
     const input = (await artifacts.readBytes(`runs/${runId}/input.json`))!.toString(); expect(input).not.toContain('only-secret');
   });
@@ -243,7 +243,7 @@ describe('Task9恢复/证据/资源故障', () => {
     const { artifacts } = await setup();
     const model = new MockLanguageModelV4({ doGenerate: async () => ({ content: [{ type: 'tool-call', toolCallId: 'bad-json', toolName: 'finish', input: '{broken' }], finishReason: { unified: 'tool-calls', raw: undefined }, usage: { inputTokens: { total: 2, noCache: 2, cacheRead: undefined, cacheWrite: undefined }, outputTokens: { total: 1, text: 1, reasoning: undefined } }, warnings: [] }) });
     const reviewer = scriptedModel([finish('unclear', [], '不足')]);
-    const r = await runSuite({ artifacts, modelOptions: { factories: { ollama: ({ modelId }) => modelId === 'e' ? model : reviewer } }, transport: async () => new Response('{}', { headers: { 'content-type': 'application/json' } }) });
+    const r = await runSuite({ artifacts, modelOptions: { factories: { openai: ({ modelId }) => modelId === 'e' ? model : reviewer } }, transport: async () => new Response('{}', { headers: { 'content-type': 'application/json' } }) });
     expect(model.doGenerateCalls).toHaveLength(3); expect(r.result?.cases[0]?.expectations[0]?.executor).toBeNull(); expect(r.result?.status).toBe('BLOCKED');
   });
   it('DB顶层截断不能充完整集合，即使正文很短且模型反复finish', async () => {
@@ -305,7 +305,7 @@ describe('Task9恢复/证据/资源故障', () => {
       return scriptedModel([step]).doGenerate(opts);
     } });
     const urls: string[] = [];
-    const r = await runSuite({ artifacts, modelOptions: { factories: { ollama: () => model } }, transport: async url => { urls.push(url); return new Response('{}', { headers: { 'content-type': 'application/json' } }); } });
+    const r = await runSuite({ artifacts, modelOptions: { factories: { openai: () => model } }, transport: async url => { urls.push(url); return new Response('{}', { headers: { 'content-type': 'application/json' } }); } });
     expect(r.result?.status).toBe('UNCLEAR'); expect(urls).toEqual(['http://localhost:39999/health', 'http://localhost:39999/seed']);
     expect(r.result?.cases[0]?.reliability.errors).toContain('fixture-ad-hoc:missing'); expect(r.result?.cases[0]?.suggestions).toHaveLength(1);
     expect(JSON.stringify(model.doGenerateCalls[2]?.tools)).not.toMatch(/fixture_execute|program|command/);
@@ -326,7 +326,7 @@ describe('Task9恢复/证据/资源故障', () => {
     const { artifacts } = await setup(); const config = await artifacts.loadProjectConfig(); config.budget.perCase.minutes = 0.0003; await artifacts.writeYaml('config.yaml', config);
     let aborted = false;
     const model = scriptedModel([]);
-    const r = await runSuite({ artifacts, modelOptions: { factories: { ollama: () => model } }, transport: async (_url, init) => new Promise((_resolve, reject) => { const signal = init.signal!; const abort = () => { aborted = true; reject(new Error('已取消')); }; if (signal.aborted) abort(); else signal.addEventListener('abort', abort, { once: true }); }) });
+    const r = await runSuite({ artifacts, modelOptions: { factories: { openai: () => model } }, transport: async (_url, init) => new Promise((_resolve, reject) => { const signal = init.signal!; const abort = () => { aborted = true; reject(new Error('已取消')); }; if (signal.aborted) abort(); else signal.addEventListener('abort', abort, { once: true }); }) });
     expect(aborted).toBe(true); expect(r.result?.status).toBe('BLOCKED'); expect(r.result?.cases[0]?.budget.exhausted).toBe(true); expect(model.doGenerateCalls).toHaveLength(0);
   });
   it('批准operation的404漂移只记录约定和真实观察证据，仍保留业务FAIL', async () => {
@@ -344,7 +344,7 @@ describe('Task9恢复/证据/资源故障', () => {
   it('missing现场造数耗尽共享预算时不得再auth，准备凭据不进入review', async () => {
     const { artifacts } = await setup({ fixtures: ['missing'], steps: 1 });
     const model = scriptedModel([{ toolCalls: [{ name: 'finish', input: { prepared: true } }] }]);
-    const r = await runSuite({ artifacts, modelOptions: { factories: { ollama: () => model } }, transport: async () => new Response('{}', { headers: { 'content-type': 'application/json' } }) });
+    const r = await runSuite({ artifacts, modelOptions: { factories: { openai: () => model } }, transport: async () => new Response('{}', { headers: { 'content-type': 'application/json' } }) });
     expect(r.result?.status).toBe('BLOCKED'); expect(model.doGenerateCalls).toHaveLength(1);
     const prefix = `runs/${r.result!.manifest.runId}/cases/M-TC-1/attempts/1`;
     const index = JSON.parse((await artifacts.readBytes(`${prefix}/evidence/index.json`))!.toString());
@@ -375,17 +375,17 @@ describe('Task9恢复/证据/资源故障', () => {
     expect(urls).toHaveLength(1); expect(first.executor.doGenerateCalls).toHaveLength(0);
     const id = interrupted.result!.manifest.runId;
     const model = scriptedModel(Array.from({ length: 4 }, () => finish('unclear', [], '观察不足')));
-    const resumed = await runSuite({ artifacts, resume: true, resilience: first.options.resilience, modelOptions: { factories: { ollama: () => model } }, transport: async () => new Response('{}', { headers: { 'content-type': 'application/json' } }) });
+    const resumed = await runSuite({ artifacts, resume: true, resilience: first.options.resilience, modelOptions: { factories: { openai: () => model } }, transport: async () => new Response('{}', { headers: { 'content-type': 'application/json' } }) });
     expect(resumed.result?.manifest.runId).toBe(id); expect(resumed.result?.cases.map(c => c.attempt)).toEqual([2, 2]); expect(resumed.result?.status).toBe('UNCLEAR');
     const before = model.doGenerateCalls.length;
-    await runSuite({ artifacts, resume: id, resilience: first.options.resilience, modelOptions: { factories: { ollama: () => model } } }); expect(model.doGenerateCalls).toHaveLength(before);
+    await runSuite({ artifacts, resume: id, resilience: first.options.resilience, modelOptions: { factories: { openai: () => model } } }); expect(model.doGenerateCalls).toHaveLength(before);
     expect(await artifacts.readBytes(`runs/${id}/cases/M-TC-1/attempts/1/result.json`)).toBeDefined();
   });
   it('混合结构/语义错误累计三次，失败方null而非抄reviewer', async () => {
     const { artifacts } = await setup();
     const bad = scriptedModel([{ toolCalls: [{ name: 'finish', input: { judgements: '坏结构' } }] }, finish('pass', ['forged']), { toolCalls: [{ name: 'finish', input: { judgements: [] } }] }, finish('unclear')]);
     const review = scriptedModel([finish('unclear', [], '没有观察')]);
-    const r = await runSuite({ artifacts, modelOptions: { factories: { ollama: ({ modelId }) => modelId === 'e' ? bad : review } }, transport: async () => new Response('{}', { headers: { 'content-type': 'application/json' } }) });
+    const r = await runSuite({ artifacts, modelOptions: { factories: { openai: ({ modelId }) => modelId === 'e' ? bad : review } }, transport: async () => new Response('{}', { headers: { 'content-type': 'application/json' } }) });
     expect(bad.doGenerateCalls).toHaveLength(3); expect(review.doGenerateCalls).toHaveLength(1);
     expect(r.result?.cases[0]?.expectations[0]).toMatchObject({ executor: null, reviewer: { verdict: 'unclear' }, status: 'BLOCKED' });
   });
@@ -399,7 +399,7 @@ describe('Task9恢复/证据/资源故障', () => {
   it('单用例仍真实审批，运行期输入变更不改变已固定快照，后续resume拒绝', async () => {
     const { artifacts } = await setup(); let changed = false;
     const model = scriptedModel([finish('unclear', [], '原条款不可判定'), finish('unclear', [], '独立不可判定')]);
-    const r = await runCase({ artifacts, userConfigHome: path.join(path.dirname(artifacts.root), 'user'), caseId: tc.id, modelOptions: { factories: { ollama: () => model } }, transport: async () => { if (!changed) { changed = true; await artifacts.saveClauses('M', [{ ...clause, text: 'MUTATED_MID_RUN' }]); } return new Response('{}', { headers: { 'content-type': 'application/json' } }); } });
+    const r = await runCase({ artifacts, userConfigHome: path.join(path.dirname(artifacts.root), 'user'), caseId: tc.id, modelOptions: { factories: { openai: () => model } }, transport: async () => { if (!changed) { changed = true; await artifacts.saveClauses('M', [{ ...clause, text: 'MUTATED_MID_RUN' }]); } return new Response('{}', { headers: { 'content-type': 'application/json' } }); } });
     expect(r.result?.status).toBe('UNCLEAR');
     expect(JSON.stringify(model.doGenerateCalls)).not.toContain('MUTATED_MID_RUN');
     const next = await runSuite({ artifacts, resume: r.result!.manifest.runId }); expect(next.exitCode).toBe(2); expect(next.error).toContain('指纹');
@@ -424,7 +424,7 @@ describe('Task9恢复/证据/资源故障', () => {
   it('start成功配对stop一次，取消时stop使用独立signal且实际退出后提交', async () => {
     const command = { program: process.execPath, argv: ['-e', 'process.stdout.write("{}")'], env: {} };
     const { artifacts } = await setup({ start: command, stop: command }); const ac = new AbortController();
-    const r = await runSuite({ artifacts, signal: ac.signal, modelOptions: { factories: { ollama: () => scriptedModel([]) } }, transport: async () => { ac.abort(); return new Response('{}', { headers: { 'content-type': 'application/json' } }); } });
+    const r = await runSuite({ artifacts, signal: ac.signal, modelOptions: { factories: { openai: () => scriptedModel([]) } }, transport: async () => { ac.abort(); return new Response('{}', { headers: { 'content-type': 'application/json' } }); } });
     expect(r.exitCode).toBe(2); expect(r.result?.cases[0]?.complete).toBe(false);
     const dirs = await artifacts.list(`runs/${r.result!.manifest.runId}/commands`); expect(dirs).toHaveLength(2);
     const trace = (await artifacts.readBytes(`runs/${r.result!.manifest.runId}/cases/M-TC-1/attempts/1/trace.jsonl`))!.toString(); expect(trace).toContain('environment.stop');
@@ -451,7 +451,7 @@ describe('Task9恢复/证据/资源故障', () => {
         const prompt = JSON.stringify(opts.prompt); const matches = [...prompt.matchAll(/e-[a-f0-9-]{36}/g)]; const ids = [...new Set(matches.map(m => m[0]))];
         return scriptedModel([ids.length ? finish('pass', ids) : { toolCalls: [{ name: 'http_request', input: { url: `${baseURL}/value` } }] }]).doGenerate(opts);
       } });
-      const r = await runSuite({ artifacts, modelOptions: { factories: { ollama: () => model } } }); expect(r.result?.status).toBe('PASS'); expect(r.result?.usage.cost).toBeNull();
+      const r = await runSuite({ artifacts, modelOptions: { factories: { openai: () => model } } }); expect(r.result?.status).toBe('PASS'); expect(r.result?.usage.cost).toBeNull();
     } finally { server.closeAllConnections(); await new Promise<void>((resolve, reject) => server.close(err => err ? reject(err) : resolve())); }
   });
   it('语义校验拒绝缺漏/多余/重复预期，以及unclear引用伪ID、准备凭证和损坏文件', async () => {
@@ -495,7 +495,7 @@ describe('Task9 fix1 I-2 HTTP轨迹投影', () => {
     const input = { url, ...(rejected ? { method: 'POST', headers: [['content-type', 'text/plain']], body: 'UNVALIDATED_RAW_714' } : {}) };
     const model = scriptedModel([{ toolCalls: [{ name: 'http_request', input }] }, ...Array.from({ length: 6 }, () => finish('unclear', [], '观察不足'))]);
     const urls: string[] = [];
-    const r = await runSuite({ artifacts, modelOptions: { factories: { ollama: () => model } }, transport: async url => { urls.push(url); return new Response('{}', { headers: { 'content-type': 'application/json' } }); } });
+    const r = await runSuite({ artifacts, modelOptions: { factories: { openai: () => model } }, transport: async url => { urls.push(url); return new Response('{}', { headers: { 'content-type': 'application/json' } }); } });
     const raw = (await artifacts.readBytes(`runs/${r.result!.manifest.runId}/cases/M-TC-1/attempts/1/trace.jsonl`))!.toString();
     expect(raw).not.toMatch(/TRACE_SECRET_714|UNVALIDATED_RAW_714/);
     const http = raw.trim().split('\n').map(line => JSON.parse(line)).find(e => e.action.type === 'http_request');
@@ -506,7 +506,7 @@ describe('Task9 fix1 I-2 HTTP轨迹投影', () => {
   it('command认证前现场准备载荷/轨迹保守省略，不能以省略凭据完成准备', async () => {
     const { artifacts, approvals } = await setup({ fixtures: ['missing'], actor: { kind: 'command', command: { program: process.execPath, argv: ['-e', 'process.stdout.write(JSON.stringify({headers:{Authorization:"Bearer LATE_TRACE_714"}}))'], env: {} } } });
     const model = scriptedModel([{ toolCalls: [{ name: 'http_request', input: { url: 'http://localhost:39999/seed?value=LATE_TRACE_714&mode=safe' } }] }, { toolCalls: [{ name: 'finish', input: { prepared: true } }] }, finish('unclear', [], '不足'), finish('unclear', [], '不足')]);
-    const r = await runSuite({ artifacts, modelOptions: { factories: { ollama: () => model } }, transport: async () => new Response('{}', { headers: { 'content-type': 'application/json' } }) });
+    const r = await runSuite({ artifacts, modelOptions: { factories: { openai: () => model } }, transport: async () => new Response('{}', { headers: { 'content-type': 'application/json' } }) });
     const raw = (await artifacts.readBytes(`runs/${r.result!.manifest.runId}/cases/M-TC-1/attempts/1/trace.jsonl`))!.toString(); expect(raw).not.toContain('LATE_TRACE_714'); expect(raw).not.toContain('mode=safe'); expect(raw).toContain('动态身份认证前动作载荷省略'); expect(r.result!.status).toBe('BLOCKED');
   });
 });
@@ -528,7 +528,7 @@ describe('Task9 fix1 I-3 异常阶段模型审计', () => {
       }
     }
     const store = new FaultStore(path.dirname(artifacts.root)); const h = harness(store); const primary = scriptedModel(Array.from({ length: 8 }, () => ({ error: new Error('provider瞬时故障') })));
-    const r = await runSuite({ ...h.options, modelOptions: { factories: { ollama: ({ modelId }) => modelId === 'e' ? primary : modelId === 'ef' ? h.executor : h.reviewer } } });
+    const r = await runSuite({ ...h.options, modelOptions: { factories: { openai: ({ modelId }) => modelId === 'e' ? primary : modelId === 'ef' ? h.executor : h.reviewer } } });
     expect(fired).toBe(true); expect(r.exitCode).toBe(3); expect(h.requests.filter(url => url.endsWith('/value'))).toHaveLength(1); expect(h.reviewer.doGenerateCalls).toHaveLength(0);
     const prefix = `runs/${r.result!.manifest.runId}/cases/M-TC-1/attempts/1`;
     const logs = JSON.parse((await store.readBytes(`${prefix}/models.json`))!.toString()); const attempts = logs.flatMap((l: any) => l.attempts);
@@ -581,7 +581,7 @@ describe('Task9 fix1 I-4 提交期取消', () => {
     const r = await runSuite({ ...h.options, signal: ac.signal }); expect(fired).toBe(true); expect(r.exitCode).toBe(2); expect(r.interrupted).toBe(true);
     const id = r.result!.manifest.runId; const saved = JSON.parse((await store.readBytes(`runs/${id}/cases/M-TC-1/attempts/1/result.json`))!.toString()); expect(saved).toMatchObject({ complete: false, status: 'BLOCKED' });
     const nextModel = scriptedModel([finish('unclear', [], '新尝试观察不足'), finish('unclear', [], '独立观察不足')]);
-    const resumed = await runSuite({ artifacts: store, resume: id, resilience: h.options.resilience, modelOptions: { factories: { ollama: () => nextModel } }, transport: async () => new Response('{}', { headers: { 'content-type': 'application/json' } }) }); expect(resumed.result?.cases[0]?.attempt).toBe(2);
+    const resumed = await runSuite({ artifacts: store, resume: id, resilience: h.options.resilience, modelOptions: { factories: { openai: () => nextModel } }, transport: async () => new Response('{}', { headers: { 'content-type': 'application/json' } }) }); expect(resumed.result?.cases[0]?.attempt).toBe(2);
     expect(await store.readBytes(`runs/${id}/cases/M-TC-1/attempts/1/evidence/index.json`)).toBeDefined();
   });
 });
@@ -622,7 +622,7 @@ describe('最终修复 I1 动态凭证落盘前安全', () => {
         const ids = [...new Set([...JSON.stringify(opts.prompt).matchAll(/e-[a-f0-9-]{36}/g)].map(match => match[0]))];
         return scriptedModel([modelCalls++ === 0 ? { toolCalls: [{ name: 'http_request', input: { url: `${baseURL}/value` } }] } : finish('pass', ids)]).doGenerate(opts);
       } });
-      const r = await runSuite({ artifacts: store, signal: ac.signal, modelOptions: { factories: { ollama: () => model } }, ...(mode === 'abort' ? { transport: async () => { ac.abort(); return new Response(JSON.stringify({ ordinary: secret }), { headers: { 'content-type': 'application/json' } }); } } : {}) });
+      const r = await runSuite({ artifacts: store, signal: ac.signal, modelOptions: { factories: { openai: () => model } }, ...(mode === 'abort' ? { transport: async () => { ac.abort(); return new Response(JSON.stringify({ ordinary: secret }), { headers: { 'content-type': 'application/json' } }); } } : {}) });
       expect(r.exitCode).toBe(mode === 'success' ? 0 : 2); expect(r.result, JSON.stringify(r)).toBeDefined();
       await generateReport(store, r.result!.manifest.runId);
       const all: string[] = [];
@@ -651,7 +651,7 @@ describe('最终修复 I2 展示文本', () => {
       const ids = [...new Set([...JSON.stringify(opts.prompt).matchAll(/e-[a-f0-9-]{36}/g)].map(match => match[0]))];
       return scriptedModel([ids.length ? finish('pass', ids, reasoning) : { toolCalls: [{ name: 'http_request', input: { url: 'http://localhost:39999/value' } }] }]).doGenerate(opts);
     } });
-    const r = await runSuite({ ...h.options, modelOptions: { factories: { ollama: () => model } } });
+    const r = await runSuite({ ...h.options, modelOptions: { factories: { openai: () => model } } });
     expect(r.exitCode).toBe(exit === 'finish' ? 0 : 2);
     await generateReport(artifacts, r.result!.manifest.runId);
     for (const rel of ['cases/M-TC-1/attempts/1/result.json', 'results.json', 'junit.xml', 'report/index.html']) {
@@ -668,7 +668,7 @@ describe('最终修复 I2 展示文本', () => {
     const { artifacts } = await setup();
     const reason = JSON.stringify({ password: 'BLOCK_JSON_SECRET', url: 'https://example.invalid/reset?password=BLOCK_URL_SECRET&mode=safe', safe: '保留原因' });
     const model = scriptedModel([{ toolCalls: [{ name: 'report_blocked', input: { reason } }] }, { toolCalls: [{ name: 'report_blocked', input: { reason } }] }]);
-    const r = await runSuite({ artifacts, modelOptions: { factories: { ollama: () => model } }, transport: async () => new Response('{}', { headers: { 'content-type': 'application/json' } }) });
+    const r = await runSuite({ artifacts, modelOptions: { factories: { openai: () => model } }, transport: async () => new Response('{}', { headers: { 'content-type': 'application/json' } }) });
     await generateReport(artifacts, r.result!.manifest.runId);
     for (const rel of ['cases/M-TC-1/attempts/1/result.json', 'results.json', 'junit.xml', 'report/index.html']) {
       const saved = (await artifacts.readBytes(`runs/${r.result!.manifest.runId}/${rel}`))!.toString(); expect(saved).not.toMatch(/BLOCK_JSON_SECRET|BLOCK_URL_SECRET/); expect(saved).toContain('保留原因'); expect(saved).toContain('mode=safe');
@@ -683,7 +683,7 @@ describe('最终修复 I2 展示文本', () => {
       const ids = [...new Set([...JSON.stringify(opts.prompt).matchAll(/e-[a-f0-9-]{36}/g)].map(m => m[0]))];
       return scriptedModel([ids.length ? finish('pass', ids, reasoning) : { toolCalls: [{ name: 'http_request', input: { url: 'http://localhost:39999/value' } }] }]).doGenerate(opts);
     } });
-    const r = await runSuite({ ...h.options, modelOptions: { factories: { ollama: () => model } } }); expect(r.exitCode).toBe(0);
+    const r = await runSuite({ ...h.options, modelOptions: { factories: { openai: () => model } } }); expect(r.exitCode).toBe(0);
     await generateReport(artifacts, r.result!.manifest.runId);
     for (const rel of ['cases/M-TC-1/attempts/1/result.json', 'results.json', 'junit.xml', 'report/index.html']) {
       const saved = (await artifacts.readBytes(`runs/${r.result!.manifest.runId}/${rel}`))!.toString();
@@ -719,7 +719,7 @@ describe('最终修复 I3 准备完成凭据', () => {
         const ids = [...new Set([...JSON.stringify(opts.prompt).matchAll(/e-[a-f0-9-]{36}/g)].map(match => match[0]))];
         return scriptedModel([finish('pass', ids)]).doGenerate(opts);
       } });
-      const r = await runSuite({ artifacts, modelOptions: { factories: { ollama: ({ modelId }) => modelId === 'e' ? executor : reviewer } } });
+      const r = await runSuite({ artifacts, modelOptions: { factories: { openai: ({ modelId }) => modelId === 'e' ? executor : reviewer } } });
       expect(r.exitCode).toBe(0); expect(seeded).toBe(true); expect(requests).toEqual(['GET /health', 'POST /seed', 'GET /state', 'GET /value']);
       expect(JSON.stringify(reviewer.doGenerateCalls)).not.toMatch(/\/seed|\/state/);
     } finally { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); }
@@ -736,7 +736,7 @@ describe('最终修复 I3 准备完成凭据', () => {
       const evidenceIds = kind === 'empty' ? [] : [index.at(-1)!.id];
       return scriptedModel([{ toolCalls: [{ name: 'finish', input: { prepared: true, ...(kind === 'empty' ? {} : { evidenceIds }) } }] }]).doGenerate(opts);
     } });
-    const r = await runSuite({ artifacts, modelOptions: { factories: { ollama: () => model } }, transport: async url => { urls.push(url); return new Response(JSON.stringify({ value: kind === 'truncated' ? 'x'.repeat(300000) : 'seeded' }), { status: kind === 'error' && url.endsWith('/seed') ? 500 : 200, headers: { 'content-type': 'application/json' } }); } });
+    const r = await runSuite({ artifacts, modelOptions: { factories: { openai: () => model } }, transport: async url => { urls.push(url); return new Response(JSON.stringify({ value: kind === 'truncated' ? 'x'.repeat(300000) : 'seeded' }), { status: kind === 'error' && url.endsWith('/seed') ? 500 : 200, headers: { 'content-type': 'application/json' } }); } });
     expect(r.exitCode).toBe(2);
     if (kind === 'valid') { expect(r.result!.status).toBe('UNCLEAR'); expect(urls.map(url => new URL(url).pathname)).toEqual(['/health', '/seed', '/state']); expect(model.doGenerateCalls).toHaveLength(5); expect(JSON.stringify(model.doGenerateCalls[4]!.prompt)).not.toContain('/state'); }
     else { expect(r.result!.status).toBe('BLOCKED'); expect(model.doGenerateCalls).toHaveLength(kind === 'empty' || kind === 'health' ? 3 : 4); const index = JSON.parse((await artifacts.readBytes(`runs/${r.result!.manifest.runId}/cases/M-TC-1/attempts/1/evidence/index.json`))!.toString()); expect(index.every((record: any) => record.phase === 'preparation')).toBe(true); expect(r.result!.cases[0]!.reason).toContain('3'); }
@@ -762,7 +762,7 @@ describe('最终修复 I4 DB业务证据资格', () => {
       const ids = [...new Set([...JSON.stringify(opts.prompt).matchAll(/e-[a-f0-9-]{36}/g)].map(m => m[0]))];
       return scriptedModel([calls++ === 0 ? { toolCalls: [{ name: 'db_query', input: { sql: 'DROP TABLE items' } }] } : finish(verdict, verdict === 'unclear' ? [] : ids)]).doGenerate(opts);
     } });
-    const r = await runSuite({ artifacts, env: { READ_DB: 'postgres://reader:secret@localhost:5432/test?sslmode=disable' }, createConnection: () => { connections++; throw new Error('不应连接'); }, modelOptions: { factories: { ollama: () => model } }, transport: async () => new Response('{}', { headers: { 'content-type': 'application/json' } }) });
+    const r = await runSuite({ artifacts, env: { READ_DB: 'postgres://reader:secret@localhost:5432/test?sslmode=disable' }, createConnection: () => { connections++; throw new Error('不应连接'); }, modelOptions: { factories: { openai: () => model } }, transport: async () => new Response('{}', { headers: { 'content-type': 'application/json' } }) });
     expect(connections).toBe(0); expect(r.result!.status).toBe(verdict === 'unclear' ? 'UNCLEAR' : 'BLOCKED'); expect(r.exitCode).toBe(2);
     expect(model.doGenerateCalls).toHaveLength(verdict === 'unclear' ? 3 : 7);
   });

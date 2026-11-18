@@ -25,7 +25,8 @@ export function SessionApp({ options }: { options: RunSessionOptions }) {
   const { rows, columns } = useWindowSize();
   const content = useRef<DOMElement>(null);
   const { height } = useBoxMetrics(content);
-  const viewport = Math.max(0, rows - 1);
+  const inputHeight = Math.min(3, Math.max(1, rows));
+  const viewport = Math.min(height || Math.max(0, rows - inputHeight), Math.max(0, rows - inputHeight));
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const history = useRef<ChatMessage[]>([]);
   const [input, setInput] = useState('');
@@ -115,7 +116,7 @@ export function SessionApp({ options }: { options: RunSessionOptions }) {
           : <Text key={i}>{safeText(m.content)}</Text>)}
       </Box>
     </Box>
-    <Box backgroundColor="#b8b8b8" flexShrink={0}><Text color="black" wrap="truncate-start">{busy ? '执行中，Ctrl+C 中断并等待清理' : `> ${safeText(input)}`}</Text></Box>
+    <Box backgroundColor="#b8b8b8" borderStyle="single" borderColor="white" borderLeft={false} borderRight={false} borderTop={inputHeight >= 3} borderBottom={inputHeight >= 2} flexShrink={0}><Text color="black" wrap="truncate-start">{busy ? '执行中，Ctrl+C 中断并等待清理' : `> ${safeText(input)}`}</Text></Box>
   </Box>;
 }
 

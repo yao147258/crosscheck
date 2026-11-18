@@ -56,7 +56,7 @@ async function setup(images: boolean) {
   const userHome = path.join(root, 'user'); await mkdir(path.join(userHome, '.crosscheck'), { recursive: true });
   await writeFile(path.join(userHome, '.crosscheck', 'config.yaml'), JSON.stringify({
     models: { extractor: 'mock:x', planner: 'mock:p', executor: 'mock:executor', reviewer: 'mock:reviewer' },
-    providers: { mock: { type: 'ollama' } }, capabilities: { 'mock:executor': { images: true }, 'mock:reviewer': { images } },
+    providers: { mock: { type: 'openai', baseURL: 'https://example.invalid/v1', apiKey: 'fixture-key' } }, capabilities: { 'mock:executor': { images: true }, 'mock:reviewer': { images } },
   }));
   await artifacts.writeYaml('config.yaml', { defaultEnvironment: 'local', budget: { perCase: { steps: 20, tokens: 100000, minutes: 1 } } });
   const files = {

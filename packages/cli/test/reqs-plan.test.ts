@@ -40,13 +40,13 @@ async function project(docs: string[] = ['docs/需求.md']) {
   const root = await tempRoot();
   const artifacts = new ArtifactStore(root);
   await mkdir(path.join(root, 'user', '.crosscheck'), { recursive: true });
-  await writeFile(path.join(root, 'user', '.crosscheck', 'config.yaml'), JSON.stringify({ models: { extractor: 'mock:x', planner: 'mock:p', executor: 'mock:e', reviewer: 'mock:r' }, providers: { mock: { type: 'ollama' } } }));
+  await writeFile(path.join(root, 'user', '.crosscheck', 'config.yaml'), JSON.stringify({ models: { extractor: 'mock:x', planner: 'mock:p', executor: 'mock:e', reviewer: 'mock:r' }, providers: { mock: { type: 'openai', baseURL: 'https://example.invalid/v1', apiKey: 'fixture-key' } } }));
   await artifacts.writeYaml('config.yaml', { requirementsDocs: docs });
   await mkdir(path.join(root, 'docs'));
   await writeFile(path.join(root, 'docs/需求.md'), doc);
   return { root, artifacts };
 }
-const deps = (model: ReturnType<typeof scriptedModel>) => ({ modelOptions: { env: {}, factories: { ollama: () => model } }, resilience: { retries: 0, baseDelayMs: 0 } });
+const deps = (model: ReturnType<typeof scriptedModel>) => ({ modelOptions: { env: {}, factories: { openai: () => model } }, resilience: { retries: 0, baseDelayMs: 0 } });
 async function approveProfile(artifacts: ArtifactStore, approvals: Approvals) {
   for (const [name, value] of Object.entries(PROFILE)) await artifacts.writeYaml(`system/${name}`, value);
   for (const [name, value] of Object.entries(await loadProfile(artifacts))) approvals.approve('profile', name, value, '人工');
@@ -175,7 +175,7 @@ it('plan 无已确认 active 条款时门禁退出，不解析模型', async () 
   approvals.approve('clause', inactive.id, inactive, '人工');
   await approvals.save(artifacts);
   const factory = vi.fn(() => scriptedModel([]));
-  expect(await cliMain(['plan', '--module', 'M', '--project', root], { log: () => {}, dependencies: { modelOptions: { env: {}, factories: { ollama: factory } } } })).toBe(2);
+  expect(await cliMain(['plan', '--module', 'M', '--project', root], { log: () => {}, dependencies: { modelOptions: { env: {}, factories: { openai: factory } } } })).toBe(2);
   expect(factory).not.toHaveBeenCalled();
   expect(await artifacts.list('cases')).toEqual([]);
 });
@@ -244,7 +244,7 @@ it.each(['reqs', 'plan'] as const)('%s 预先取消不读写工件、不解析�
   const approvals = await artifacts.readBytes('approvals.json');
   const factory = vi.fn(() => scriptedModel([]));
   const load = vi.spyOn(ArtifactStore.prototype, 'loadConfig');
-  expect(await cliMain([command, '--module', 'M', '--project', root], { log: () => {}, signal: AbortSignal.abort(), dependencies: { modelOptions: { env: {}, factories: { ollama: factory } } } })).toBe(2);
+  expect(await cliMain([command, '--module', 'M', '--project', root], { log: () => {}, signal: AbortSignal.abort(), dependencies: { modelOptions: { env: {}, factories: { openai: factory } } } })).toBe(2);
   expect(load).not.toHaveBeenCalled();
   expect(factory).not.toHaveBeenCalled();
   expect(await artifacts.readBytes('requirements/M.yaml')).toEqual(clauses);
@@ -263,7 +263,7 @@ it.each(['reqs', 'plan'] as const)('%s 读取后取消不解析模型也不写�
     return clauses;
   });
   const factory = vi.fn(() => scriptedModel([]));
-  expect(await cliMain([command, '--module', 'M', '--project', root], { log: () => {}, signal: controller.signal, dependencies: { modelOptions: { env: {}, factories: { ollama: factory } } } })).toBe(2);
+  expect(await cliMain([command, '--module', 'M', '--project', root], { log: () => {}, signal: controller.signal, dependencies: { modelOptions: { env: {}, factories: { openai: factory } } } })).toBe(2);
   expect(factory).not.toHaveBeenCalled();
   expect(await artifacts.readBytes('requirements/M.yaml')).toEqual(before);
   expect(await artifacts.list('cases')).toEqual([]);

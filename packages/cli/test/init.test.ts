@@ -31,11 +31,11 @@ async function project(withConfig: boolean) {
   const root = await mkdtemp(path.join(os.tmpdir(), 'cli-init-')); roots.push(root);
   const artifacts = new ArtifactStore(root);
   await mkdir(path.join(root, 'user', '.crosscheck'), { recursive: true });
-  await writeFile(path.join(root, 'user', '.crosscheck', 'config.yaml'), JSON.stringify({ models: { extractor: 'mock:x', planner: 'mock:p', executor: 'mock:e', reviewer: 'mock:r' }, providers: { mock: { type: 'ollama' } } }));
+  await writeFile(path.join(root, 'user', '.crosscheck', 'config.yaml'), JSON.stringify({ models: { extractor: 'mock:x', planner: 'mock:p', executor: 'mock:e', reviewer: 'mock:r' }, providers: { mock: { type: 'openai', baseURL: 'https://example.invalid/v1', apiKey: 'fixture-key' } } }));
   if (withConfig) await artifacts.writeYaml('config.yaml', {});
   return { root, artifacts };
 }
-const deps = (model: ReturnType<typeof scriptedModel>) => ({ modelOptions: { env: {}, factories: { ollama: () => model } }, resilience: { retries: 0, baseDelayMs: 0 } });
+const deps = (model: ReturnType<typeof scriptedModel>) => ({ modelOptions: { env: {}, factories: { openai: () => model } }, resilience: { retries: 0, baseDelayMs: 0 } });
 
 it('没有 config.yaml 时写入合法模板并退出 2，不调用模型', async () => {
   const { root, artifacts } = await project(false);
@@ -133,13 +133,13 @@ it.each([false, true])('预先取消时不写模板或草稿、不解析模型�
   const { root, artifacts } = await project(withConfig);
   const before = await artifacts.readBytes('config.yaml');
   const model = scriptedModel([]);
-  const factories = { ollama: vi.fn(() => model) };
+  const factories = { openai: vi.fn(() => model) };
   expect(await cliMain(['init', '--project', root], {
     log: () => {}, signal: AbortSignal.abort(), dependencies: { modelOptions: { env: {}, factories } },
   })).toBe(2);
   expect(await artifacts.readBytes('config.yaml')).toEqual(before);
   expect(await artifacts.list('system')).toEqual([]);
-  expect(factories.ollama).not.toHaveBeenCalled();
+  expect(factories.openai).not.toHaveBeenCalled();
   expect(model.doGenerateCalls).toHaveLength(0);
 });
 
@@ -149,7 +149,7 @@ it('扫描后取消不再解析模型或写入草稿', async () => {
   const factory = vi.fn(() => scriptedModel([]));
   expect(await cliMain(['init', '--project', root], {
     log: () => controller.abort(), signal: controller.signal,
-    dependencies: { modelOptions: { env: {}, factories: { ollama: factory } } },
+    dependencies: { modelOptions: { env: {}, factories: { openai: factory } } },
   })).toBe(2);
   expect(factory).not.toHaveBeenCalled();
   expect(await artifacts.list('system')).toEqual([]);
@@ -205,7 +205,7 @@ it.each(['environments.yaml', 'guardrails.yaml'])('写入 %s 期间取消保留�
 
 it('配置缺密钥是宿主错误，保留具体诊断', async () => {
   const { root, artifacts } = await project(true);
-  await writeFile(path.join(root, 'user', '.crosscheck', 'config.yaml'), JSON.stringify({ models: { extractor: 'openai:x', planner: 'openai:x', executor: 'openai:x', reviewer: 'openai:x' }, providers: { openai: { type: 'openai' } } }));
+  await writeFile(path.join(root, 'user', '.crosscheck', 'config.yaml'), JSON.stringify({ models: { extractor: 'openai:x', planner: 'openai:x', executor: 'openai:x', reviewer: 'openai:x' }, providers: { openai: { type: 'openai', baseURL: 'https://example.invalid/v1' } } }));
   const out: string[] = [];
   expect(await cliMain(['init', '--project', root], { log: (s) => out.push(s), dependencies: { env: {} } })).toBe(3);
   expect(out.join('\n')).toContain('apiKey');
@@ -267,13 +267,13 @@ it.each(['SIGINT', 'SIGTERM'] as const)('withInterrupt 接管 %s 并恢复监听
 it('公共模型解析使用独立密钥集合，并记录备用模型缺密钥警告', () => {
   const config = ConfigSchema.parse({
     models: { extractor: 'mock:x', planner: 'mock:p', executor: 'mock:e', reviewer: 'mock:r', fallback: { extractor: 'anthropic:backup' } },
-    providers: { mock: { type: 'ollama', apiKeyEnv: 'MOCK_KEY' } },
+    providers: { mock: { type: 'openai', baseURL: 'https://example.invalid/v1', apiKeyEnv: 'MOCK_KEY' }, anthropic: { type: 'anthropic', baseURL: 'https://api.anthropic.com/v1' } },
   });
   let key: string | undefined;
   const out: string[] = [];
   const models = resolveModels(config, 'extractor', {
     env: { MOCK_KEY: '命令密钥' },
-    modelOptions: { env: { MOCK_KEY: '模型密钥', ANTHROPIC_API_KEY: '备用密钥' }, apiKeys: { mock: '全局密钥' }, factories: { ollama: (options) => { key = options.apiKey; return scriptedModel([]); } } },
+    modelOptions: { env: { MOCK_KEY: '模型密钥', ANTHROPIC_API_KEY: '备用密钥' }, apiKeys: { mock: '全局密钥' }, factories: { openai: (options) => { key = options.apiKey; return scriptedModel([]); } } },
   }, (s) => out.push(s));
   expect(key).toBe('全局密钥');
   expect(models.map((m) => m.ref)).toEqual(['mock:x']);

@@ -3,20 +3,23 @@ import { z } from 'zod';
 export const ROLES = ['extractor', 'planner', 'executor', 'reviewer'] as const;
 export type Role = (typeof ROLES)[number];
 
-export const PROVIDER_TYPES = ['anthropic', 'openai', 'google', 'deepseek', 'ollama', 'openai-compatible'] as const;
+export const PROVIDER_TYPES = ['anthropic', 'openai'] as const;
 export type ProviderType = (typeof PROVIDER_TYPES)[number];
 
-/** provider:model，model 部分允许再含冒号（如 ollama:qwen2.5:7b） */
+/** provider:model，model 部分允许再含冒号（如 local:qwen2.5:7b） */
 export const ModelRefSchema = z.string().regex(/^[a-z0-9][a-z0-9_-]*:.+$/, '模型写成 provider:model 形式');
 
 const ProviderConfigSchema = z.object({
   type: z.enum(PROVIDER_TYPES),
-  baseURL: z.string().url().optional(),
+  baseURL: z.string().url().refine((value) => {
+    try {
+      const url = new URL(value);
+      return ['http:', 'https:'].includes(url.protocol) && !url.username && !url.password;
+    } catch { return false; }
+  }),
 });
 
-const UserProviderSchema = z.object({
-  type: z.enum(PROVIDER_TYPES),
-  baseURL: z.string().url().refine((value) => { try { const url = new URL(value); return ['http:', 'https:'].includes(url.protocol) && !url.username && !url.password; } catch { return false; } }).optional(),
+const UserProviderSchema = ProviderConfigSchema.extend({
   apiKey: z.string().trim().min(1).optional(),
 });
 
@@ -78,7 +81,7 @@ export function publicModelConfig(config: UserModelConfig) {
   return {
     models: { extractor: config.models.extractor, planner: config.models.planner, executor: config.models.executor, reviewer: config.models.reviewer, fallback: Object.fromEntries(ROLES.flatMap(role => config.models.fallback[role] ? [[role, config.models.fallback[role]]] : [])) },
     providers: Object.fromEntries(Object.entries(config.providers).map(([name, provider]) => [name, {
-      type: provider.type, ...(provider.baseURL ? { baseURL: provider.baseURL } : {}),
+      type: provider.type, baseURL: provider.baseURL,
     }])),
     capabilities: Object.fromEntries(Object.entries(config.capabilities).map(([ref, capability]) => [ref, { images: capability.images }])),
     pricing: Object.fromEntries(Object.entries(config.pricing).map(([ref, price]) => [ref, { inputPerMTok: price.inputPerMTok, outputPerMTok: price.outputPerMTok }])),
