@@ -163,7 +163,7 @@ it('status 指令读取指定项目状态且拒绝无效参数', async () => {
 });
 
 it('会话命令清单覆盖全部斜杠命令且带描述', () => {
-  expect(sessionSlashCommands.map((command) => command.name)).toEqual(['init', 'profile', 'reqs', 'plan', 'review', 'run', 'report', 'status', 'help', 'clear', 'exit']);
+  expect(sessionSlashCommands.map((command) => command.name)).toEqual(['init', 'profile', 'reqs', 'plan', 'review', 'run', 'report', 'impact', 'status', 'help', 'clear', 'exit']);
   expect(sessionSlashCommands.find((command) => command.name === 'init')?.description).toContain('笔记');
   expect(sessionSlashCommands.find((command) => command.name === 'profile')?.description).toContain('画像');
   expect(sessionSlashCommands.find((command) => command.name === 'review')?.description).toContain('笔记');

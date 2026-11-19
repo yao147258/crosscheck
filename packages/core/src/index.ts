@@ -24,3 +24,6 @@ export * from './guard/url-guard';
 export * from './guard/sql-guard';
 export * from './redact/redact';
 export * from './budget/budget';
+export * from './impact/types';
+export * from './impact/compare';
+export * from './impact/analyze';

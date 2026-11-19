@@ -42,6 +42,7 @@ export const sessionSlashCommands = [
   { name: 'review', description: '交互审核笔记、画像、条款、用例与结果' },
   { name: 'run', description: '执行已确认用例' },
   { name: 'report', description: '离线重建运行报告' },
+  { name: 'impact', description: '只读分析当前磁盘相对 Git 基线的影响' },
   { name: 'status', description: '查看项目阶段、待审核任务与最近测试' },
   { name: 'help', description: '显示命令帮助' },
   { name: 'clear', description: '清空对话历史' },

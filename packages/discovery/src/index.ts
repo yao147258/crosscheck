@@ -1,7 +1,7 @@
 export type { DiscoveryContext, DiscoveryDiagnostic, DiscoveryFact, DiscoveryPlugin, DiscoveryResult, DiscoverySource, ProjectEntry, ProjectLister, ProjectReader } from './types';
 export { DEFAULT_IGNORES, WALK_LIMITS, parseGitignore, walkProject } from './walk';
 export type { FileEntry, WalkResult } from './walk';
-export { createProjectReader } from './files';
+export { createProjectReader, isSafeProjectPath } from './files';
 export { discover } from './discover';
 export { staticScanPlugin } from './static-scan';
 export { openApiPlugin } from './openapi';

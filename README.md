@@ -29,9 +29,10 @@ pnpm --filter crosscheck exec crosscheck --help
 | `reqs --module <id>` | 从配置的 `requirementsDocs` 提取带来源的条款草稿 |
 | `review [notes\|profile\|clauses\|cases\|results]` | 交互审核笔记、画像、条款、用例与运行结果；支持 `--module <id>`、`--run <runId>` 定位 |
 | `plan --module <id>` | 画像全部确认、条款确认后，生成用例草稿 |
+| `impact [--since <commit>] [--json]` | 只读比较 Git 基线与当前磁盘，列出变更及画像、用例的级联影响 |
 | `run` / `report <runId>` | 执行已确认用例 / 从历史快照离线重建报告 |
 
-无参数运行 `crosscheck`（stdin 和 stdout 均需 TTY）进入常驻会话。输入 `/init`、`/profile`、`/reqs`、`/plan`、`/review`、`/run`、`/report`、`/status`、`/help`、`/clear` 或 `/exit`；参数与独立命令相同，含空格的路径用引号包围，例如 `/review cases --project "E:/my project"`。输入以 `/` 开头时输入框下方显示匹配命令与描述，Tab 在匹配命令间循环补全。`/clear` 清空对话消息与模型历史。每次进入审核都会重新读取对应项目的确认记录，`q` 或顶层 `Esc` 返回聊天。命令执行失败只显示退出码，不结束会话。运行中 Ctrl+C 请求取消并等待清理；空闲时使用 `/exit` 退出。
+无参数运行 `crosscheck`（stdin 和 stdout 均需 TTY）进入常驻会话。输入 `/init`、`/profile`、`/reqs`、`/plan`、`/review`、`/run`、`/report`、`/impact`、`/status`、`/help`、`/clear` 或 `/exit`；参数与独立命令相同，含空格的路径用引号包围，例如 `/review cases --project "E:/my project"`。输入以 `/` 开头时输入框下方显示匹配命令与描述，Tab 在匹配命令间循环补全。`/clear` 清空对话消息与模型历史。每次进入审核都会重新读取对应项目的确认记录，`q` 或顶层 `Esc` 返回聊天。命令执行失败只显示退出码，不结束会话。运行中 Ctrl+C 请求取消并等待清理；空闲时使用 `/exit` 退出。
 
 `/status [--project <目录>]` 只读查看推断的项目阶段、待审核数量和最新测试运行；数据缺失、运行未完成或损坏会明确提示。阶段是根据已有工件推断，不代表项目已全部完成。结果待裁决数量仅针对最新运行。
 
@@ -59,6 +60,22 @@ pnpm crosscheck report <runId> --project E:/my-test-project --open
 ```
 
 重复 module/case 各自成集合，两类取交集；未知/空选择不全绿。退出0全PASS，1含FAIL，2不确定/阻断/空/中断/参数错误，3宿主错误优先。report退出0仅说明重建成功，历史业务状态不变。SIGINT/SIGTERM 触发取消，等待资源关闭与工件落盘后退出。
+
+## 变更影响分析
+
+```powershell
+crosscheck impact --project E:/my-test-project
+crosscheck impact --since HEAD~1 --project E:/my-test-project
+crosscheck impact --since <commit> --json --project E:/my-test-project
+```
+
+`impact`（会话中为 `/impact`）默认比较 `HEAD` 与当前磁盘文件，包括未提交修改和相关新增文件，不单独比较暂存区。读取新旧配置登记的需求文档、笔记、七画像、条款和用例，不扫描整个源码；无需模型配置或 API 密钥，不更改产物和确认状态，也不自动重新生成。
+
+被测项目应将相关需求文档及 `.crosscheck/config.yaml`、`notes.md`、`system/`、`requirements/`、`cases/` 纳入 Git；提交前先检查秘密，不要将凭证、全局模型密钥或运行证据一并加入。基线没有这些输入、文件损坏、引用缺失或超限时会报告分析不完整，不会用空基线冒充“无影响”。
+
+报告区分实际变更、显式依赖影响、可能影响和分析缺口，并提供原因链。`covers`、角色和夹具等显式引用可定位依赖；笔记和自然语言步骤没有完整的细粒度映射，因此保守列为可能影响。“确定影响”表示存在确定的依赖关系，不代表测试一定失败；“未发现关联”也不保证完全无影响。当前版本只建议复核，不自动使已确认下游失效，生成命令仍遵循原有保留规则。
+
+`--json` 输出单个版本化报告对象，不含原文或配置值。`impact` 的退出码独立于运行结果：`0` 为分析完整（即使存在影响），`2` 为无效基线、输入不完整或中断，`3` 为宿主故障。没有 Git 历史时需先人工建立基线；命令不会自动提交或保存快照。为避免 Git 惰性获取触发网络或写入，首版拒绝 partial/promisor 仓库及使用 alternates 共享对象库的仓库，请使用完整且独立的仓库。分析、原因链与报告有资源上限；达到上限时返回不完整报告和退出码 `2`。
 
 ## 离线报告与能力边界
 
@@ -90,7 +107,7 @@ HTTP fixture 只接受固定 JSON 请求与完整 JSON 响应；start/stop 仅�
 | `@crosscheck/tools` | 受控HTTP、只读PG、认证/夹具宿主适配与脱敏采证 |
 | `@crosscheck/runner` | 已确认输入执行、盲审、资源清理、提交与恢复 |
 | `@crosscheck/report` | 已验证历史数据的JSON/JUnit/静态HTML派生 |
-| `crosscheck`（内部包名曾为 `@crosscheck/cli`） | init/profile/reqs/plan/review/run/report、信号与退出码 |
+| `crosscheck`（内部包名曾为 `@crosscheck/cli`） | init/profile/reqs/plan/impact/review/run/report、信号与退出码 |
 | `@crosscheck/tui` | 交互审核、人工确认与运行结果裁决 |
 | `@crosscheck/planner` | 基于已确认画像、条款生成用例草稿 |
 | `@crosscheck/discovery` | 只读提取本地项目与 OpenAPI 事实候选 |

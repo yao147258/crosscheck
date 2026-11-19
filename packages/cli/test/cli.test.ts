@@ -1,6 +1,26 @@
 import { expect, it } from 'vitest';
 import { cliMain, parseArgs } from '../src/main';
 
+it('impact 默认比较 HEAD，独立解析 since 和无值 json', () => {
+  expect(parseArgs(['impact'])).toEqual({ command: 'impact', project: process.cwd(), open: false, since: 'HEAD', json: false });
+  expect(parseArgs(['impact', '--since', 'HEAD~1', '--json', '--project', '项目'])).toEqual({ command: 'impact', project: '项目', open: false, since: 'HEAD~1', json: true });
+});
+it.each([
+  ['impact', '--json', '--json'], ['impact', '--since', 'HEAD', '--since', 'HEAD~1'],
+  ['impact', '--since'], ['impact', '--since', ''], ['impact', '--json', 'true'],
+  ['impact', '--module', 'M'], ['impact', '--apply'], ['impact', '--open'], ['diff'],
+  ...['init', 'profile', 'reqs', 'plan', 'review', 'run', 'report'].flatMap((command) =>
+    ['--json', '--since'].map((flag) => [command, ...(command === 'report' ? ['20261113T123456789Z-00000000000000000000000000000000'] : []), flag, ...(flag === '--since' ? ['HEAD'] : [])])),
+].map((args) => ({ args })))('impact 新参数不允许重复、取伪值或泄漏到其他命令 $args', ({ args }) => {
+  expect(() => parseArgs(args)).toThrow();
+});
+it('帮助公开 impact 命令及会话入口', async () => {
+  const lines: string[] = [];
+  expect(await cliMain(['--help'], { log: (s) => lines.push(s) })).toBe(0);
+  expect(lines.join('\n')).toContain('crosscheck impact [--since <commit>] [--json] [--project <目录>]');
+  expect(lines.join('\n')).toContain('/impact');
+});
+
 it('重复模块/用例保留集合筛选，resume可有无标识', () => {
   expect(parseArgs(['run', '--module', 'M', '--module', 'N', '--case', 'M-TC-1', '--case', 'N-TC-2', '--resume', '--project', 'a', '--environment', 'local'])).toMatchObject({ command: 'run', modules: ['M', 'N'], caseIds: ['M-TC-1', 'N-TC-2'], resume: true, project: 'a', environment: 'local', open: false });
   expect(parseArgs(['run', '--resume', 'saved'])).toMatchObject({ resume: 'saved' });

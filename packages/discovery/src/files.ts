@@ -12,14 +12,18 @@ export function isCredential(name: string): boolean {
     /\.(?:pem|key|p12|pfx|keystore)$/.test(lower);
 }
 
+export function isSafeProjectPath(file: string): boolean {
+  const normalized = file.replaceAll('\\', '/');
+  return !!normalized && !path.posix.isAbsolute(normalized) && !path.win32.isAbsolute(file) && !/^[a-z]:/i.test(normalized) && !/[\x00-\x1f\x7f]/.test(normalized) && !normalized.split('/').some((part) => part === '..' || (part !== '.' && /[. ]$/.test(part)) || isCredential(part) || part.includes(':') || /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?$/i.test(part));
+}
+
 export function createProjectReader(projectRoot: string): ProjectLister {
   return {
     async list(dir, signal, options) {
       signal?.throwIfAborted();
       const normalized = (dir || '.').replaceAll('\\', '/');
       const parts = normalized.split('/');
-      if (path.posix.isAbsolute(normalized) || path.win32.isAbsolute(dir) || /^[a-z]:/i.test(normalized) ||
-          parts.some((part) => part === '..' || (part !== '.' && /[. ]$/.test(part)) || isCredential(part) || part.includes(':') || /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?$/i.test(part))) {
+      if (!isSafeProjectPath(dir || '.')) {
         throw new Error('不允许读取该路径');
       }
       let root: string;
@@ -74,8 +78,7 @@ export function createProjectReader(projectRoot: string): ProjectLister {
       signal?.throwIfAborted();
       const normalized = file.replaceAll('\\', '/');
       const parts = normalized.split('/');
-      if (!normalized || path.posix.isAbsolute(normalized) || path.win32.isAbsolute(file) || /^[a-z]:/i.test(normalized) ||
-          parts.some((part) => part === '..' || (part !== '.' && /[. ]$/.test(part)) || isCredential(part) || part.includes(':') || /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?$/i.test(part))) {
+      if (!isSafeProjectPath(file)) {
         throw new Error('不允许读取该路径');
       }
       let root: string;
