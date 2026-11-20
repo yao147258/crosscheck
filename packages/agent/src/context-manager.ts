@@ -77,8 +77,12 @@ export class ContextManager {
   /** 按窗口保存已定稿前缀：source 为其对应的原始消息条数 */
   private readonly prefixes = new Map<number, { source: number; messages: ModelMessage[] }>();
   private last: ContextReport | undefined;
+  /** 公开供 runAgent 校验：注入的管理器阶段必须与运行阶段一致，否则会绕过阶段摘要禁令。 */
+  readonly stage: Stage;
 
-  constructor(private readonly options: ContextManagerOptions) {}
+  constructor(private readonly options: ContextManagerOptions) {
+    this.stage = options.stage;
+  }
 
   get summaryAllowed(): boolean {
     return SUMMARY_ALLOWED[this.options.stage] && !!this.options.summarize;

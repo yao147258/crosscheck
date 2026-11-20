@@ -96,4 +96,11 @@ describe('循环上下文管理', () => {
     await runAgent(options);
     expect(manager.report()).toMatchObject({ ref: 'mock:a' });
   });
+
+  it('注入的 ContextManager 阶段与 stage 不一致时在调用模型前抛错', async () => {
+    // plan 管理器允许摘要，若被 execute 运行借用即绕过判定阶段的摘要禁令。
+    const { model, options } = setup([finish], { contextManager: new ContextManager({ stage: 'plan' }) });
+    await expect(runAgent(options)).rejects.toThrow(/阶段（plan）与 runAgent 的 stage（execute）不一致/);
+    expect(model.doGenerateCalls).toHaveLength(0);
+  });
 });

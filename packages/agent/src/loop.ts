@@ -189,6 +189,8 @@ export async function runAgent<O>(opts: RunAgentOptions<O>): Promise<AgentResult
     // 摘要调用也是真实模型调用：计入预算、attempts 与审计。
     summarize: createModelSummarizer({ budget, onAttempt: async attempt => { attempts++; await record(attempt); } }),
   });
+  // 摘要权限按管理器自身阶段判定；阶段不一致会让判定阶段借用 plan/extract 的摘要权限，须在模型调用前拒绝。
+  if (manager.stage !== stage) throw new Error(`注入的 contextManager 阶段（${manager.stage}）与 runAgent 的 stage（${stage}）不一致`);
   const info = (): RunInfo => ({ steps, attempts, modelAttempts, retried, messages });
   const blocked = (reason: BlockReason, detail: string): AgentResult<O> => ({ status: 'blocked', reason, detail, ...info() });
   const boundedSignal = () => AbortSignal.any([abortSignal, AbortSignal.timeout(budget.remainingMs())]);
