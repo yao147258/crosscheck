@@ -31,7 +31,7 @@ export interface ParentContext {
   parentId?: string;
   resilience?: ResilienceOptions;
   evidencePresenter?: EvidencePresenter;
-  /** 返回其中真实存在于证据库的 ID；省略时不过滤（无证据场景）。 */
+  /** 返回其中真实存在于证据库的 ID；省略时全部视为未核验而丢弃（fail-closed）。 */
   verifyEvidenceIds?: (ids: readonly string[]) => Promise<readonly string[]>;
   onModelAttempt?: (attempt: ModelAttempt) => void | Promise<void>;
   onToolCall?: (event: ToolCallEvent) => void | Promise<void>;
@@ -97,7 +97,8 @@ export async function spawnSubAgent<O = SubAgentReport>(parent: ParentContext, s
     return { name: spec.name, agentId, status: 'blocked', reason: result.reason, detail: result.detail };
   }
   const claimed = collectEvidenceIds(result.output);
-  const real = new Set(parent.verifyEvidenceIds ? await parent.verifyEvidenceIds(claimed) : claimed);
+  // 默认拒绝：未提供核验时一个都不信任，避免幻觉 ID 让父代理物化时宿主故障。
+  const real = new Set(parent.verifyEvidenceIds ? await parent.verifyEvidenceIds(claimed) : []);
   const dropped = claimed.filter(id => !real.has(id));
   await finished('done');
   return {

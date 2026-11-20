@@ -37,6 +37,12 @@ describe('spawnSubAgent', () => {
     expect(r.status === 'done' && r.output.findings[0]!.evidenceIds).toEqual(['e1']);
   });
 
+  it('未提供 verifyEvidenceIds 时默认拒绝全部声称的证据 ID', async () => {
+    const r = await spawnSubAgent(parent(scriptedModel([finishWith(REPORT)])), { name: 'explore', task: 't', tools: [] });
+    expect(r).toMatchObject({ status: 'done', evidenceIds: [], droppedEvidenceIds: ['e1', 'fake'] });
+    expect(r.status === 'done' && r.output.findings[0]!.evidenceIds).toEqual([]);
+  });
+
   it('子账本消耗同时计入父账本，事件带 agentId 与 parentId', async () => {
     const attempts: ModelAttempt[] = [];
     const finished: SubAgentFinishedEvent[] = [];
