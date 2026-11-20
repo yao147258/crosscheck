@@ -2,7 +2,7 @@ import { EventEmitter } from 'node:events';
 import { createElement, type ReactElement } from 'react';
 import { render as inkRender } from 'ink';
 
-export const KEYS = { up: '\u001B[A', down: '\u001B[B', enter: '\r', escape: '\u001B', tab: '\t' };
+export const KEYS = { up: '\u001B[A', down: '\u001B[B', enter: '\r', escape: '\u001B', tab: '\t', pageUp: '\u001B[5~', pageDown: '\u001B[6~' };
 
 // ink-testing-library 以 debug 模式渲染，绕过 log-update 不产生光标转义；
 // 需要断言终端光标行为时使用 debug=false 的自定义渲染。

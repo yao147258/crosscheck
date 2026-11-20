@@ -91,6 +91,65 @@ it('长回复超出终端高度时仍显示最新内容和底部输入区', asyn
   expect(frame(ui).split('\n').at(-1)).toContain('─');
 });
 
+const longReply = (count: number): RunSessionOptions => ({ tokenize: text => [text], runSlashCommand: async () => ({ kind: 'exit' }), resolveReview: async () => { throw new Error('unused'); }, chatReply: async () => Array.from({ length: count }, (_, i) => `回复行${i}`).join('\n') });
+const resize = (ui: ReturnType<typeof render>, rows: number) => {
+  Object.defineProperty(ui.stdout, 'rows', { value: rows, configurable: true });
+  ui.stdout.emit('resize');
+};
+
+it('PageUp/PageDown 按屏翻看历史并限制在边界内', async () => {
+  const ui = render(<SessionApp options={longReply(30)} />);
+  resize(ui, 8);
+  ui.stdin.write('你好'); ui.stdin.write(KEYS.enter);
+  await waitFor(() => frame(ui).includes('回复行29'));
+  ui.stdin.write(KEYS.pageUp);
+  await waitFor(() => !frame(ui).includes('回复行29'));
+  expect(frame(ui)).toContain('回复行24');
+  for (let i = 0; i < 20; i++) ui.stdin.write(KEYS.pageUp);
+  await waitFor(() => frame(ui).split('\n')[0]!.startsWith('  ____ ____'));
+  ui.stdin.write(KEYS.pageDown);
+  await waitFor(() => frame(ui).split('\n')[0]!.includes('交互会话'));
+  for (let i = 0; i < 20; i++) ui.stdin.write(KEYS.pageDown);
+  await waitFor(() => frame(ui).includes('回复行29'));
+  expect(frame(ui).split('\n').at(-2)).toContain('>');
+});
+
+it('翻看历史后提交新消息回到最新内容', async () => {
+  const ui = render(<SessionApp options={longReply(30)} />);
+  resize(ui, 8);
+  ui.stdin.write('你好'); ui.stdin.write(KEYS.enter);
+  await waitFor(() => frame(ui).includes('回复行29'));
+  ui.stdin.write(KEYS.pageUp);
+  await waitFor(() => !frame(ui).includes('回复行29'));
+  ui.stdin.write('再问'); ui.stdin.write(KEYS.enter);
+  await waitFor(() => frame(ui).includes('回复行29'));
+});
+
+it('内容超出视口时右侧显示滚动条，未超出时不显示', async () => {
+  const ui = render(<SessionApp options={longReply(30)} />);
+  resize(ui, 8);
+  await waitFor(() => frame(ui).includes('>'));
+  expect(frame(ui)).not.toContain('█');
+  ui.stdin.write('你好'); ui.stdin.write(KEYS.enter);
+  await waitFor(() => frame(ui).includes('回复行29'));
+  const bottom = frame(ui).split('\n').slice(0, -3);
+  expect(bottom.at(-1)?.trimEnd().endsWith('█')).toBe(true);
+  expect(bottom[0]?.trimEnd().endsWith('│')).toBe(true);
+  ui.stdin.write(KEYS.pageUp); ui.stdin.write(KEYS.pageUp); ui.stdin.write(KEYS.pageUp); ui.stdin.write(KEYS.pageUp); ui.stdin.write(KEYS.pageUp); ui.stdin.write(KEYS.pageUp);
+  await waitFor(() => frame(ui).includes('交互会话'));
+  const top = frame(ui).split('\n').slice(0, -3);
+  expect(top[0]?.trimEnd().endsWith('█')).toBe(true);
+  expect(top.at(-1)?.trimEnd().endsWith('│')).toBe(true);
+});
+
+it('任何一行都不写入终端最后一列，避免 Windows 控制台自动换行导致整屏上滚', async () => {
+  const ui = render(<SessionApp options={longReply(30)} />);
+  resize(ui, 8);
+  ui.stdin.write('你好'); ui.stdin.write(KEYS.enter);
+  await waitFor(() => frame(ui).includes('回复行29'));
+  for (const line of frame(ui).split('\n')) expect([...line.trimEnd()].length).toBeLessThan(100);
+});
+
 it('审核退出返回聊天并重新解析会话', async () => {
   const project = await createProject();
   const resolveReview = vi.fn(async () => ({ session: project.session, editor, open }));
@@ -256,17 +315,44 @@ it('输入非斜杠文本时不显示命令提示', async () => {
   expect(frame(ui)).not.toContain('/reqs 提取条款草稿');
 });
 
-it('Tab 在匹配命令间循环补全', async () => {
+it('Tab 补全当前高亮的候选（默认高亮第一项）', async () => {
   const ui = render(<SessionApp options={completionOptions()} />);
   await mounted();
   ui.stdin.write('/r');
   await waitFor(() => frame(ui).includes('> /r'));
   ui.stdin.write(KEYS.tab);
   await waitFor(() => frame(ui).includes('> /reqs'));
+});
+
+it('↓ 切换高亮候选，Tab 补全高亮项', async () => {
+  const ui = render(<SessionApp options={completionOptions()} />);
+  await mounted();
+  ui.stdin.write('/r');
+  await waitFor(() => frame(ui).includes('> /r'));
+  ui.stdin.write(KEYS.down);
   ui.stdin.write(KEYS.tab);
   await waitFor(() => frame(ui).includes('> /review'));
+});
+
+it('↓ 在候选列表末尾后循环回第一项', async () => {
+  const ui = render(<SessionApp options={completionOptions()} />);
+  await mounted();
+  ui.stdin.write('/r');
+  await waitFor(() => frame(ui).includes('> /r'));
+  ui.stdin.write(KEYS.down);
+  ui.stdin.write(KEYS.down);
   ui.stdin.write(KEYS.tab);
   await waitFor(() => frame(ui).includes('> /reqs'));
+});
+
+it('↑ 从默认高亮向上循环到最后一项', async () => {
+  const ui = render(<SessionApp options={completionOptions()} />);
+  await mounted();
+  ui.stdin.write('/r');
+  await waitFor(() => frame(ui).includes('> /r'));
+  ui.stdin.write(KEYS.up);
+  ui.stdin.write(KEYS.tab);
+  await waitFor(() => frame(ui).includes('> /review'));
 });
 
 it('真实命令清单中 /profile 可提示、补全并提交', async () => {
@@ -293,16 +379,15 @@ it('非斜杠输入按 Tab 不修改输入内容', async () => {
   expect(frame(ui)).toContain('> abc');
 });
 
-it('补全后继续编辑会重置循环顺序', async () => {
+it('补全后继续编辑会把高亮重置为第一项', async () => {
   const ui = render(<SessionApp options={completionOptions()} />);
   await mounted();
   ui.stdin.write('/r');
   await waitFor(() => frame(ui).includes('> /r'));
-  ui.stdin.write(KEYS.tab);
-  await waitFor(() => frame(ui).includes('> /reqs'));
+  ui.stdin.write(KEYS.down);
   ui.stdin.write(KEYS.tab);
   await waitFor(() => frame(ui).includes('> /review'));
-  // 退格回到裸斜杠：三个命令都匹配；若循环未重置会从 index 1 选中 /review。
+  // 退格回到裸斜杠：reqs/review 都匹配；若高亮未重置会仍选中 /review。
   for (let i = 0; i < '/review'.length - 1; i++) ui.stdin.write('\u007f');
   ui.stdin.write(KEYS.tab);
   await waitFor(() => frame(ui).includes('> /reqs'));
