@@ -13,7 +13,7 @@ import cliPackage from '../package.json';
 export async function loadSessionInfo(home?: string) {
   try {
     const { models } = await loadUserModelConfig(home);
-    return { version: cliPackage.version, models: { extractor: models.extractor, planner: models.planner, executor: models.executor, reviewer: models.reviewer } };
+    return { version: cliPackage.version, configFile: '~/.crosscheck/config.yaml', models: { extractor: models.extractor, planner: models.planner, executor: models.executor, reviewer: models.reviewer } };
   } catch {
     return { version: cliPackage.version, models: undefined };
   }

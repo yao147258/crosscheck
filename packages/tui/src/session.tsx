@@ -1,16 +1,9 @@
 import { Box, Text, render, useApp, useBoxMetrics, useCursor, useInput, useWindowSize, type DOMElement } from 'ink';
-import { createElement, useCallback, useEffect, useRef, useState } from 'react';
+import { createElement, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { App } from './app';
 import type { ReviewEnv } from './context';
+import { formatTime, safeText, SessionHeader, type SessionInfo } from './header';
 import { initialRoute, type ReviewView } from './routes';
-
-const safeText = (text: string) => text.replace(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/g, '');
-
-const banner = String.raw`  ____ ____   ___  ____ ____   ____ _   _ _____ ____ _  __
- / ___|  _ \ / _ \/ ___/ ___| / ___| | | | ____/ ___| |/ /
-| |   | |_) | | | \___ \___ \| |   | |_| |  _|| |   | ' /
-| |___|  _ <| |_| |___) |__) | |___|  _  | |__| |___| . \
- \____|_| \_\\___/|____/____/ \____|_| |_|_____\____|_|\_\ `;
 
 export interface ChatMessage { role: 'user' | 'assistant'; content: string }
 export type SlashCommandResult =
@@ -20,7 +13,7 @@ export type SlashCommandResult =
   | { kind: 'log'; code: number; lines: string[] };
 export interface SlashCommandMeta { name: string; description: string }
 export interface RunSessionOptions {
-  info?: { version: string; models: { extractor: string; planner: string; executor: string; reviewer: string } | undefined };
+  info?: SessionInfo;
   slashCommands?: SlashCommandMeta[];
   tokenize: (text: string) => string[];
   /** onProgress 接收执行过程中的实时提示（模型请求、工具调用、命令日志），执行期间显示在会话底部。 */
@@ -47,6 +40,7 @@ export function SessionApp({ options }: { options: RunSessionOptions }) {
   const content = useRef<DOMElement>(null);
   const { height } = useBoxMetrics(content);
   const inputHeight = Math.min(3, Math.max(1, rows));
+  const launchedAt = useMemo(() => formatTime(new Date()), []);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const history = useRef<ChatMessage[]>([]);
   const [input, setInput] = useState('');
@@ -229,9 +223,7 @@ export function SessionApp({ options }: { options: RunSessionOptions }) {
   return <Box flexDirection="column" height={Math.max(1, rows)} width={fullWidth}>
     <Box height={viewport} overflow="hidden" flexShrink={0}>
       <Box ref={content} position="absolute" top={-(maxScroll - offset)} width={Math.max(1, fullWidth - 2)} flexDirection="column">
-        {columns >= 59 && <Text color="cyan">{banner}</Text>}
-        <Text bold>Crosscheck 交互会话{options.info ? ` · v${safeText(options.info.version)}` : ''}</Text>
-        {options.info && (['extractor', 'planner', 'executor', 'reviewer'] as const).map(role => <Text key={role}>{role}：{safeText(options.info?.models?.[role] ?? '未配置')}</Text>)}
+        <SessionHeader info={options.info} width={Math.max(1, fullWidth - 2)} busy={busy} launchedAt={launchedAt} />
         {messages.map((m, i) => m.role === 'user'
           ? <Box key={i} backgroundColor="#b8b8b8"><Text color="black">{safeText(m.content)}</Text></Box>
           : <Text key={i}>{safeText(m.content)}</Text>)}

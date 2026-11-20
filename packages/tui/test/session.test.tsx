@@ -34,7 +34,7 @@ it('宽终端启动时展示 ASCII 标识，窄终端降级为简洁名称', asy
   Object.defineProperty(ui.stdout, 'rows', { value: 30, configurable: true });
   ui.stdout.emit('resize');
   await waitFor(() => frame(ui).includes('  ____ ____   ___  ____ ____   ____ _   _ _____ ____ _  __'));
-  expect(frame(ui)).toContain('Crosscheck 交互会话 · v1.2.3');
+  expect(frame(ui)).toContain('AI Agent Command Line Client');
   Object.defineProperty(ui.stdout, 'columns', { value: 24, configurable: true });
   ui.stdout.emit('resize');
   await waitFor(() => !frame(ui).includes('  ____ ____   ___  ____ ____   ____ _   _ _____ ____ _  __'));
@@ -110,7 +110,7 @@ it('PageUp/PageDown 按屏翻看历史并限制在边界内', async () => {
   for (let i = 0; i < 20; i++) ui.stdin.write(KEYS.pageUp);
   await waitFor(() => frame(ui).split('\n')[0]!.startsWith('  ____ ____'));
   ui.stdin.write(KEYS.pageDown);
-  await waitFor(() => frame(ui).split('\n')[0]!.includes('交互会话'));
+  await waitFor(() => !frame(ui).split('\n')[0]!.startsWith('  ____ ____'));
   for (let i = 0; i < 20; i++) ui.stdin.write(KEYS.pageDown);
   await waitFor(() => frame(ui).includes('回复行29'));
   expect(frame(ui).split('\n').at(-2)).toContain('>');
@@ -185,7 +185,7 @@ it('内容超出视口时右侧显示滚动条，未超出时不显示', async (
   expect(displayWidth(bottom.at(-1)!)).toBe(100);
   expect(bottom[0]?.trimEnd()).not.toMatch(/[│╻┃╹]$/);
   ui.stdin.write(KEYS.pageUp); ui.stdin.write(KEYS.pageUp); ui.stdin.write(KEYS.pageUp); ui.stdin.write(KEYS.pageUp); ui.stdin.write(KEYS.pageUp); ui.stdin.write(KEYS.pageUp);
-  await waitFor(() => frame(ui).includes('交互会话'));
+  await waitFor(() => frame(ui).includes('AI Agent Command Line Client'));
   const top = frame(ui).split('\n').slice(0, -3);
   expect(top[0]?.trimEnd()).toMatch(/[┃╻]$/);
   expect(top.at(-1)?.trimEnd()).not.toMatch(/[│╻┃╹]$/);
@@ -209,7 +209,7 @@ it('审核退出返回聊天并重新解析会话', async () => {
   ui.stdin.write('/review'); ui.stdin.write(KEYS.enter);
   await waitFor(() => frame(ui).includes('environments.yaml'));
   ui.stdin.write('q');
-  await waitFor(() => frame(ui).includes('交互会话'));
+  await waitFor(() => frame(ui).includes('AI Agent Command Line Client'));
   ui.stdin.write('/review'); ui.stdin.write(KEYS.enter);
   await waitFor(() => resolveReview.mock.calls.length === 2);
 });
@@ -229,7 +229,7 @@ it('外部取消等待审核写盘完成后才退出', async () => {
   await waitFor(() => frame(ui).includes('等待当前操作完成'));
   expect((await Approvals.load(artifacts)).record('profile', 'environments.yaml')).toBeUndefined();
   gate.resolve();
-  await waitFor(() => frame(ui).includes('交互会话') || frame(ui).includes('等待当前操作完成'));
+  await waitFor(() => frame(ui).includes('AI Agent Command Line Client') || frame(ui).includes('等待当前操作完成'));
   await waitFor(asyncCheck(() => Approvals.load(artifacts).then(a => Boolean(a.record('profile', 'environments.yaml')))));
 });
 

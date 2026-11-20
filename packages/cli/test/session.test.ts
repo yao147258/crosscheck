@@ -117,7 +117,7 @@ it('缺少模型配置时聊天显示错误且不影响命令分发', async () =
 
 it('启动信息读取全局模型配置和 CLI 版本', async () => {
   const { root } = await createProject();
-  expect(await loadSessionInfo(path.join(root, 'user'))).toEqual({ version: cliPackage.version, models: { extractor: 'mock:x', planner: 'mock:p', executor: 'mock:e', reviewer: 'mock:r' } });
+  expect(await loadSessionInfo(path.join(root, 'user'))).toEqual({ version: cliPackage.version, configFile: '~/.crosscheck/config.yaml', models: { extractor: 'mock:x', planner: 'mock:p', executor: 'mock:e', reviewer: 'mock:r' } });
 });
 
 it('全局配置文件不存在时启动信息不阻止会话', async () => {
