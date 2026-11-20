@@ -192,7 +192,7 @@ export async function loadImpactSnapshots(project: string, since: string, signal
       let files: string[];
       if (parseDocEntry(entry).directory) {
         try { files = await expandRequirementDocs([entry], lister, signal, { allowEmpty: true }); }
-        catch { abort(); diag(snap, 'restricted-input', '', '需求文档目录无法展开或超过上限'); continue; }
+        catch (e) { abort(); if (e instanceof ImpactHostError) throw e; diag(snap, 'restricted-input', '', '需求文档目录无法展开或超过上限'); continue; }
       } else files = [entry];
       for (const file of files) {
         if (!validPath(file)) {
