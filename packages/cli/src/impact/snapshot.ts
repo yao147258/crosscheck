@@ -2,8 +2,8 @@ import { constants } from 'node:fs';
 import { lstat, open, opendir } from 'node:fs/promises';
 import path from 'node:path';
 import YAML from 'yaml';
-import { ModuleCasesSchema, ModuleClausesSchema, NotesTextSchema, decodeNotesUtf8, PROFILE_FILES, PROFILE_SCHEMAS, ProfileSchema, ProjectConfigSchema, type ImpactSnapshot } from '@crosscheck/core';
-import { isSafeProjectPath } from '@crosscheck/discovery';
+import { ModuleCasesSchema, ModuleClausesSchema, NotesTextSchema, decodeNotesUtf8, parseNotesRequirementDocs, PROFILE_FILES, PROFILE_SCHEMAS, ProfileSchema, ProjectConfigSchema, type ImpactSnapshot } from '@crosscheck/core';
+import { createDiskDocLister, createProjectReader, expandRequirementDocs, isSafeProjectPath, parseDocEntry, type DocDirLister } from '@crosscheck/discovery';
 import { ImpactHostError, ImpactInputError, openBaseline } from './git';
 export { ImpactHostError, ImpactInputError } from './git';
 
@@ -175,20 +175,35 @@ export async function loadImpactSnapshots(project: string, since: string, signal
     }
     snap.files.push({ file, state });
   };
-  for (const side of ['base', 'current'] as const) await parse(side, config, 'config');
+  // 笔记要先于需求文档解析：config 的 requirementsDocs 为空时，清单来自该侧笔记的“需求文档”小节。
+  for (const side of ['base', 'current'] as const) { await parse(side, config, 'config'); await parse(side, notes, 'notes'); }
   const docs = new Set<string>();
+  const docEntries = (snap: ImpactSnapshot): string[] => {
+    const configured = (snap.nodes.find((n) => n.kind === 'config')?.value as { requirementsDocs?: string[] } | undefined)?.requirementsDocs ?? [];
+    if (configured.length > 0) return configured;
+    const text = snap.nodes.find((n) => n.kind === 'notes')?.value;
+    return typeof text === 'string' ? parseNotesRequirementDocs(text) : [];
+  };
   for (const side of ['base', 'current'] as const) {
     const snap = side === 'base' ? base : current;
-    const value = snap.nodes.find((n) => n.kind === 'config')?.value as { requirementsDocs?: string[] } | undefined;
-    for (const file of value?.requirementsDocs ?? []) {
-      if (!validPath(file)) {
-        if (snap.diagnostics.length >= MAX_FILES) { fileLimit(); break; }
-        diag(snap, 'restricted-input', '', '需求文档路径不安全'); continue;
+    // 当前侧读磁盘，基线侧读 Git 对象；两侧共用同一套展开规则。目录允许为空：某一侧可能还没有该目录。
+    const lister: DocDirLister = side === 'current' ? createDiskDocLister(createProjectReader(git.root)) : (dir) => git.listTreeFiles(dir);
+    docs: for (const entry of docEntries(snap)) {
+      let files: string[];
+      if (parseDocEntry(entry).directory) {
+        try { files = await expandRequirementDocs([entry], lister, signal, { allowEmpty: true }); }
+        catch { abort(); diag(snap, 'restricted-input', '', '需求文档目录无法展开或超过上限'); continue; }
+      } else files = [entry];
+      for (const file of files) {
+        if (!validPath(file)) {
+          if (snap.diagnostics.length >= MAX_FILES) { fileLimit(); break docs; }
+          diag(snap, 'restricted-input', '', '需求文档路径不安全'); continue;
+        }
+        const normalized = normalize(file);
+        if (!normalized) { diag(snap, 'restricted-input', '', '需求文档路径不安全'); continue; }
+        if (!admit(normalized)) break docs;
+        declaredDocs[side].add(normalized); docs.add(normalized);
       }
-      const normalized = normalize(file);
-      if (!normalized) { diag(snap, 'restricted-input', '', '需求文档路径不安全'); continue; }
-      if (!admit(normalized)) break;
-      declaredDocs[side].add(normalized); docs.add(normalized);
     }
   }
   await git.populate([...docs]);
@@ -196,7 +211,6 @@ export async function loadImpactSnapshots(project: string, since: string, signal
     const snap = side === 'base' ? base : current;
     if (snap.files.find((f) => f.file === config)?.state === 'missing') diag(snap, 'missing-config', config, '项目配置不存在');
     for (const file of [...docs].sort()) await parse(side, file, 'document');
-    await parse(side, notes, 'notes');
     for (const file of profiles) await parse(side, file, 'profile');
     if (profiles.every((file) => snap.files.some((f) => f.file === file && f.state === 'present')) && !ProfileSchema.safeParse(profileValues[side]).success) {
       snap.diagnostics.push({ code: 'invalid-profile', message: '七画像跨文件校验失败，请复核引用、参数及连接配置' });

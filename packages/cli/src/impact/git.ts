@@ -189,7 +189,31 @@ export async function openBaseline(project: string, since: string, signal?: Abor
       for (const bytes of outputs) for (const name of decode(bytes)) if (name.startsWith(prefix)) tracked.add(name.slice(prefix.length));
     }
   }
-  return { root, oid, entries, tracked, get candidatesLimited() { return candidatesLimited; }, populate, async blob(entry: TreeEntry) {
+  // 基线侧展开需求文档目录：递归列出常规 .md blob，并登记进 entries 供后续读取。
+  async function listTreeFiles(dir: string): Promise<string[]> {
+    let remaining = LIMIT;
+    const outputs = await batched([dir], ['ls-tree', '-r', '-z', '-l', '--full-tree', oid], async (args) => {
+      let bytes: Buffer;
+      try { bytes = await git(root, args, signal, remaining + 1); }
+      catch (e) { if (e instanceof ImpactInputError || e instanceof ImpactHostError) throw e; throw new ImpactHostError('读取 Git 目录失败'); }
+      remaining -= bytes.length;
+      if (remaining < 0) throw new ImpactInputError('Git 清单超过资源上限');
+      return bytes;
+    });
+    const files: string[] = [];
+    for (const bytes of outputs) for (const record of decode(bytes)) {
+      const match = /^(\d+) (\w+) ([a-f0-9]+)\s+(\d+|-)\t([\s\S]+)$/.exec(record);
+      if (!match) throw new ImpactHostError('Git 树清单无效');
+      const name = match[5]!;
+      // 只收常规文件：符号链接（120000）、子模块等一律跳过。
+      if (!name.startsWith(prefix) || match[2] !== 'blob' || (match[1] !== '100644' && match[1] !== '100755') || !/\.md$/i.test(name)) continue;
+      const file = name.slice(prefix.length);
+      entries.set(file, { mode: match[1]!, type: match[2]!, oid: match[3]!, size: match[4] === '-' ? 0 : Number(match[4]) });
+      files.push(file);
+    }
+    return files;
+  }
+  return { root, oid, entries, tracked, get candidatesLimited() { return candidatesLimited; }, populate, listTreeFiles, async blob(entry: TreeEntry) {
     try { return await git(root, ['cat-file', 'blob', entry.oid], signal, 1024 * 1024 + 1); }
     catch (e) { if (signal?.aborted) throw new ImpactInputError('操作已取消'); if (e instanceof ImpactHostError) throw e; throw new ImpactHostError('读取 Git 对象失败'); }
   } };

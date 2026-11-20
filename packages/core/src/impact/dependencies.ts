@@ -52,14 +52,11 @@ export function buildDependencies(snapshot: ImpactSnapshot, side: Side, budget =
     if (key) add(key, node.key, 'definite');
     else diagnostic('missing-reference', node, `引用不存在：${file}:${id}`);
   };
-  const configs = [...nodes.values()].filter((node) => node.kind === 'config');
-  const scope = new Set(configs.flatMap((node) => list(obj(node.value).requirementsDocs)).map(normalizeSource).filter((x): x is string => !!x));
   const source = (node: ImpactNode, value: unknown) => {
     const path = obj(value).file;
     if (typeof path !== 'string') return;
     const normalized = normalizeSource(path);
     if (!normalized) { diagnostic('invalid-source', node, '来源路径无效'); return; }
-    if (!scope.has(normalized)) return;
     budget.spend();
     const document = documents.get(normalized);
     if (document) add(document.key, node.key, 'possible');
