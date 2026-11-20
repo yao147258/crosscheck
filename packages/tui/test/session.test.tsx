@@ -25,6 +25,21 @@ it('启动时展示版本与各角色模型并过滤控制字符', () => {
   expect(frame(ui)).not.toContain('\u001b');
 });
 
+it('宽终端启动时展示 ASCII 标识，窄终端降级为简洁名称', async () => {
+  const options: RunSessionOptions = { info: { version: '1.2.3', models: undefined }, tokenize: text => [text], runSlashCommand: async () => ({ kind: 'exit' }), resolveReview: async () => { throw new Error('unused'); }, chatReply: async () => '' };
+  const ui = render(<SessionApp options={options} />);
+  Object.defineProperty(ui.stdout, 'columns', { value: 100, configurable: true });
+  Object.defineProperty(ui.stdout, 'rows', { value: 30, configurable: true });
+  ui.stdout.emit('resize');
+  await waitFor(() => frame(ui).includes('  ____ ____   ___  ____ ____   ____ _   _ _____ ____ _  __'));
+  expect(frame(ui)).toContain('Crosscheck 交互会话 · v1.2.3');
+  Object.defineProperty(ui.stdout, 'columns', { value: 24, configurable: true });
+  ui.stdout.emit('resize');
+  await waitFor(() => !frame(ui).includes('  ____ ____   ___  ____ ____   ____ _   _ _____ ____ _  __'));
+  expect(frame(ui)).toContain('Crosscheck');
+  expect(frame(ui)).toContain('1.2.3');
+});
+
 it('未配置模型时启动界面显示未配置', () => {
   const options: RunSessionOptions = { info: { version: '1.2.3', models: undefined }, tokenize: text => [text], runSlashCommand: async () => ({ kind: 'exit' }), resolveReview: async () => { throw new Error('unused'); }, chatReply: async () => '' };
   const ui = render(<SessionApp options={options} />);

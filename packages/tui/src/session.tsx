@@ -6,6 +6,12 @@ import { initialRoute, type ReviewView } from './routes';
 
 const safeText = (text: string) => text.replace(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/g, '');
 
+const banner = String.raw`  ____ ____   ___  ____ ____   ____ _   _ _____ ____ _  __
+ / ___|  _ \ / _ \/ ___/ ___| / ___| | | | ____/ ___| |/ /
+| |   | |_) | | | \___ \___ \| |   | |_| |  _|| |   | ' /
+| |___|  _ <| |_| |___) |__) | |___|  _  | |__| |___| . \
+ \____|_| \_\\___/|____/____/ \____|_| |_|_____\____|_|\_\ `;
+
 export interface ChatMessage { role: 'user' | 'assistant'; content: string }
 export type SlashCommandResult =
   | { kind: 'exit' }
@@ -152,6 +158,7 @@ export function SessionApp({ options }: { options: RunSessionOptions }) {
   return <Box flexDirection="column" height={Math.max(1, rows)}>
     <Box height={viewport} overflow="hidden" flexShrink={0}>
       <Box ref={content} position="absolute" top={-Math.max(0, height - viewport)} width={columns} flexDirection="column">
+        {columns >= 59 && <Text color="cyan">{banner}</Text>}
         <Text bold>Crosscheck 交互会话{options.info ? ` · v${safeText(options.info.version)}` : ''}</Text>
         {options.info && (['extractor', 'planner', 'executor', 'reviewer'] as const).map(role => <Text key={role}>{role}：{safeText(options.info?.models?.[role] ?? '未配置')}</Text>)}
         {messages.map((m, i) => m.role === 'user'
