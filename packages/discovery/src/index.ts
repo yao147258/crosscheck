@@ -14,3 +14,5 @@ export type { TextCleaner } from './project-tools';
 export { OVERVIEW_LIMITS, buildOverview, keyFileRank, readReadmeHead } from './overview';
 export { FINDING_LIMIT, FindingSchema, factKey, verifyFindings } from './verify-findings';
 export type { Finding } from './verify-findings';
+export { EXPLORE_SYSTEM, exploreProject } from './explore-project';
+export type { ExploreProjectOptions, ExploreProjectResult } from './explore-project';
