@@ -43,6 +43,40 @@ describe('delegate 工具', () => {
     expect(parentNext).toContain('已丢弃无效证据ID: fake');
   });
 
+  it('父代理下一轮按核验后的 ID 物化子代理证据正文，丢弃的 ID 不物化', async () => {
+    const requested: string[][] = [];
+    const { model, options } = setup([
+      { toolCalls: [{ name: 'explore', input: { task: '打开设置页' } }] },
+      { toolCalls: [{ name: 'look', input: {} }] },
+      { toolCalls: [{ name: 'finish', input: REPORT }] },
+      { toolCalls: [{ name: 'finish', input: { answer: 'ok' } }] },
+    ], {
+      verifyEvidenceIds: async ids => ids.filter(id => id === 'e1'),
+      evidencePresenter: async ids => { requested.push([...ids]); return ids.map(id => ({ id, type: 'dom' as const, text: `证据正文-${id}`, truncated: false })); },
+    });
+    const r = await runAgent(options);
+    expect(r.status).toBe('done');
+    const parentNext = JSON.stringify(model.doGenerateCalls[3]!.prompt);
+    // 物化头格式见 context.ts 的 PREFIX：`[宿主证据 <id>]\n类型=...`，后接宿主返回的正文。
+    expect(parentNext).toContain('[宿主证据 e1]\\n类型=dom');
+    expect(parentNext).toContain('证据正文-e1');
+    expect(parentNext).not.toContain('[宿主证据 fake]');
+    expect(requested.flat()).not.toContain('fake');
+  });
+
+  it('父代理信号中止时委派的子代理以 interrupted 阻断，父代理同样阻断', async () => {
+    const controller = new AbortController();
+    const finished: Array<{ status: string; reason?: string }> = [];
+    const { model, options } = setup([{ toolCalls: [{ name: 'explore', input: { task: 't' } }] }, { hang: true }], {
+      signal: controller.signal, onSubAgentFinished: e => { finished.push(e); },
+    });
+    setTimeout(() => controller.abort(), 50);
+    const r = await runAgent(options);
+    expect(finished).toMatchObject([{ status: 'blocked', reason: 'interrupted' }]);
+    expect(r).toMatchObject({ status: 'blocked', reason: 'interrupted' });
+    expect(model.doGenerateCalls).toHaveLength(2);
+  });
+
   it('子代理工具集不含 delegate，模板越权在调用模型前抛错', async () => {
     const { model, options } = setup([{ toolCalls: [{ name: 'explore', input: { task: 't' } }] }, { toolCalls: [{ name: 'finish', input: REPORT }] }, { toolCalls: [{ name: 'finish', input: { answer: 'ok' } }] }]);
     await runAgent(options);

@@ -61,6 +61,30 @@ describe('spawnSubAgent', () => {
     expect(finished).toEqual([{ name: 'explore', agentId: r.agentId, parentId: 'root', status: 'done' }]);
   });
 
+  it('子代理只获得申请的工具子集，父代理其他工具不可见也不可调用', async () => {
+    const peekRan = vi.fn();
+    const peek = defineTool({ name: 'peek', category: 'profile', description: '只读窥视', input: z.object({}), execute: async () => { peekRan(); return {}; } });
+    const model = scriptedModel([{ toolCalls: [{ name: 'peek', input: {} }] }, finishWith(REPORT)]);
+    const r = await spawnSubAgent(parent(model, { tools: [echo, peek] }), { name: 'explore', task: 't', tools: ['echo'] });
+    expect(r.status).toBe('done');
+    // 收窄体现在两处：模型看不到 peek 的定义；即使幻觉调用，也按未授予拒绝且不执行。
+    const tools = JSON.stringify(model.doGenerateCalls[0]!.tools);
+    expect(tools).toContain('"echo"');
+    expect(tools).not.toContain('"peek"');
+    expect(peekRan).not.toHaveBeenCalled();
+    expect(JSON.stringify(model.doGenerateCalls[1]!.prompt)).toContain('工具 peek 在 execute 阶段未授予');
+  });
+
+  it('父代理信号被外部中止时子代理返回 interrupted 阻断', async () => {
+    const controller = new AbortController();
+    const finished: SubAgentFinishedEvent[] = [];
+    const p = parent(scriptedModel([{ hang: true }]), { signal: controller.signal, onSubAgentFinished: e => { finished.push(e); } });
+    setTimeout(() => controller.abort(), 50);
+    const r = await spawnSubAgent(p, { name: 'explore', task: 't', tools: [] });
+    expect(r).toMatchObject({ status: 'blocked', reason: 'interrupted' });
+    expect(finished).toMatchObject([{ name: 'explore', status: 'blocked', reason: 'interrupted' }]);
+  });
+
   it('子代理上报障碍时返回 blocked，不抛错', async () => {
     const r = await spawnSubAgent(parent(scriptedModel([{ toolCalls: [{ name: 'report_blocked', input: { reason: '需要验证码' } }] }])), { name: 'explore', task: 't', tools: [] });
     expect(r).toMatchObject({ status: 'blocked', reason: 'reported', detail: '需要验证码' });
@@ -126,5 +150,31 @@ describe('runSubAgents', () => {
     const onModelAttempt = vi.fn(() => { throw error; });
     const slow = defineTool({ name: 'slow', category: 'profile', description: '慢', input: z.object({}), execute: async () => ({}) });
     await expect(runSubAgents(parent(reactiveModel(), { tools: [slow], onModelAttempt }), [{ name: 'a', task: 'a', tools: ['slow'] }, { name: 'b', task: 'b', tools: ['slow'] }])).rejects.toBe(error);
+  });
+
+  it('宿主异常取消仍在运行的子代理，且不再启动排队中的子代理', async () => {
+    const error = new Error('磁盘满');
+    let slowCompleted = false;
+    // 只有收到取消才会提前结束；若取消未传播，会等满 5 秒并标记走完全程。
+    const slow = defineTool({ name: 'slow', category: 'profile', description: '慢', input: z.object({}), execute: async (_input, { signal }) => {
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(resolve, 5_000);
+        signal.addEventListener('abort', () => { clearTimeout(timer); reject(new Error('已取消')); }, { once: true });
+      });
+      slowCompleted = true;
+      return {};
+    } });
+    const model = reactiveModel();
+    const finished: SubAgentFinishedEvent[] = [];
+    const p = parent(model, {
+      tools: [slow], budget: new BudgetTracker({ steps: 30, tokens: 1_000, minutes: 10 }),
+      onModelAttempt: a => { if (a.agentId?.startsWith('root/a-')) throw error; },
+      onSubAgentFinished: e => { finished.push(e); },
+    });
+    const specs = ['a', 'b', 'c'].map(n => ({ name: n, task: `任务-${n}`, tools: ['slow'] }));
+    await expect(runSubAgents(p, specs, { concurrency: 2 })).rejects.toBe(error);
+    expect(slowCompleted).toBe(false);
+    expect(finished).toMatchObject([{ name: 'b', status: 'blocked', reason: 'interrupted' }]);
+    expect(model.doGenerateCalls.some(c => JSON.stringify(c.prompt).includes('任务-c'))).toBe(false);
   });
 });
