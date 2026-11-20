@@ -46,7 +46,7 @@ pnpm --filter crosscheck exec crosscheck --help
 
 扫描是预算内的最佳努力，不保证覆盖整个项目：内置忽略规则会排除部分文件，数量、深度、大小和摘录上限也可能导致遗漏。项目扫描仅处理根目录 `.gitignore` 的有限子集，不保证支持子目录规则、`**` 或取反语义；按有限名称及扩展名规则忽略常见凭证文件，`.env.example` 是例外，无法识别非标准凭证文件，因此可能扫描本应忽略的非标准秘密。脱敏采用有限规则，不保证识别所有秘密。文件名、摘录、已确认笔记及相关内容可能发送给配置的模型服务；运行前请检查项目内容和服务授权，分享生成物前也应人工检查。
 
-**需求文档登记：** `requirementsDocs` 可写文件，也可写以 `/` 结尾的目录（如 `docs/prd/`）。目录会递归展开其中的 `.md` 文件（不区分大小写），最多下探 8 层子目录、共 100 个文件，超限报错而不是截断；符号链接、凭证文件以及 `node_modules`、`.git`、`.crosscheck` 会被跳过；不支持 glob，显式写出的文件不限扩展名。`config.yaml` 的 `requirementsDocs` 为空时，`reqs` 与 `impact` 改读 `notes.md` 的“## 需求文档”小节（每行 ``- `路径` 说明``，路径在反引号内），此时笔记必须已通过 `review notes` 确认，`reqs` 才会使用它。`init` 会让模型在笔记里写出这一小节作为草稿，由你审核后生效；程序不会改写 `config.yaml`。`config.yaml` 中的 `requirementsDocs` 非空时始终优先。
+**需求文档登记：** `requirementsDocs` 可写文件，也可写以 `/` 结尾的目录（如 `docs/prd/`）。目录会递归展开其中的 `.md` 文件（不区分大小写），最多下探 8 层子目录、共 100 个文件，超限报错而不是截断；符号链接、凭证文件以及 `node_modules`、`.git`、`.crosscheck` 会被跳过；不支持 glob，显式写出的文件不限扩展名。`config.yaml` 的 `requirementsDocs` 为空时，`reqs` 与 `impact` 改读 `notes.md` 的“## 需求文档”小节（每行 ``- `路径` 说明``，路径在反引号内），此时笔记必须已通过 `review notes` 确认，`reqs` 才会使用它（`impact` 只读分析，不要求笔记已确认）。`init` 会让模型在笔记里写出这一小节作为草稿，由你审核后生效；程序不会改写 `config.yaml`。`config.yaml` 中的 `requirementsDocs` 非空时始终优先。
 
 `review` 要求 stdin、stdout 都是 TTY，管道/重定向环境拒绝并退出 2。确认人优先取去除首尾空白后的 `CROSSCHECK_REVIEWER`，否则取系统用户名；无法确定时退出 2。编辑器依次取 `VISUAL`、`EDITOR`，支持双引号参数且不经过 shell；未设置时显示提示。外部编辑器通过 Ink 暂停 TUI 后启动，结束或出错后恢复；已在 Windows ConPTY 验证事件式/同步读入的命令行编辑器交互输入、连续保存与错误恢复，不代表已验收所有平台或原生 GUI 编辑器。`q` 正常退出、`Esc` 返回（初始视图退出），退出码 0；`Ctrl+C` 中断退出 2。写操作期间键盘退出会提示等待；外部 signal、SIGINT/SIGTERM 取消则等待当前操作结束后退出 2，不截断写盘。查看原始截图证据当前不支持；打开文本只请求系统启动，不保证宿主程序已显示。
 
