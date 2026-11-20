@@ -17,8 +17,8 @@ export async function initCommand(args: CliArgs, log: (s: string) => void, deps:
     sig.throwIfAborted();
     if (!projectConfig) {
       await artifacts.writeYaml('config.yaml', CONFIG_TEMPLATE);
-      log('已写入 .crosscheck/config.yaml 模板：请配置后重新运行 crosscheck init');
-      return 2;
+      log('已写入 .crosscheck/config.yaml 默认配置（可按需修改），继续扫描项目');
+      sig.throwIfAborted();
     }
     const approvals = await Approvals.load(artifacts);
     const original = await artifacts.readBytes(NOTES_FILE);

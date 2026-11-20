@@ -22,7 +22,7 @@ crosscheck --help
 
 | 命令 | 用途 |
 |---|---|
-| `init [--refresh]` | 缺少配置时写 `.crosscheck/config.yaml` 模板并退出 2；配置完成后扫描项目并生成 `.crosscheck/notes.md` 草稿，已确认笔记默认跳过；`--refresh` 强制刷新并尝试合并人工补充 |
+| `init [--refresh]` | 缺少配置时先写入默认 `.crosscheck/config.yaml`，然后扫描项目并生成 `.crosscheck/notes.md` 草稿，已确认笔记默认跳过；`--refresh` 强制刷新并尝试合并人工补充 |
 | `profile [--openapi <文件>]...` | 笔记确认后，结合结构化事实扫描与已确认笔记生成七份画像草稿 |
 | `reqs --module <id>` | 从配置的 `requirementsDocs` 提取带来源的条款草稿 |
 | `review [notes\|profile\|clauses\|cases\|results]` | 交互审核笔记、画像、条款、用例与运行结果 |

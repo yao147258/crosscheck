@@ -43,7 +43,7 @@ crosscheck impact --since <commit> --json --project E:/my-test-project
 
 ## 2. 生成笔记与画像，或手填配置
 
-自动接入可在项目目录使用以下流程（也可为每条命令添加 `--project E:/my-test-project`）。先按下文配置全局模型；首次 `init` 若缺少项目配置，会写入 `.crosscheck/config.yaml` 模板并退出 2，需检查、补充配置后重跑。
+自动接入可在项目目录使用以下流程（也可为每条命令添加 `--project E:/my-test-project`）。先按下文配置全局模型；首次 `init` 若缺少项目配置，会先写入默认的 `.crosscheck/config.yaml`，随后直接扫描项目生成笔记草稿；如需调整预算或登记 `requirementsDocs`，修改该文件即可。
 
 ```powershell
 crosscheck init

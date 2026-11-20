@@ -28,14 +28,20 @@ async function project(withConfig: boolean) {
 }
 const deps = (model: ReturnType<typeof scriptedModel>) => ({ modelOptions: { env: {}, factories: { openai: () => model } }, resilience: { retries: 0, baseDelayMs: 0 } });
 
-it('没有 config.yaml 时写入合法模板并退出 2，不调用模型', async () => {
+it('没有 config.yaml 时写入默认配置并一次完成笔记生成', async () => {
   const { root, artifacts } = await project(false);
-  const model = scriptedModel([]); const out: string[] = [];
-  expect(await cliMain(['init', '--project', root], { log: (s) => out.push(s), dependencies: deps(model) })).toBe(2);
+  const model = scriptedModel([{ toolCalls: [{ name: 'finish', input: { markdown: '# 项目笔记\n\n扫描结果' } }] }]); const out: string[] = [];
+  expect(await cliMain(['init', '--project', root], { log: (s) => out.push(s), dependencies: deps(model) })).toBe(0);
   expect(ProjectConfigSchema.safeParse(await artifacts.readYaml('config.yaml', ProjectConfigSchema)).success).toBe(true);
   expect(ProjectConfigSchema.safeParse(CONFIG_TEMPLATE).success).toBe(true);
-  expect(out.join('\n')).toContain('模板');
-  expect(model.doGenerateCalls).toHaveLength(0);
+  expect(out.join('\n')).toContain('默认配置');
+  expect((await artifacts.readBytes(NOTES_FILE))?.toString()).toBe('# 项目笔记\n\n扫描结果');
+});
+
+it('预先取消时不写默认配置', async () => {
+  const { root, artifacts } = await project(false);
+  expect(await cliMain(['init', '--project', root], { log: () => {}, signal: AbortSignal.abort(), dependencies: deps(scriptedModel([])) })).not.toBe(0);
+  expect(await artifacts.readBytes('config.yaml')).toBeUndefined();
 });
 
 it('生成笔记草稿且不创建确认记录', async () => {
