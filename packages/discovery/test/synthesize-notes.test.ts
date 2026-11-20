@@ -2,7 +2,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { BudgetTracker, NotesTextSchema } from '@crosscheck/core';
+import { BudgetTracker, NotesTextSchema, parseNotesRequirementDocs } from '@crosscheck/core';
 import { scriptedModel, type ScriptStep } from '../../agent/src/testing/scripted-model';
 import { synthesizeNotes, walkProject } from '../src/index';
 
@@ -30,6 +30,14 @@ function payload(model: ReturnType<typeof scriptedModel>) {
 }
 
 describe('项目笔记合成', () => {
+  it('提示词要求生成可解析的“需求文档”小节', async () => {
+    const { NOTES_SYSTEM } = await import('../src/index');
+    expect(NOTES_SYSTEM).toContain('## 需求文档');
+    expect(NOTES_SYSTEM).toContain('反引号');
+    expect(NOTES_SYSTEM).toContain('未发现');
+    // 提示词里的示例格式必须能被解析函数识别
+    expect(parseNotesRequirementDocs('# 笔记\n\n## 需求文档\n\n- `docs/prd/` 产品需求\n')).toEqual(['docs/prd/']);
+  });
   it('共享校验按 UTF-8 字节限制、非空和 Markdown 标题判断', () => {
     const boundary = '# ' + '中'.repeat(21844) + 'ab';
     expect(Buffer.byteLength(boundary)).toBe(65536);
