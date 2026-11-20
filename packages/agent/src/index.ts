@@ -5,3 +5,4 @@ export * from './context';
 export * from './context-budget';
 export * from './context-manager';
 export * from './summarizer';
+export * from './cache';

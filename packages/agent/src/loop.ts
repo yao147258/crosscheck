@@ -1,10 +1,13 @@
 import type { BudgetTracker } from '@crosscheck/core';
-import { callWithFallback, outputTokenLimit, type ModelCandidate, type ResilienceOptions } from '@crosscheck/models';
-import { generateText, jsonSchema, tool, type ModelMessage, type ToolSet } from 'ai';
+import { callWithFallback, outputTokenLimitForEstimate, type ModelCandidate, type ResilienceOptions } from '@crosscheck/models';
+import { generateText, jsonSchema, tool, type LanguageModelUsage, type ModelMessage, type ToolSet } from 'ai';
 import { z } from 'zod';
+import { applyCacheBreakpoints } from './cache';
 import { grantTools, type Stage } from './grants';
 import { defineTool, type AgentTool } from './tool';
-import { prepareContext, type ContextPolicy, type EvidencePresenter, type EvidencePresentedEvent } from './context';
+import { type ContextPolicy, type EvidencePresenter, type EvidencePresentedEvent } from './context';
+import { ContextManager, type ContextReport, type PreparedContext } from './context-manager';
+import { createModelSummarizer } from './summarizer';
 
 export const FINISH_TOOL = 'finish';
 export const REPORT_BLOCKED_TOOL = 'report_blocked';
@@ -19,7 +22,11 @@ export interface ToolCallEvent {
   ok: boolean;
   output?: unknown;
   error?: string;
+  agentId?: string;
+  parentId?: string;
 }
+
+export type ContextPreparedEvent = ContextReport & { agentId?: string; parentId?: string };
 
 export interface RunAgentOptions<O> {
   stage: Stage;
@@ -50,6 +57,13 @@ export interface RunAgentOptions<O> {
   onModelAttempt?: (attempt: ModelAttempt) => void | Promise<void>;
   /** 内存审计通知，未经清洗不能直接持久化为轨迹；异常传播，不允许继续 PASS。 */
   onToolCall?: (e: ToolCallEvent) => void | Promise<void>;
+  /** 省略时按 stage 构造；摘要权限由阶段决定 */
+  contextManager?: ContextManager;
+  /** 每个真实候选装配后 await；异常按宿主故障传播。 */
+  onContextPrepared?: (event: ContextPreparedEvent) => void | Promise<void>;
+  /** 宿主提供时所有事件附带；子代理由 spawnSubAgent 设置 */
+  agentId?: string;
+  parentId?: string;
 }
 
 export type AttemptUsage = { inputTokens?: number; outputTokens?: number; cacheReadTokens?: number; cacheWriteTokens?: number };
@@ -94,7 +108,7 @@ function buildSdkTools(granted: AgentTool[], output: z.ZodType): ToolSet {
 
 /** 自研代理循环：一轮一次生成；统一补齐调用结果，再检查终结条件。 */
 export async function runAgent<O>(opts: RunAgentOptions<O>): Promise<AgentResult<O>> {
-  const { stage, models, system, output, budget, signal, resilience, onUsage, onToolCall } = opts;
+  const { stage, models, system, output, budget, signal, resilience, onUsage } = opts;
   const maxInvalidOutputs = Math.min(opts.maxInvalidOutputs ?? 3, 3);
   if (!Number.isInteger(maxInvalidOutputs) || maxInvalidOutputs < 1) throw new Error('invalid 额度必须为 1 到 3');
   const names = new Set<string>();
@@ -118,6 +132,30 @@ export async function runAgent<O>(opts: RunAgentOptions<O>): Promise<AgentResult
   let invalid = 0;
   let lastInvalidTruncated = false;
   const modelAttempts: ModelAttempt[] = [];
+  const tag = opts.agentId ? { agentId: opts.agentId, ...(opts.parentId ? { parentId: opts.parentId } : {}) } : {};
+  const onToolCall = opts.onToolCall && ((e: ToolCallEvent) => opts.onToolCall!({ ...e, ...tag }));
+  const usageOf = (u: LanguageModelUsage): AttemptUsage => ({
+    inputTokens: u.inputTokens, outputTokens: u.outputTokens,
+    ...(u.inputTokenDetails?.cacheReadTokens !== undefined ? { cacheReadTokens: u.inputTokenDetails.cacheReadTokens } : {}),
+    ...(u.inputTokenDetails?.cacheWriteTokens !== undefined ? { cacheWriteTokens: u.inputTokenDetails.cacheWriteTokens } : {}),
+  });
+  // 宿主故障状态需被摘要审计（发生在 manager.prepare 内）共享，故提升到循环外，每轮开始时重置。
+  let hostError: unknown;
+  let hostFailed = false;
+  const record = async (attempt: ModelAttempt) => {
+    const tagged = { ...attempt, ...tag } as ModelAttempt;
+    modelAttempts.push(tagged);
+    try { await opts.onModelAttempt?.(tagged); }
+    catch (error) {
+      hostError = error; hostFailed = true;
+      throw Object.assign(new Error('宿主模型审计失败'), { name: 'AbortError' });
+    }
+  };
+  const manager = opts.contextManager ?? new ContextManager({
+    stage, policy: opts.contextPolicy, presenter: opts.evidencePresenter, requiredEvidenceIds: opts.requiredEvidenceIds,
+    // 摘要调用也是真实模型调用：计入预算、attempts 与审计。
+    summarize: createModelSummarizer({ budget, onAttempt: async attempt => { attempts++; await record(attempt); } }),
+  });
   const info = (): RunInfo => ({ steps, attempts, modelAttempts, retried, messages });
   const blocked = (reason: BlockReason, detail: string): AgentResult<O> => ({ status: 'blocked', reason, detail, ...info() });
   const boundedSignal = () => AbortSignal.any([abortSignal, AbortSignal.timeout(budget.remainingMs())]);
@@ -138,8 +176,9 @@ export async function runAgent<O>(opts: RunAgentOptions<O>): Promise<AgentResult
     const genSignal = boundedSignal();
     let roundAttempts = 0;
     let incompleteEvidenceIds: readonly string[] = [];
-    let hostError: unknown;
-    let hostFailed = false;
+    // 原为每轮新建的局部状态，提升后按轮重置以保持语义。
+    hostError = undefined;
+    hostFailed = false;
     try {
       const r = await callWithFallback(
         models,
@@ -148,11 +187,14 @@ export async function runAgent<O>(opts: RunAgentOptions<O>): Promise<AgentResult
           if (hostFailed) throw hostError;
           const stopped = stop(genSignal);
           if (stopped) throw Object.assign(new Error(stopped.detail), { name: 'AbortError' });
-          let prepared: Awaited<ReturnType<typeof prepareContext>>;
+          let prepared: PreparedContext;
           try {
-            prepared = await prepareContext(messages, { ...opts.contextPolicy, ref, signal: genSignal, presenter: opts.evidencePresenter, requiredEvidenceIds: opts.requiredEvidenceIds });
+            prepared = await manager.prepare(messages, { candidate, system, toolSchemas, signal: genSignal });
             await opts.onEvidencePresented?.({ ref, evidence: prepared.presentedEvidence });
+            await opts.onContextPrepared?.({ ...prepared.report, ...tag });
           } catch (error) {
+            // 摘要审计回调失败时已登记宿主故障，保留其原错误。
+            if (hostFailed) throw error;
             // 只识别明确取消来源；同时abort的真实磁盘/verify错误仍为宿主原错。
             if (genSignal.aborted && (error === genSignal.reason || error instanceof Error && error.name === 'AbortError')) throw error;
             hostError = error; hostFailed = true;
@@ -162,27 +204,21 @@ export async function runAgent<O>(opts: RunAgentOptions<O>): Promise<AgentResult
           const afterPresentation = stop(genSignal);
           if (afterPresentation) throw Object.assign(new Error(afterPresentation.detail), { name: 'AbortError' });
           // 输入超出窗口时抛出不可重试错误，不计为真实模型调用。
-          const maxOutputTokens = outputTokenLimit(candidate.contextWindow, [system, prepared.messages, toolSchemas]);
+          const maxOutputTokens = outputTokenLimitForEstimate(candidate.contextWindow, prepared.estimatedInputTokens);
           attempts++;
           roundAttempts++;
           if (roundAttempts > 1) retried = true;
-          const notify = async (attempt: ModelAttempt) => {
-            modelAttempts.push(attempt);
-            try { await opts.onModelAttempt?.(attempt); }
-            catch (error) {
-              hostError = error; hostFailed = true;
-              throw Object.assign(new Error('宿主模型审计失败'), { name: 'AbortError' });
-            }
-          };
+          const request = applyCacheBreakpoints(system, prepared.messages, prepared.historyLength, candidate.providerType);
           let value: Awaited<ReturnType<typeof generateText>>;
           try {
-            value = await generateText({ model, system, messages: prepared.messages, tools: sdkTools, maxOutputTokens, maxRetries: 0, abortSignal: genSignal });
+            value = await generateText({ model, system: request.system, messages: request.messages, tools: sdkTools, maxOutputTokens, maxRetries: 0, abortSignal: genSignal });
           } catch (error) {
-            await notify({ ref, status: 'error', usage: null });
+            await record({ ref, status: 'error', usage: null });
             throw error;
           }
+          manager.observe(ref, prepared.estimatedInputTokens, value.usage.inputTokens);
           // 回调位于 provider catch 之外，不能把宿主失败计成额外模型调用。
-          await notify({ ref, status: 'success', usage: { inputTokens: value.usage.inputTokens, outputTokens: value.usage.outputTokens } });
+          await record({ ref, status: 'success', usage: usageOf(value.usage) });
           return value;
         },
         { ...resilience, signal: genSignal },
@@ -214,7 +250,7 @@ export async function runAgent<O>(opts: RunAgentOptions<O>): Promise<AgentResult
     const finishMustBeAlone = !hasReportBlocked && calls.some((c) => c.toolName === FINISH_TOOL) && calls.length > 1;
 
     try {
-      await onUsage?.(ref, { inputTokens: res.usage.inputTokens, outputTokens: res.usage.outputTokens });
+      await onUsage?.(ref, usageOf(res.usage));
       terminal ??= stop(genSignal);
       for (const call of calls) {
         const reply = (out: ToolResultOutput) => results.push({ type: 'tool-result', toolCallId: call.toolCallId, toolName: call.toolName, output: out });

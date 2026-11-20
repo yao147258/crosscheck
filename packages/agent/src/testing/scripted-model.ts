@@ -1,9 +1,11 @@
 import { MockLanguageModelV4 } from 'ai/test';
 
+export interface StepUsage { input?: number; output?: number; cacheRead?: number; cacheWrite?: number }
+
 export type ScriptStep =
   /** truncated 模拟输出达到 max_tokens 上限，finishReason 为 length */
-  | { text: string; truncated?: boolean }
-  | { toolCalls: Array<{ name: string; input: unknown }>; truncated?: boolean }
+  | { text: string; truncated?: boolean; usage?: StepUsage }
+  | { toolCalls: Array<{ name: string; input: unknown }>; truncated?: boolean; usage?: StepUsage }
   | { error: Error }
   /** 永远不返回结果，直到调用方的 abortSignal 中止；中止后以 TimeoutError 拒绝，模拟模型调用超时 */
   | { hang: true }
@@ -14,6 +16,17 @@ const usage = {
   inputTokens: { total: 10, noCache: 10, cacheRead: undefined, cacheWrite: undefined },
   outputTokens: { total: 5, text: 5, reasoning: undefined },
 };
+
+/** 未指定时沿用默认 usage，保持既有断言不变。 */
+function usageOf(step?: StepUsage) {
+  if (!step) return usage;
+  const input = step.input ?? 10;
+  const output = step.output ?? 5;
+  return {
+    inputTokens: { total: input, noCache: input - (step.cacheRead ?? 0) - (step.cacheWrite ?? 0), cacheRead: step.cacheRead, cacheWrite: step.cacheWrite },
+    outputTokens: { total: output, text: output, reasoning: undefined },
+  };
+}
 
 /**
  * 按脚本逐次返回结果的假模型，用于确定性地测试代理循环。
@@ -46,7 +59,7 @@ export function scriptedModel(steps: ScriptStep[]): MockLanguageModelV4 {
         return {
           content: [{ type: 'text' as const, text: step.text }],
           finishReason: { unified: step.truncated ? 'length' as const : 'stop' as const, raw: undefined },
-          usage,
+          usage: usageOf(step.usage),
           warnings: [],
         };
       }
@@ -58,7 +71,7 @@ export function scriptedModel(steps: ScriptStep[]): MockLanguageModelV4 {
           input: JSON.stringify(c.input),
         })),
         finishReason: { unified: step.truncated ? 'length' as const : 'tool-calls' as const, raw: undefined },
-        usage,
+        usage: usageOf(step.usage),
         warnings: [],
       };
     },
