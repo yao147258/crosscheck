@@ -68,6 +68,28 @@ describe('循环上下文管理', () => {
     await expect(runAgent(options)).rejects.toBe(error);
   });
 
+  it('摘要调用被中止时 provider 抛普通错误，仍按预算/中断阻塞而非宿主故障', async () => {
+    // 40K 窗口下长 assistant 文本经 L1/L2 仍超水位，plan 阶段触发模型摘要；首个模型调用即摘要调用。
+    const messages = [
+      { role: 'user' as const, content: '开始' },
+      ...Array.from({ length: 4 }, () => ({ role: 'assistant' as const, content: 'y'.repeat(30_000) })),
+      { role: 'user' as const, content: '继续' },
+    ];
+    const over = (extra: Partial<RunAgentOptions<z.infer<typeof Output>>>) => ({ stage: 'plan' as const, messages, ...extra });
+    const withWindow = (o: RunAgentOptions<z.infer<typeof Output>>) => ({ ...o, models: o.models.map(m => ({ ...m, contextWindow: 40_000 })) });
+
+    const timed = setup([{ hangWithGenericError: true }], over({ budget: new BudgetTracker({ steps: 10, tokens: 1_000_000, minutes: 0.005 }) }));
+    const r1 = await runAgent(withWindow(timed.options));
+    expect(r1).toMatchObject({ status: 'blocked', reason: 'budget' });
+    expect(timed.model.doGenerateCalls).toHaveLength(1);
+
+    const controller = new AbortController();
+    const interrupted = setup([{ hangWithGenericError: true }], over({ signal: controller.signal }));
+    setTimeout(() => controller.abort(), 50);
+    const r2 = await runAgent(withWindow(interrupted.options));
+    expect(r2).toMatchObject({ status: 'blocked', reason: 'interrupted' });
+  });
+
   it('可注入自定义 ContextManager', async () => {
     const manager = new ContextManager({ stage: 'execute' });
     const { options } = setup([finish], { contextManager: manager });

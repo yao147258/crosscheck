@@ -29,7 +29,8 @@ export function createModelSummarizer(hooks: SummarizerHooks): Summarizer {
     try {
       res = await generateText({ model: candidate.model, system: SUMMARY_SYSTEM, messages: [{ role: 'user', content: body }], maxOutputTokens: 4_096, maxRetries: 0, abortSignal: signal });
     } catch (error) {
-      if (signal.aborted) throw error;
+      // 中止时 provider 的原始错误未必可识别为取消，统一抛 signal.reason 以命中调用方的取消判定。
+      if (signal.aborted) throw signal.reason;
       await hooks.onAttempt?.({ ref: candidate.ref, status: 'error', usage: null, purpose: 'compact' });
       return undefined;
     }
