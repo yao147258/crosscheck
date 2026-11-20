@@ -45,15 +45,17 @@ export interface RunAgentOptions<O> {
   /** 可提前停止，但不能将累计额度放宽到三次以上。 */
   maxInvalidOutputs?: number;
   resilience?: ResilienceOptions;
-  onUsage?: (ref: string, usage: { inputTokens?: number; outputTokens?: number }) => void | Promise<void>;
+  onUsage?: (ref: string, usage: AttemptUsage) => void | Promise<void>;
   /** 每次真实 provider 调用终结后立即 await；宿主异常原样传播，不触发 provider 重试。 */
   onModelAttempt?: (attempt: ModelAttempt) => void | Promise<void>;
   /** 内存审计通知，未经清洗不能直接持久化为轨迹；异常传播，不允许继续 PASS。 */
   onToolCall?: (e: ToolCallEvent) => void | Promise<void>;
 }
 
-export type ModelAttempt = { ref: string; status: 'error'; usage: null }
-  | { ref: string; status: 'success'; usage: { inputTokens?: number; outputTokens?: number } };
+export type AttemptUsage = { inputTokens?: number; outputTokens?: number; cacheReadTokens?: number; cacheWriteTokens?: number };
+/** purpose 仅在压缩摘要调用时出现；agentId/parentId 仅在宿主提供 agentId 或子代理中出现。 */
+export type ModelAttempt = ({ ref: string; status: 'error'; usage: null } | { ref: string; status: 'success'; usage: AttemptUsage })
+  & { purpose?: 'compact'; agentId?: string; parentId?: string };
 
 interface RunInfo {
   steps: number;
