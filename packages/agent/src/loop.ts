@@ -1,4 +1,4 @@
-import type { BudgetTracker } from '@crosscheck/core';
+import type { BudgetLimits, BudgetTracker } from '@crosscheck/core';
 import { callWithFallback, outputTokenLimitForEstimate, type ModelCandidate, type ResilienceOptions } from '@crosscheck/models';
 import { generateText, jsonSchema, tool, type LanguageModelUsage, type ModelMessage, type ToolSet } from 'ai';
 import { z } from 'zod';
@@ -8,6 +8,7 @@ import { defineTool, type AgentTool } from './tool';
 import { type ContextPolicy, type EvidencePresenter, type EvidencePresentedEvent } from './context';
 import { ContextManager, type ContextReport, type PreparedContext } from './context-manager';
 import { createModelSummarizer } from './summarizer';
+import { selectSubAgentTools, spawnSubAgent, SUBAGENT_NOTICE, type ParentContext, type SubAgentFinishedEvent } from './subagent';
 
 export const FINISH_TOOL = 'finish';
 export const REPORT_BLOCKED_TOOL = 'report_blocked';
@@ -27,6 +28,15 @@ export interface ToolCallEvent {
 }
 
 export type ContextPreparedEvent = ContextReport & { agentId?: string; parentId?: string };
+
+export interface DelegateTemplate {
+  name: string;
+  description: string;
+  /** 只能从本阶段已授予的工具中选 */
+  tools: readonly string[];
+  cap?: Partial<BudgetLimits>;
+}
+const DelegateInput = z.object({ task: z.string().min(1), context: z.unknown().optional() });
 
 export interface RunAgentOptions<O> {
   stage: Stage;
@@ -64,6 +74,11 @@ export interface RunAgentOptions<O> {
   /** 宿主提供时所有事件附带；子代理由 spawnSubAgent 设置 */
   agentId?: string;
   parentId?: string;
+  /** 模型可调用的子代理委派工具；子代理中不可配置。 */
+  delegates?: DelegateTemplate[];
+  /** 核验子代理回传的证据 ID 真实存在 */
+  verifyEvidenceIds?: (ids: readonly string[]) => Promise<readonly string[]>;
+  onSubAgentFinished?: (event: SubAgentFinishedEvent) => void | Promise<void>;
 }
 
 export type AttemptUsage = { inputTokens?: number; outputTokens?: number; cacheReadTokens?: number; cacheWriteTokens?: number };
@@ -95,9 +110,10 @@ function schemaOf(s: z.ZodType) {
   return jsonSchema(z.toJSONSchema(s, { io: 'input' }) as Parameters<typeof jsonSchema>[0]);
 }
 
-function buildSdkTools(granted: AgentTool[], output: z.ZodType): ToolSet {
+function buildSdkTools(granted: AgentTool[], output: z.ZodType, delegates: readonly DelegateTemplate[]): ToolSet {
   const set: ToolSet = Object.create(null);
   for (const t of granted) set[t.name] = tool({ description: t.description, inputSchema: schemaOf(t.input) });
+  for (const d of delegates) set[d.name] = tool({ description: d.description, inputSchema: schemaOf(DelegateInput) });
   set[FINISH_TOOL] = tool({ description: '提交最终结果。参数必须完全符合给定结构。', inputSchema: schemaOf(output) });
   set[REPORT_BLOCKED_TOOL] = tool({
     description: '遇到无法自行解决的障碍时调用并说明原因。不要尝试绕过障碍。',
@@ -121,11 +137,28 @@ export async function runAgent<O>(opts: RunAgentOptions<O>): Promise<AgentResult
   }
   const { granted } = grantTools(stage, opts.tools);
   const toolMap = new Map(granted.map((t) => [t.name, t]));
-  const sdkTools = buildSdkTools(granted, opts.outputSchema ?? output);
-  // 工具定义同样占用上下文窗口，参与输出上限的输入估算。
-  const toolSchemas = [...granted.map((t) => z.toJSONSchema(t.input, { io: 'input' })), z.toJSONSchema(opts.outputSchema ?? output, { io: 'input' })];
-  const messages: ModelMessage[] = [...opts.messages];
+  // 提前定义：委派父上下文需要持有同一个中断信号。
   const abortSignal = signal ?? new AbortController().signal;
+  const delegateList = opts.delegates ?? [];
+  if (delegateList.length && opts.parentId) throw new Error('子代理不能再派生子代理');
+  const parent: ParentContext = {
+    stage, models, tools: granted, budget, signal: abortSignal, agentId: opts.agentId ?? 'root', resilience,
+    evidencePresenter: opts.evidencePresenter, verifyEvidenceIds: opts.verifyEvidenceIds,
+    onModelAttempt: opts.onModelAttempt, onToolCall: opts.onToolCall, onContextPrepared: opts.onContextPrepared, onSubAgentFinished: opts.onSubAgentFinished,
+  };
+  const delegates = new Map<string, DelegateTemplate>();
+  for (const d of delegateList) {
+    defineTool({ name: d.name, category: 'profile', description: d.description, input: DelegateInput, execute: async () => null });
+    if (names.has(d.name) || d.name === FINISH_TOOL || d.name === REPORT_BLOCKED_TOOL) throw new Error(`工具名重复：${d.name}`);
+    names.add(d.name);
+    // 越权在任何模型调用前拒绝。
+    selectSubAgentTools(parent, d);
+    delegates.set(d.name, d);
+  }
+  const sdkTools = buildSdkTools(granted, opts.outputSchema ?? output, delegateList);
+  // 工具定义同样占用上下文窗口，参与输出上限的输入估算。
+  const toolSchemas = [...granted.map((t) => z.toJSONSchema(t.input, { io: 'input' })), ...delegateList.map(() => z.toJSONSchema(DelegateInput, { io: 'input' })), z.toJSONSchema(opts.outputSchema ?? output, { io: 'input' })];
+  const messages: ModelMessage[] = [...opts.messages];
   let steps = 0;
   let attempts = 0;
   let retried = false;
@@ -293,6 +326,24 @@ export async function runAgent<O>(opts: RunAgentOptions<O>): Promise<AgentResult
           reported ??= parsed.success ? parsed.data.reason : '代理上报障碍但未说明原因';
           reply({ type: 'json', value: '已记录' });
           await onToolCall?.({ name: REPORT_BLOCKED_TOOL, input: call.input, ok: true, output: reported });
+          continue;
+        }
+        const delegate = delegates.get(call.toolName);
+        if (delegate) {
+          const parsed = DelegateInput.safeParse(call.input);
+          if (!parsed.success) { await fail(`工具 ${delegate.name} 的输入不合法：\n${z.prettifyError(parsed.error)}`); continue; }
+          terminal ??= stop();
+          if (terminal) { await fail(`未执行：${terminal.detail}`); continue; }
+          // 宿主异常不转为工具错误，原样上抛；finally 会为本轮剩余调用补齐结果。
+          const sub = await spawnSubAgent({ ...parent, signal: boundedSignal() }, { name: delegate.name, task: parsed.data.task, context: parsed.data.context, tools: delegate.tools, cap: delegate.cap });
+          terminal ??= stop();
+          if (sub.status === 'blocked') { await fail(`子代理 ${delegate.name} 未完成（${sub.reason}）：${sub.detail}`); continue; }
+          const out = {
+            notice: SUBAGENT_NOTICE, ...(toJsonValue(sub.output) as object), evidenceIds: sub.evidenceIds,
+            ...(sub.droppedEvidenceIds.length ? { dropped: `[已丢弃无效证据ID: ${sub.droppedEvidenceIds.join(',')}]` } : {}),
+          };
+          reply({ type: 'json', value: out });
+          await onToolCall?.({ name: delegate.name, input: parsed.data, ok: true, output: out });
           continue;
         }
         const t = toolMap.get(call.toolName);
