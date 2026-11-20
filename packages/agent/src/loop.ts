@@ -1,5 +1,5 @@
 import type { BudgetTracker } from '@crosscheck/core';
-import { callWithFallback, outputTokenLimit, type ModelCandidate, type ResilienceOptions } from '@crosscheck/models';
+import { callWithFallback, outputTokenLimit, reportProgress, summarizeInput, type ModelCandidate, type ResilienceOptions } from '@crosscheck/models';
 import { generateText, jsonSchema, tool, type ModelMessage, type ToolSet } from 'ai';
 import { z } from 'zod';
 import { grantTools, type Stage } from './grants';
@@ -8,6 +8,7 @@ import { prepareContext, type ContextPolicy, type EvidencePresenter, type Eviden
 
 export const FINISH_TOOL = 'finish';
 export const REPORT_BLOCKED_TOOL = 'report_blocked';
+const STAGE_LABELS: Record<Stage, string> = { extract: '分析', plan: '规划', prepare: '准备', execute: '执行', review: '复核' };
 const ReportBlockedInput = z.object({ reason: z.string().min(1) });
 
 export type BlockReason = 'budget' | 'invalid-output' | 'reported' | 'interrupted' | 'model-error';
@@ -118,6 +119,8 @@ export async function runAgent<O>(opts: RunAgentOptions<O>): Promise<AgentResult
   const modelAttempts: ModelAttempt[] = [];
   const info = (): RunInfo => ({ steps, attempts, modelAttempts, retried, messages });
   const blocked = (reason: BlockReason, detail: string): AgentResult<O> => ({ status: 'blocked', reason, detail, ...info() });
+  // 面向用户的执行提示，按阶段加前缀，便于区分并行的多个代理。
+  const progress = (text: string) => reportProgress(`[${STAGE_LABELS[stage]}] ${text}`);
   const boundedSignal = () => AbortSignal.any([abortSignal, AbortSignal.timeout(budget.remainingMs())]);
   const stop = (bounded?: AbortSignal): { reason: 'interrupted' | 'budget'; detail: string } | undefined => {
     if (abortSignal.aborted) return { reason: 'interrupted', detail: '执行被中断' };
@@ -173,6 +176,7 @@ export async function runAgent<O>(opts: RunAgentOptions<O>): Promise<AgentResult
             }
           };
           let value: Awaited<ReturnType<typeof generateText>>;
+          progress(`第 ${steps + 1} 轮：请求模型 ${ref} 思考下一步`);
           try {
             value = await generateText({ model, system, messages: prepared.messages, tools: sdkTools, maxOutputTokens, maxRetries: 0, abortSignal: genSignal });
           } catch (error) {
@@ -218,6 +222,7 @@ export async function runAgent<O>(opts: RunAgentOptions<O>): Promise<AgentResult
         const reply = (out: ToolResultOutput) => results.push({ type: 'tool-result', toolCallId: call.toolCallId, toolName: call.toolName, output: out });
         const fail = async (error: string) => {
           reply({ type: 'error-text', value: error });
+          progress(`${call.toolName} 未成功：${error.split('\n')[0]!.slice(0, 80)}`);
           await onToolCall?.({ name: call.toolName, input: call.input, ok: false, error });
         };
         terminal ??= stop();
@@ -241,6 +246,7 @@ export async function runAgent<O>(opts: RunAgentOptions<O>): Promise<AgentResult
           if (parsed.success && (!validation || validation.ok)) {
             finished = { value: parsed.data };
             reply({ type: 'json', value: '已收到' });
+            progress('提交最终结果');
             await onToolCall?.({ name: FINISH_TOOL, input: call.input, ok: true, output: parsed.data });
           } else {
             invalidRound = true;
@@ -254,6 +260,7 @@ export async function runAgent<O>(opts: RunAgentOptions<O>): Promise<AgentResult
           const parsed = ReportBlockedInput.safeParse(call.input);
           reported ??= parsed.success ? parsed.data.reason : '代理上报障碍但未说明原因';
           reply({ type: 'json', value: '已记录' });
+          progress(`上报障碍：${reported.slice(0, 80)}`);
           await onToolCall?.({ name: REPORT_BLOCKED_TOOL, input: call.input, ok: true, output: reported });
           continue;
         }
@@ -264,6 +271,8 @@ export async function runAgent<O>(opts: RunAgentOptions<O>): Promise<AgentResult
         terminal ??= stop();
         if (terminal) { await fail(`未执行：${terminal.detail}`); continue; }
         const execSignal = boundedSignal();
+        const summary = summarizeInput(parsed.data);
+        progress(`调用工具 ${t.name}${summary ? `（${summary}）` : ''}：${t.description.split(/[。\n]/)[0]!.slice(0, 40)}`);
         let raw: unknown;
         try {
           raw = await t.execute(parsed.data, { signal: execSignal });

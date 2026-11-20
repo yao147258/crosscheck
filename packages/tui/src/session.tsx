@@ -23,11 +23,21 @@ export interface RunSessionOptions {
   info?: { version: string; models: { extractor: string; planner: string; executor: string; reviewer: string } | undefined };
   slashCommands?: SlashCommandMeta[];
   tokenize: (text: string) => string[];
-  runSlashCommand: (tokens: string[], signal: AbortSignal) => Promise<SlashCommandResult>;
+  /** onProgress 接收执行过程中的实时提示（模型请求、工具调用、命令日志），执行期间显示在会话底部。 */
+  runSlashCommand: (tokens: string[], signal: AbortSignal, onProgress?: (text: string) => void) => Promise<SlashCommandResult>;
   resolveReview: (args: Extract<SlashCommandResult, { kind: 'review' }>['args'], signal: AbortSignal) => Promise<ReviewEnv>;
-  chatReply: (history: ChatMessage[], text: string, signal: AbortSignal) => Promise<string>;
+  chatReply: (history: ChatMessage[], text: string, signal: AbortSignal, onProgress?: (text: string) => void) => Promise<string>;
+  /** 开关终端鼠标上报；聊天界面启用以响应滚轮，进入审核界面时关闭。 */
+  mouseTracking?: (enabled: boolean) => void;
   signal?: AbortSignal;
 }
+
+const SPINNER = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+// 执行提示只显示最近若干行，避免刷屏。
+const ACTIVITY_LINES = 6;
+// SGR 鼠标上报序列（ink 已去掉开头的 ESC），按钮码 64/65 为滚轮上/下，4/8/16 位为修饰键。
+const MOUSE = /^\[<(\d+);\d+;\d+[Mm]$/;
+const WHEEL_STEP = 3;
 
 export function SessionApp({ options }: { options: RunSessionOptions }) {
   const { exit } = useApp();
@@ -64,6 +74,21 @@ export function SessionApp({ options }: { options: RunSessionOptions }) {
   const [scrollUp, setScrollUp] = useState(0);
   const maxScroll = Math.max(0, height - viewport);
   const offset = Math.min(scrollUp, maxScroll);
+  const scrollBy = (delta: number) => setScrollUp((value) => Math.max(0, Math.min(maxScroll, Math.min(value, maxScroll) + delta)));
+  // 执行中的实时提示与计时；tick 驱动转圈动画与耗时刷新。
+  const [activity, setActivity] = useState<string[]>([]);
+  const [startedAt, setStartedAt] = useState(0);
+  const [tick, setTick] = useState(0);
+  useEffect(() => {
+    if (!busy) return;
+    const timer = setInterval(() => setTick((value) => value + 1), 120);
+    return () => clearInterval(timer);
+  }, [busy]);
+  useEffect(() => {
+    if (review) return;
+    options.mouseTracking?.(true);
+    return () => options.mouseTracking?.(false);
+  }, [review, options.mouseTracking]);
   const append = (role: ChatMessage['role'], content: string) => setMessages((items) => [...items, { role, content }]);
   const cancel = useCallback(() => {
     externalAbort.current = true;
@@ -81,11 +106,19 @@ export function SessionApp({ options }: { options: RunSessionOptions }) {
     operation.current = controller;
     setBusy(true);
     setScrollUp(0);
+    setActivity([]);
+    setStartedAt(Date.now());
     append('user', text);
+    // 只接收本次操作的提示，操作结束后迟到的提示直接丢弃。
+    const progress = (line: string) => {
+      if (operation.current !== controller) return;
+      const lines = line.split('\n').filter((item) => item.trim());
+      if (lines.length) setActivity((items) => [...items, ...lines].slice(-ACTIVITY_LINES));
+    };
     let failure: Error | undefined;
     try {
       if (text.startsWith('/')) {
-        const result = await options.runSlashCommand(options.tokenize(text.slice(1)), controller.signal);
+        const result = await options.runSlashCommand(options.tokenize(text.slice(1)), controller.signal, progress);
         controller.signal.throwIfAborted();
         if (result.kind === 'exit') { exit(0); return; }
         if (result.kind === 'clear') {
@@ -102,7 +135,7 @@ export function SessionApp({ options }: { options: RunSessionOptions }) {
           return;
         }
       } else {
-        const reply = await options.chatReply(history.current, text, controller.signal);
+        const reply = await options.chatReply(history.current, text, controller.signal, progress);
         controller.signal.throwIfAborted();
         history.current = [...history.current, { role: 'user' as const, content: text }, { role: 'assistant' as const, content: reply }].slice(-20);
         append('assistant', reply);
@@ -114,6 +147,7 @@ export function SessionApp({ options }: { options: RunSessionOptions }) {
     } finally {
       if (!reviewActive.current) operation.current = undefined;
       setBusy(false);
+      setActivity([]);
       if (externalAbort.current && !reviewActive.current) exit(failure ?? 2);
     }
   };
@@ -132,23 +166,37 @@ export function SessionApp({ options }: { options: RunSessionOptions }) {
   }
   useInput((value, key) => {
     if (reviewActive.current) return;
+    // 鼠标事件一律不进入输入框；滚轮按固定行数翻看。
+    const mouse = MOUSE.exec(value);
+    if (mouse) {
+      const button = Number(mouse[1]) & ~0x1c;
+      if (button === 64 || button === 65) scrollBy(button === 64 ? WHEEL_STEP : -WHEEL_STEP);
+      return;
+    }
     if (key.ctrl && value === 'c') {
       if (operation.current) operation.current.abort();
       else append('assistant', '使用 /exit 退出会话');
       return;
     }
-    if (busy || operation.current) return;
+    const idle = !busy && !operation.current;
+    // 翻页在执行中同样可用；↑/↓ 在没有命令候选时逐行滚动。
     if (key.pageUp || key.pageDown) {
       const page = Math.max(1, viewport);
-      setScrollUp((value) => Math.max(0, Math.min(maxScroll, Math.min(value, maxScroll) + (key.pageUp ? page : -page))));
-    } else if (key.return) {
+      scrollBy(key.pageUp ? page : -page);
+      return;
+    }
+    if ((key.upArrow || key.downArrow) && !(idle && matchCommands(inputRef.current).length)) {
+      scrollBy(key.upArrow ? 1 : -1);
+      return;
+    }
+    if (!idle) return;
+    if (key.return) {
       const text = inputRef.current.trim();
       updateHintIndex(0);
       updateInput('');
       if (text) void submit(text);
     } else if (key.upArrow || key.downArrow) {
       const matches = matchCommands(inputRef.current);
-      if (!matches.length) return;
       updateHintIndex((hintIndexRef.current + (key.upArrow ? -1 : 1) + matches.length) % matches.length);
     } else if (key.tab) {
       const matches = matchCommands(inputRef.current);
@@ -182,12 +230,13 @@ export function SessionApp({ options }: { options: RunSessionOptions }) {
         {messages.map((m, i) => m.role === 'user'
           ? <Box key={i} backgroundColor="#b8b8b8"><Text color="black">{safeText(m.content)}</Text></Box>
           : <Text key={i}>{safeText(m.content)}</Text>)}
+        {busy && activity.map((line, i) => <Text key={`activity-${i}`} color="gray" wrap="truncate-end">  {safeText(line)}</Text>)}
       </Box>
       {thumb > 0 && <Box position="absolute" left={width - 1} flexDirection="column">
         {Array.from({ length: viewport }, (_, i) => <Text key={i} color="gray">{i >= thumbStart && i < thumbStart + thumb ? '█' : '│'}</Text>)}
       </Box>}
     </Box>
-    <Box borderStyle="single" borderColor="white" borderLeft={false} borderRight={false} borderTop={inputHeight >= 3} borderBottom={inputHeight >= 2} flexShrink={0}><Text wrap="truncate-start">{busy ? '执行中，Ctrl+C 中断并等待清理' : `> ${safeText(input)}`}</Text></Box>
+    <Box borderStyle="single" borderColor="white" borderLeft={false} borderRight={false} borderTop={inputHeight >= 3} borderBottom={inputHeight >= 2} flexShrink={0}><Text wrap="truncate-start">{busy ? `${SPINNER[tick % SPINNER.length]} 执行中 ${Math.max(0, Math.floor((Date.now() - startedAt) / 1000))}s，Ctrl+C 中断并等待清理` : `> ${safeText(input)}`}</Text></Box>
     {hintHeight > 0 && <Box flexDirection="column" flexShrink={0}>
       {hintItems.map((item, i) => <Text key={item.name} bold={i === hintIndex} color={i === hintIndex ? 'white' : 'gray'}>/{item.name} {item.description}</Text>)}
     </Box>}

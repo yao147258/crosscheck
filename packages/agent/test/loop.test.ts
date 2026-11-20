@@ -1,4 +1,5 @@
 import { BudgetTracker } from '@crosscheck/core';
+import { withProgress } from '@crosscheck/models';
 import type { ModelMessage } from 'ai';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
@@ -81,6 +82,21 @@ describe('runAgent', () => {
     expect(r).toMatchObject({ status: 'done', output: { answer: 'ok' }, steps: 2, retried: false });
     expect(events[0]).toEqual({ name: 'echo', input: { x: 7 }, ok: true, output: { echoed: 7 } });
     expect(promptText(model, 1)).toContain('echoed');
+  });
+
+  it('在进度上下文中上报模型请求、工具调用与提交结果', async () => {
+    const lines: string[] = [];
+    const { options } = opts([
+      { toolCalls: [{ name: 'echo', input: { x: 7 } }] },
+      { toolCalls: [{ name: 'finish', input: { answer: 'ok' } }] },
+    ]);
+    await withProgress((line) => lines.push(line), () => runAgent(options));
+    expect(lines).toEqual([
+      '[执行] 第 1 轮：请求模型 mock:primary 思考下一步',
+      '[执行] 调用工具 echo（x=7）：原样返回',
+      '[执行] 第 2 轮：请求模型 mock:primary 思考下一步',
+      '[执行] 提交最终结果',
+    ]);
   });
 
   it('执行阶段调用夹具工具会被拒绝，夹具不会执行', async () => {

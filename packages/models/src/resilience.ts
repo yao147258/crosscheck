@@ -1,4 +1,5 @@
 import { APICallError, type LanguageModel } from 'ai';
+import { reportProgress } from './progress';
 import type { ModelCandidate } from './resolve';
 
 export interface ResilienceOptions {
@@ -67,13 +68,17 @@ export async function callWithFallback<T>(
         lastErr = err;
         if (cls === 'non-retryable') break; // 跳过本模型剩余重试，直接切下一个候选
         if (i < retries) {
+          reportProgress(`模型 ${ref} 请求失败，第 ${i + 1} 次重试`);
           await sleep(baseDelayMs * 2 ** i, signal);
           if (signal?.aborted) throw lastErr; // 退避期间中止：提前结束，不再重试
         }
       }
     }
     const next = chain[c + 1];
-    if (next) onFallback?.(ref, next.ref, lastErr);
+    if (next) {
+      reportProgress(`模型 ${ref} 不可用，切换备用模型 ${next.ref}`);
+      onFallback?.(ref, next.ref, lastErr);
+    }
   }
   throw lastErr;
 }

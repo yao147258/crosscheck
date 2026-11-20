@@ -114,6 +114,51 @@ it('PageUp/PageDown 按屏翻看历史并限制在边界内', async () => {
   expect(frame(ui).split('\n').at(-2)).toContain('>');
 });
 
+it('没有命令候选时 ↑/↓ 逐行滚动历史', async () => {
+  const ui = render(<SessionApp options={longReply(30)} />);
+  resize(ui, 8);
+  ui.stdin.write('你好'); ui.stdin.write(KEYS.enter);
+  await waitFor(() => frame(ui).includes('回复行29'));
+  ui.stdin.write(KEYS.up);
+  await waitFor(() => !frame(ui).includes('回复行29'));
+  expect(frame(ui)).toContain('回复行28');
+  ui.stdin.write(KEYS.down);
+  await waitFor(() => frame(ui).includes('回复行29'));
+});
+
+it('鼠标滚轮翻看历史且不写入输入框', async () => {
+  const ui = render(<SessionApp options={longReply(30)} />);
+  resize(ui, 8);
+  ui.stdin.write('你好'); ui.stdin.write(KEYS.enter);
+  await waitFor(() => frame(ui).includes('回复行29'));
+  ui.stdin.write('\u001b[<64;10;3M');
+  await waitFor(() => !frame(ui).includes('回复行27'));
+  expect(frame(ui)).toContain('回复行26');
+  ui.stdin.write('\u001b[<65;10;3M');
+  await waitFor(() => frame(ui).includes('回复行29'));
+  expect(frame(ui)).not.toContain('[<');
+});
+
+it('执行中实时显示模型与工具提示，并允许翻看历史', async () => {
+  const release = deferred<void>(), entered = deferred<void>();
+  const runSlashCommand = vi.fn(async (_tokens: string[], _signal: AbortSignal, onProgress?: (text: string) => void) => {
+    onProgress?.('[执行] 第 1 轮：请求模型 mock:a 思考下一步');
+    onProgress?.('[执行] 调用工具 http_request（method=GET, path=/api/items）：发送请求');
+    entered.resolve(); await release.promise;
+    return { kind: 'log' as const, code: 0, lines: ['完成'] };
+  });
+  const ui = render(<SessionApp options={completionOptions({ runSlashCommand })} />);
+  await mounted();
+  ui.stdin.write('/run'); ui.stdin.write(KEYS.enter);
+  await entered.promise;
+  await waitFor(() => frame(ui).includes('调用工具 http_request'));
+  expect(frame(ui)).toContain('请求模型 mock:a');
+  expect(frame(ui)).toMatch(/执行中 \d+s/);
+  release.resolve();
+  await waitFor(() => frame(ui).includes('退出码 0'));
+  expect(frame(ui)).not.toContain('调用工具 http_request');
+});
+
 it('翻看历史后提交新消息回到最新内容', async () => {
   const ui = render(<SessionApp options={longReply(30)} />);
   resize(ui, 8);

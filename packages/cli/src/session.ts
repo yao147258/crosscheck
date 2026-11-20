@@ -1,5 +1,5 @@
 import { Approvals, ArtifactStore, loadUserModelConfig, resolveReviewer } from '@crosscheck/core';
-import { builtinFactories, callWithFallback } from '@crosscheck/models';
+import { builtinFactories, callWithFallback, reportProgress, withProgress } from '@crosscheck/models';
 import { createEditorHost, createOpener, loadHomeSummary, loadStatus, ReviewSession, runSession, type ChatMessage, type SlashCommandResult } from '@crosscheck/tui';
 import { APICallError, generateText } from 'ai';
 import { appendFile, mkdir } from 'node:fs/promises';
@@ -50,7 +50,10 @@ export const sessionSlashCommands = [
 ];
 
 export function createSlashDispatcher(deps: CommandDependencies) {
-  return async (tokens: string[], signal: AbortSignal): Promise<SlashCommandResult> => {
+  // 命令日志与模型/工具执行提示都实时推给会话界面，最终输出仍随结果返回。
+  return (tokens: string[], signal: AbortSignal, onProgress?: (text: string) => void): Promise<SlashCommandResult> =>
+    withProgress(onProgress, () => dispatch(tokens, signal, onProgress));
+  async function dispatch(tokens: string[], signal: AbortSignal, onProgress?: (text: string) => void): Promise<SlashCommandResult> {
     if (!tokens.length || !tokens[0]) return { kind: 'log', code: 2, lines: ['斜杠命令不能为空'] };
     if (tokens[0] === 'exit') return tokens.length === 1 ? { kind: 'exit' } : { kind: 'log', code: 2, lines: ['exit 不接受参数'] };
     if (tokens[0] === 'clear') return tokens.length === 1 ? { kind: 'clear' } : { kind: 'log', code: 2, lines: ['clear 不接受参数'] };
@@ -90,13 +93,14 @@ export function createSlashDispatcher(deps: CommandDependencies) {
       catch (error) { return { kind: 'log', code: 2, lines: [error instanceof Error ? error.message : String(error)] }; }
     }
     const lines: string[] = [];
-    const code = await cliMain(tokens, { dependencies: deps, signal, log: (line) => lines.push(line) });
+    const code = await cliMain(tokens, { dependencies: deps, signal, log: (line) => { lines.push(line); onProgress?.(line); } });
     return { kind: 'log', code, lines };
-  };
+  }
 }
 
 export async function chatReply(project: string, history: ChatMessage[], text: string, deps: CommandDependencies, signal: AbortSignal): Promise<string> {
   const artifacts = new ArtifactStore(project);
+  reportProgress('读取项目摘要与模型配置');
   const context = await loadModelContext(artifacts, deps);
   const { config, redactor } = context;
   signal.throwIfAborted();
@@ -130,6 +134,7 @@ export async function chatReply(project: string, history: ChatMessage[], text: s
   try {
   const result = await callWithFallback(models, async (model, ref) => {
     try {
+      reportProgress(`请求模型 ${ref} 生成回复`);
       const response = await generateText({ model, maxRetries: 0, system: `你是只读助手。仅根据项目摘要回答，不可执行写入或确认操作；请引导用户使用斜杠命令或 /review 自行操作。项目摘要：${JSON.stringify(summary)}`, messages: [...history.slice(-20), { role: 'user', content: text }], abortSignal: signal });
       return response.text;
     } catch (error) {
@@ -170,6 +175,8 @@ export async function sessionCommand(args: CliArgs, log: (s: string) => void, de
       operationSignal.throwIfAborted();
       return { session, editor: createEditorHost(artifacts, env), open: createOpener() };
     },
-    chatReply: (history, text, operationSignal) => chatReply(args.project, history, text, deps, operationSignal),
+    chatReply: (history, text, operationSignal, onProgress) => withProgress(onProgress, () => chatReply(args.project, history, text, deps, operationSignal)),
+    // SGR 鼠标上报：会话界面据此响应滚轮翻看历史。
+    mouseTracking: (enabled) => { process.stdout.write(enabled ? '\u001b[?1000h\u001b[?1006h' : '\u001b[?1000l\u001b[?1006l'); },
   }));
 }
