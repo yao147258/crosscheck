@@ -37,7 +37,7 @@ export async function initCommand(args: CliArgs, log: (s: string) => void, deps:
     const { config, redactor } = context;
     const walk = await walkProject(args.project, { signal: sig });
     for (const diagnostic of walk.diagnostics) log(redactor.text(`扫描诊断：${diagnostic}`));
-    log(`登记文件 ${walk.files.length} 个，摘录 ${walk.files.filter((file) => file.excerpt).length} 个`);
+    log(`登记文件 ${walk.files.length} 个`);
     sig.throwIfAborted();
     const models = resolveModels(config, 'extractor', context.deps, (line) => log(redactor.text(line)));
     const result = await synthesizeNotes({

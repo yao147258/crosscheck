@@ -34,11 +34,7 @@ export type SynthesizeNotesResult =
 export async function synthesizeNotes(options: SynthesizeNotesOptions): Promise<SynthesizeNotesResult> {
   if (!Array.isArray(options.models) || options.models.length === 0) throw new Error('模型列表不能为空');
   // 脱敏是启发式的，不能保证识别全部秘密。
-  const manifest = options.files.map((file) => ({
-    ...file,
-    path: sanitize(file.path),
-    ...(file.excerpt === undefined ? {} : { excerpt: file.excerpt.map(sanitize) }),
-  }));
+  const manifest = options.files.map((file) => ({ ...file, path: sanitize(file.path) }));
   const result = await runAgent({
     stage: 'extract', models: options.models, budget: options.budget(), signal: options.signal,
     resilience: options.resilience, tools: [], system: NOTES_SYSTEM,

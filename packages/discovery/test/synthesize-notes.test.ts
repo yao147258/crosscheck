@@ -5,7 +5,7 @@ import { synthesizeNotes } from '../src/index';
 
 const finish = (markdown: string): ScriptStep => ({ toolCalls: [{ name: 'finish', input: { markdown } }] });
 const options = (model: ReturnType<typeof scriptedModel>) => ({
-  files: [{ path: 'README.md', bytes: 12, excerpt: ['# 标题'] }],
+  files: [{ path: 'README.md', bytes: 12 }],
   diagnostics: ['摘录已截断'],
   models: [{ ref: 'mock:extractor', model }],
   budget: () => new BudgetTracker({ steps: 10, tokens: 100000, minutes: 1 }),
@@ -29,15 +29,14 @@ describe('项目笔记合成', () => {
   it('发送清单和诊断，缺省时不发送旧笔记', async () => {
     const model = scriptedModel([finish('# 项目笔记\n\n正文')]);
     expect(await synthesizeNotes(options(model))).toEqual({ status: 'done', text: '# 项目笔记\n\n正文', interrupted: false });
-    expect(payload(model)).toEqual({ manifest: [{ path: 'README.md', bytes: 12, excerpt: ['# 标题'] }], diagnostics: ['摘录已截断'] });
+    expect(payload(model)).toEqual({ manifest: [{ path: 'README.md', bytes: 12 }], diagnostics: ['摘录已截断'] });
   });
-  it('模型调用前清理路径、摘录、诊断和旧笔记中的已知凭证', async () => {
+  it('模型调用前清理路径、诊断和旧笔记中的已知凭证', async () => {
     const model = scriptedModel([finish('# 笔记')]);
-    await synthesizeNotes({ ...options(model), files: [{ path: 'token=pathsecret/file.md', bytes: 5, excerpt: ['password=excerptsecret'] }], diagnostics: ['secret=diagsecret'], previous: '# 旧笔记\napi_key=previoussecret' });
+    await synthesizeNotes({ ...options(model), files: [{ path: 'token=pathsecret/file.md', bytes: 5 }], diagnostics: ['secret=diagsecret'], previous: '# 旧笔记\napi_key=previoussecret' });
     const data = payload(model);
-    expect(JSON.stringify(data)).not.toMatch(/pathsecret|excerptsecret|diagsecret|previoussecret/);
+    expect(JSON.stringify(data)).not.toMatch(/pathsecret|diagsecret|previoussecret/);
     expect(data.manifest[0].path).toContain('[已隐藏]');
-    expect(data.manifest[0].excerpt[0]).toContain('[已隐藏]');
     expect(data.diagnostics[0]).toContain('[已隐藏]');
     expect(data.previous).toContain('[已隐藏]');
   });
