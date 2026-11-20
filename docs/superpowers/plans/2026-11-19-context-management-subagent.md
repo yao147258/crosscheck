@@ -854,7 +854,9 @@ describe('ContextManager', () => {
     expect(prepared.report.layers).toEqual(['L1', 'L2', 'L3']);
     expect(prepared.messages[0]).toEqual(task);
     expect((prepared.messages[1] as { content: string }).content.startsWith(SUMMARY_MARKER)).toBe(true);
-    expect(prepared.messages.slice(-2)).toEqual(messages.slice(-2));
+    // 本用例未配置 presenter，materializeEvidence 会在历史之后追加一条"证据不完整"提示，
+    // 只比较历史部分（与"窗口不同的候选"用例对 historyLength 的处理方式一致）。
+    expect(prepared.messages.slice(0, prepared.historyLength).slice(-2)).toEqual(messages.slice(-2));
   });
 
   it('摘要失败时退回 L2 结果', async () => {
