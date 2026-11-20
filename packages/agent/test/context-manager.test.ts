@@ -66,6 +66,15 @@ describe('ContextManager', () => {
     expect(prepared.report.layers).not.toContain('L3');
   });
 
+  it('prepare 阶段即使 L2 后仍超限也不调用摘要', async () => {
+    const summarize = vi.fn<Summarizer>(async () => '{}');
+    const manager = new ContextManager({ stage: 'prepare', summarize });
+    expect(manager.summaryAllowed).toBe(false);
+    const prepared = await manager.prepare(chatty(), input());
+    expect(summarize).not.toHaveBeenCalled();
+    expect(prepared.report.layers).not.toContain('L3');
+  });
+
   it('plan 阶段在 L2 后仍超限时调用摘要，替换较早消息并保留首条任务与最近一轮', async () => {
     const summarize = vi.fn<Summarizer>(async () => '{"goal":"登录"}');
     const manager = new ContextManager({ stage: 'plan', summarize });
