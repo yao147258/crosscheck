@@ -50,11 +50,11 @@ I = W − R − F − 1_024                    可用输入
 
 旧工具结果单条上限、证据文本上限、附件累计上限由 I 按比例推导（附件累计不超过 I 的 40%，旧工具结果单条不超过 I 的 3%，均另以现有默认值为下限保护）。显式 `contextPolicy` 字段优先。PNG 字节上限保持现有语义。
 
-估算沿用 `estimateTokens`。每次成功调用后以 `usage.inputTokens ÷ 本次估算` 计算校准系数，仅在大于当前系数时上调，作用于本次运行内的同一候选；usage 缺失或为 0 时忽略。
+估算沿用 `estimateTokens`，并修正其对图片字节的处理：`Uint8Array`/`Buffer` 不再按 JSON 展开计数，而是每张图片按固定 1600 token 估算（现状会把截图字节序列化为 `{"0":…}`，一张 200 KB 截图被估成数十万 token 而误报超窗口）。每次成功调用后以 `usage.inputTokens ÷ 本次估算` 计算校准系数，仅在大于当前系数时上调，作用于本次运行内的同一候选；usage 缺失或为 0 时忽略。
 
 ### 分层裁剪
 
-估算超过水位线时依次执行，满足目标即停：
+证据附件先按 ID 物化，历史预算 H = I − 附件估算。历史估算超过水位线时依次执行，满足目标即停：
 
 | 层 | 动作 | 用模型 |
 |---|---|---|
@@ -72,9 +72,9 @@ I = W − R − F − 1_024                    可用输入
 
 ### 水位线压缩与 prompt caching
 
-为保持前缀字节稳定，压缩只在估算超过 I 的 85% 时触发，一次压至 60% 以下；两次压缩之间消息只追加。压缩结果作为“已定稿前缀”缓存，后续请求原样复用；仅当候选窗口相同时复用，窗口不同的候选独立重新裁剪。证据附件仍按每个候选重新物化，放在消息末尾，不进入已定稿前缀。
+为保持前缀字节稳定，压缩只在历史估算超过 H 的 85% 时触发，一次压至 H 的 60% 以下；两次压缩之间消息只追加。压缩结果作为“已定稿前缀”缓存，后续请求原样复用；仅当候选窗口相同时复用，窗口不同的候选独立重新裁剪。证据附件仍按每个候选重新物化，放在消息末尾，不进入已定稿前缀。
 
-Anthropic provider（`@ai-sdk/anthropic` 4.x）通过消息级 `providerOptions.anthropic.cacheControl: { type: 'ephemeral' }` 设置断点：system 消息末尾一个（Anthropic 拼接顺序为 tools → system → messages，可同时覆盖工具定义），已定稿前缀末尾一个，合计不超过 4 个。为此 system 改以 `role: 'system'` 消息传入以便携带 providerOptions。OpenAI Responses 为服务端自动缓存，不加断点。provider 类型由 `ModelCandidate` 新增的 `providerType` 字段提供。
+Anthropic provider（`@ai-sdk/anthropic` 4.x）通过消息级 `providerOptions.anthropic.cacheControl: { type: 'ephemeral' }` 设置断点：system 消息末尾一个（Anthropic 拼接顺序为 tools → system → messages，可同时覆盖工具定义），已定稿前缀末尾一个，合计不超过 4 个。system 以 `SystemModelMessage`（`{ role: 'system', content, providerOptions }`）传给 `generateText` 的 `system` 参数，无需移入 messages。缓存断点打在历史（已定稿前缀加其后追加的消息）最后一条上，附件之前。OpenAI Responses 为服务端自动缓存，不加断点。provider 类型由 `ModelCandidate` 新增的 `providerType` 字段提供。
 
 用量：`ModelAttempt.usage` 新增可选 `cacheReadTokens`、`cacheWriteTokens`，取自 `usage.inputTokenDetails`。`pricing` 新增可选 `cacheReadPerMTok`、`cacheWritePerMTok`；未配置时按 `inputPerMTok` 计费，不判为 pricing 未知。
 
@@ -123,11 +123,11 @@ runSubAgents(parent: ParentContext, specs: SubAgentSpec[], opts: { concurrency?:
 
 ### 并发
 
-delegate 工具随父循环逐个执行工具而天然串行；execute 阶段子代理与父代理共用同一 `BrowserHost`，页面状态共享、可变，不得并行。`runSubAgents` 用于宿主编排扇出，默认并发 3，仅适用于只读或无状态工具；结果逐项返回 `{ status: 'done', output } | { status: 'blocked', reason, detail }`，任一项出现宿主异常时取消其余并抛出该异常。
+delegate 工具随父循环逐个执行工具而天然串行；execute 阶段子代理与父代理共用同一 `BrowserHost`，页面状态共享、可变，不得并行。`runSubAgents` 用于宿主编排扇出，默认并发 3，各子账本平分父剩余额度的 50%（可由 `share` 调整），仅适用于只读或无状态工具；结果逐项返回 `{ status: 'done', output } | { status: 'blocked', reason, detail }`，任一项出现宿主异常时取消其余并抛出该异常。
 
 ### 审计接缝
 
-每个代理分配 `agentId`（父代理由宿主或循环生成），子代理携带 `parentId`。`onModelAttempt`、`onToolCall`、`onContextPrepared` 事件均附带二者，trace 与 `models.json` 可还原为树。子代理阻断计入 `reliability.errors`，格式 `subagent:<name>:<reason>`。
+子代理由 `spawnSubAgent` 分配 `agentId` 并携带 `parentId`；父代理的 `agentId` 由宿主通过 `RunAgentOptions.agentId` 提供，未提供时事件不带这两个字段，保持现有审计结构不变。子代理结束时触发 `onSubAgentFinished` 事件。`onModelAttempt`、`onToolCall`、`onContextPrepared` 事件均附带二者，trace 与 `models.json` 可还原为树。子代理阻断计入 `reliability.errors`，格式 `subagent:<name>:<reason>`。
 
 ### 复核独立性
 
