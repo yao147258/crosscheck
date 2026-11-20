@@ -1,7 +1,11 @@
 import { ConfigSchema } from '@crosscheck/core';
+import { APICallError } from 'ai';
 import { describe, expect, it } from 'vitest';
 import {
+  DEFAULT_CONTEXT_WINDOW,
+  MAX_OUTPUT_TOKENS,
   ModelConfigError,
+  outputTokenLimit,
   parseModelRef,
   resolveRole,
   vendorWarnings,
@@ -39,11 +43,51 @@ const apiKeys = { openai: 'sk-o', anthropic: 'sk-a', qwen: 'sk-q' };
 
 describe('parseModelRef', () => {
   it('只在第一个冒号处切分', () => {
-    expect(parseModelRef('ollama:qwen2.5:7b')).toEqual({ provider: 'ollama', modelId: 'qwen2.5:7b' });
+    expect(parseModelRef('ollama:qwen2.5:7b')).toMatchObject({ provider: 'ollama', modelId: 'qwen2.5:7b' });
   });
 
   it('格式错误时报错', () => {
     expect(() => parseModelRef('gpt')).toThrow(ModelConfigError);
+  });
+
+  it('未写后缀时上下文窗口默认 256K', () => {
+    expect(parseModelRef('jy:deepseek-flash')).toEqual({ provider: 'jy', modelId: 'deepseek-flash', contextWindow: DEFAULT_CONTEXT_WINDOW });
+    expect(DEFAULT_CONTEXT_WINDOW).toBe(256_000);
+  });
+
+  it.each([
+    ['jy:deepseek-flash[1M]', 'deepseek-flash', 1_000_000],
+    ['jy:deepseek-flash[200k]', 'deepseek-flash', 200_000],
+    ['jy:x[1.5M]', 'x', 1_500_000],
+    ['ollama:qwen2.5:7b[32768]', 'qwen2.5:7b', 32_768],
+  ])('%s 解析出上下文窗口并从模型名去掉后缀', (ref, modelId, contextWindow) => {
+    expect(parseModelRef(ref)).toMatchObject({ modelId, contextWindow });
+  });
+
+  it.each(['jy:x[]', 'jy:x[0]', 'jy:x[1G]', 'jy:x[abc]', 'jy:[1M]'])('非法后缀 %s 报错', (ref) => {
+    expect(() => parseModelRef(ref)).toThrow(ModelConfigError);
+  });
+});
+
+describe('outputTokenLimit', () => {
+  it('窗口充足时取 128K 封顶', () => {
+    expect(outputTokenLimit(1_000_000, ['短输入'])).toBe(MAX_OUTPUT_TOKENS);
+    expect(MAX_OUTPUT_TOKENS).toBe(128_000);
+  });
+
+  it('输出上限为窗口减去估算输入', () => {
+    // 3 万个中文字符按每字 1 token 估算
+    const limit = outputTokenLimit(64_000, ['中'.repeat(30_000)]);
+    expect(limit).toBeLessThanOrEqual(64_000 - 30_000);
+    expect(limit).toBeGreaterThan(30_000);
+  });
+
+  it('输入超出窗口时抛出不可重试错误', () => {
+    let error: unknown;
+    try { outputTokenLimit(10_000, ['中'.repeat(20_000)]); } catch (e) { error = e; }
+    expect(APICallError.isInstance(error)).toBe(true);
+    expect((error as APICallError).isRetryable).toBe(false);
+    expect((error as Error).message).toMatch(/上下文窗口/);
   });
 });
 
@@ -59,6 +103,14 @@ describe('resolveRole', () => {
     const c = resolveRole(config, 'executor', { apiKeys, factories });
     expect(c.map((x) => x.ref)).toEqual(['openai:gpt-5.4', 'anthropic:claude-sonnet-4-6']);
     expect(c[0]?.model).toBe('openai/gpt-5.4');
+  });
+
+  it('候选携带上下文窗口，工厂收到去掉后缀的模型名', () => {
+    seen.length = 0;
+    const withWindow = ConfigSchema.parse({ ...config, models: { ...config.models, reviewer: 'qwen:qwen-max[1M]' } });
+    const [candidate] = resolveRole(withWindow, 'reviewer', { apiKeys, factories });
+    expect(candidate).toMatchObject({ ref: 'qwen:qwen-max[1M]', contextWindow: 1_000_000 });
+    expect(seen[0]?.modelId).toBe('qwen-max');
   });
 
   it('密钥从独立的全局密钥集合读取', () => {

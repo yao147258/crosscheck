@@ -6,6 +6,8 @@ import { builtinFactories, type ProviderFactory } from './providers';
 export interface ModelCandidate {
   ref: string;
   model: LanguageModel;
+  /** 上下文窗口 token 数，来自模型引用的 [size] 后缀；缺省按 DEFAULT_CONTEXT_WINDOW */
+  contextWindow?: number;
 }
 
 export interface ResolveOptions {
@@ -19,7 +21,7 @@ export interface ResolveOptions {
 export class MissingModelKeyError extends ModelConfigError {}
 
 function descriptor(ref: string, config: Config) {
-  const { provider, modelId } = parseModelRef(ref);
+  const { provider, modelId, contextWindow } = parseModelRef(ref);
   const custom = config.providers[provider];
   const type = custom?.type;
   if (!type || !(PROVIDER_TYPES as readonly string[]).includes(type)) throw new ModelConfigError(`未知的 provider：${provider}（请在 config.yaml 的 providers 中声明）`);
@@ -27,16 +29,16 @@ function descriptor(ref: string, config: Config) {
   let url: URL;
   try { url = new URL(custom.baseURL); } catch { throw new ModelConfigError(`provider ${provider} 的 baseURL 不合法`); }
   if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) throw new ModelConfigError(`provider ${provider} 的 baseURL 不合法`);
-  return { provider, modelId, custom, type };
+  return { provider, modelId, contextWindow, custom, type };
 }
 
 export function resolveModelRef(ref: string, config: Config, opts: ResolveOptions = {}): ModelCandidate {
   // 结构错误优先于缺 key，不能被 fallback 的跳过策略掩盖。
-  const { provider, modelId, custom, type } = descriptor(ref, config);
+  const { provider, modelId, contextWindow, custom, type } = descriptor(ref, config);
   const apiKey = opts.apiKeys?.[provider];
   if (!apiKey) throw new MissingModelKeyError(`模型 ${ref} 需要在全局配置中设置 apiKey`);
   const factory = opts.factories?.[type] ?? builtinFactories[type];
-  return { ref, model: factory({ name: provider, modelId, apiKey, baseURL: custom.baseURL }) };
+  return { ref, model: factory({ name: provider, modelId, apiKey, baseURL: custom.baseURL }), contextWindow };
 }
 
 /** 角色候选按主、备排列；主模型缺 key 必须报错，仅备用缺 key 可跳过。 */

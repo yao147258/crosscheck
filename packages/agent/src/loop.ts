@@ -1,5 +1,5 @@
 import type { BudgetTracker } from '@crosscheck/core';
-import { callWithFallback, type ModelCandidate, type ResilienceOptions } from '@crosscheck/models';
+import { callWithFallback, outputTokenLimit, type ModelCandidate, type ResilienceOptions } from '@crosscheck/models';
 import { generateText, jsonSchema, tool, type ModelMessage, type ToolSet } from 'ai';
 import { z } from 'zod';
 import { grantTools, type Stage } from './grants';
@@ -106,12 +106,15 @@ export async function runAgent<O>(opts: RunAgentOptions<O>): Promise<AgentResult
   const { granted } = grantTools(stage, opts.tools);
   const toolMap = new Map(granted.map((t) => [t.name, t]));
   const sdkTools = buildSdkTools(granted, opts.outputSchema ?? output);
+  // 工具定义同样占用上下文窗口，参与输出上限的输入估算。
+  const toolSchemas = [...granted.map((t) => z.toJSONSchema(t.input, { io: 'input' })), z.toJSONSchema(opts.outputSchema ?? output, { io: 'input' })];
   const messages: ModelMessage[] = [...opts.messages];
   const abortSignal = signal ?? new AbortController().signal;
   let steps = 0;
   let attempts = 0;
   let retried = false;
   let invalid = 0;
+  let lastInvalidTruncated = false;
   const modelAttempts: ModelAttempt[] = [];
   const info = (): RunInfo => ({ steps, attempts, modelAttempts, retried, messages });
   const blocked = (reason: BlockReason, detail: string): AgentResult<O> => ({ status: 'blocked', reason, detail, ...info() });
@@ -138,7 +141,7 @@ export async function runAgent<O>(opts: RunAgentOptions<O>): Promise<AgentResult
     try {
       const r = await callWithFallback(
         models,
-        async (model, ref) => {
+        async (model, ref, candidate) => {
           // 宿主读取失败不是厂商错误，不得重试/备用后吞掉继续 PASS。
           if (hostFailed) throw hostError;
           const stopped = stop(genSignal);
@@ -156,6 +159,8 @@ export async function runAgent<O>(opts: RunAgentOptions<O>): Promise<AgentResult
           incompleteEvidenceIds = prepared.incompleteEvidenceIds;
           const afterPresentation = stop(genSignal);
           if (afterPresentation) throw Object.assign(new Error(afterPresentation.detail), { name: 'AbortError' });
+          // 输入超出窗口时抛出不可重试错误，不计为真实模型调用。
+          const maxOutputTokens = outputTokenLimit(candidate.contextWindow, [system, prepared.messages, toolSchemas]);
           attempts++;
           roundAttempts++;
           if (roundAttempts > 1) retried = true;
@@ -169,7 +174,7 @@ export async function runAgent<O>(opts: RunAgentOptions<O>): Promise<AgentResult
           };
           let value: Awaited<ReturnType<typeof generateText>>;
           try {
-            value = await generateText({ model, system, messages: prepared.messages, tools: sdkTools, maxRetries: 0, abortSignal: genSignal });
+            value = await generateText({ model, system, messages: prepared.messages, tools: sdkTools, maxOutputTokens, maxRetries: 0, abortSignal: genSignal });
           } catch (error) {
             await notify({ ref, status: 'error', usage: null });
             throw error;
@@ -196,6 +201,8 @@ export async function runAgent<O>(opts: RunAgentOptions<O>): Promise<AgentResult
     // 不接收 SDK 自动错误结果，保证每个调用恰有一条本地结果。
     messages.push(...res.responseMessages.filter((m) => m.role !== 'tool'));
     const calls = res.toolCalls;
+    // 达到 maxOutputTokens 时调用参数可能不完整，即使恰好通过校验也不能采信。
+    const truncated = res.finishReason === 'length';
     const results: Array<{ type: 'tool-result'; toolCallId: string; toolName: string; output: ToolResultOutput }> = [];
     let finished: { value: O } | undefined;
     let reported: string | undefined;
@@ -229,6 +236,7 @@ export async function runAgent<O>(opts: RunAgentOptions<O>): Promise<AgentResult
         if (call.toolName === FINISH_TOOL) {
           const parsed = await output.safeParseAsync(call.input);
           const validation = incompleteEvidenceIds.length ? { ok: false as const, error: `必需证据未完整呈现（truncated 或缺失）：${incompleteEvidenceIds.join(',')}` }
+            : truncated ? { ok: false as const, error: '输出达到 token 上限被截断，结果可能不完整' }
             : parsed.success ? await opts.validateOutput?.(parsed.data) : undefined;
           if (parsed.success && (!validation || validation.ok)) {
             finished = { value: parsed.data };
@@ -291,7 +299,8 @@ export async function runAgent<O>(opts: RunAgentOptions<O>): Promise<AgentResult
       invalidRound = true;
       messages.push({ role: 'user', content: `你必须调用工具：完成时调用 ${FINISH_TOOL} 提交结果，无法继续时调用 ${REPORT_BLOCKED_TOOL}。` });
     }
-    if (invalidRound) invalid++;
-    if (invalid >= maxInvalidOutputs) return blocked('invalid-output', `结果累计 ${invalid} 次不合格`);
+    if (invalidRound && truncated) messages.push({ role: 'user', content: '上一轮输出达到 token 上限被截断，请精简内容后重新提交。' });
+    if (invalidRound) { invalid++; lastInvalidTruncated = truncated; }
+    if (invalid >= maxInvalidOutputs) return blocked('invalid-output', `结果累计 ${invalid} 次不合格${lastInvalidTruncated ? '（最近一次输出达到 token 上限被截断）' : ''}`);
   }
 }

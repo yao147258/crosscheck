@@ -46,7 +46,7 @@ function classify(err: unknown, signal?: AbortSignal): ErrorClass {
 /** 依次尝试候选模型：每个模型指数退避重试，用尽后切换下一个 */
 export async function callWithFallback<T>(
   chain: ModelCandidate[],
-  fn: (model: LanguageModel, ref: string) => Promise<T>,
+  fn: (model: LanguageModel, ref: string, candidate: ModelCandidate) => Promise<T>,
   opts: ResilienceOptions = {},
 ): Promise<{ value: T; ref: string; attempts: number }> {
   const { retries = 3, baseDelayMs = 500, sleep = defaultSleep, signal, onFallback } = opts;
@@ -54,12 +54,13 @@ export async function callWithFallback<T>(
   let attempts = 0;
   let lastErr: unknown;
   for (let c = 0; c < chain.length; c++) {
-    const { ref, model } = chain[c]!;
+    const candidate = chain[c]!;
+    const { ref, model } = candidate;
     for (let i = 0; i <= retries; i++) {
       signal?.throwIfAborted();
       attempts++;
       try {
-        return { value: await fn(model, ref), ref, attempts };
+        return { value: await fn(model, ref, candidate), ref, attempts };
       } catch (err) {
         const cls = classify(err, signal);
         if (cls === 'abort') throw err;
