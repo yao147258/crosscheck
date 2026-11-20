@@ -6,3 +6,4 @@ export * from './context-budget';
 export * from './context-manager';
 export * from './summarizer';
 export * from './cache';
+export * from './subagent';
