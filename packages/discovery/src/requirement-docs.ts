@@ -1,3 +1,4 @@
+import path from 'node:path';
 import { isSafeProjectPath } from './files';
 import type { ProjectLister } from './types';
 
@@ -12,6 +13,11 @@ export type DocDirLister = (dir: string, signal?: AbortSignal) => Promise<string
 export function parseDocEntry(entry: string): { path: string; directory: boolean } {
   const slashed = entry.replaceAll('\\', '/');
   return { path: slashed.split('/').filter((part) => part && part !== '.').join('/'), directory: slashed.endsWith('/') };
+}
+
+/** 绝对路径（含 Windows 盘符与 UNC）：规范化会吞掉前导分隔符，必须在规范化之前识别。 */
+function isAbsoluteEntry(entry: string): boolean {
+  return path.posix.isAbsolute(entry.replaceAll('\\', '/')) || path.win32.isAbsolute(entry) || /^[a-z]:/i.test(entry);
 }
 
 /** 磁盘来源：递归列目录，跳过符号链接、不安全路径与忽略目录；深度到上限后不再下探。 */
@@ -45,6 +51,12 @@ export async function expandRequirementDocs(entries: string[], listDir: DocDirLi
   for (const entry of entries) {
     signal?.throwIfAborted();
     const { path: normalized, directory } = parseDocEntry(entry);
+    if (isAbsoluteEntry(entry)) {
+      // 显式绝对文件原样保留，交给读取器/impact 拒绝；绝对目录直接报不安全。
+      if (directory) throw new Error(`需求文档目录路径不安全：${entry}`);
+      result.add(entry);
+      continue;
+    }
     if (!directory) {
       if (!normalized) throw new Error('需求文档路径无效');
       result.add(normalized);

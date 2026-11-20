@@ -403,3 +403,13 @@ it('两处都没有登记时提示 requirementsDocs 为空并说明笔记小节'
   expect(out.join('\n')).toContain('requirementsDocs 为空');
   expect(out.join('\n')).toContain('需求文档');
 });
+
+it('reqs 显式绝对路径不会被改写成项目内文件，直接按宿主错误拒绝', async () => {
+  const { root, artifacts } = await project(['/docs/需求.md']);
+  const model = scriptedModel([]);
+  const out: string[] = [];
+  expect(await cliMain(['reqs', '--module', 'M', '--project', root], { log: (s) => out.push(s), dependencies: deps(model) })).toBe(3);
+  expect(out.join('\n')).toContain('路径');
+  expect(model.doGenerateCalls).toHaveLength(0);
+  expect(await artifacts.list('requirements')).toEqual([]);
+});

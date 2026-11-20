@@ -76,6 +76,15 @@ describe('expandRequirementDocs', () => {
     await put('docs/a.md'); await put('docs/b.txt');
     expect(await expand(['docs/', 'docs/a.md', 'docs\\a.md', 'docs/b.txt'])).toEqual(['docs/a.md', 'docs/b.txt']);
   });
+  it('显式绝对文件路径原样保留，不被改写成项目相对路径', async () => {
+    await put('docs/a.md');
+    expect(await expand(['/docs/a.md'])).toEqual(['/docs/a.md']);
+    expect(await expand(['docs/b.md', '/docs/a.md', 'docs/b.md', 'C:\\x\\a.md'])).toEqual(['/docs/a.md', 'C:\\x\\a.md', 'docs/b.md']);
+  });
+  it('绝对目录路径报不安全', async () => {
+    await expect(expand(['/docs/'])).rejects.toThrow('不安全');
+    await expect(expand(['C:\\docs\\'])).rejects.toThrow('不安全');
+  });
   it('取消信号中止展开', async () => {
     await put('docs/a.md');
     const controller = new AbortController(); controller.abort();
