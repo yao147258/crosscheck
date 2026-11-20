@@ -13,7 +13,7 @@ interface SynthesisStep {
 export const SYNTHESIS_STEPS: SynthesisStep[] = [
   { files: ['environments.yaml'], facts: ['project', 'command', 'port', 'environment-variable'], hint: '根据启动命令和端口推断本地环境：baseURL、healthcheck、start/stop 命令；reset 不确定时写 null。' },
   { files: ['auth.yaml'], facts: ['environment-variable', 'api'], hint: '登记访问被测系统的角色。无法确定登录方式时只登记一个 anonymous 角色；账号与令牌只能写环境变量名。' },
-  { files: ['api-catalog.yaml', 'pages.yaml'], facts: ['api'], hint: '把发现的接口登记为操作，sources 必须引用事实中的来源；无法得知页面时写空集合。' },
+  { files: ['api-catalog.yaml', 'pages.yaml'], facts: ['api', 'page'], hint: '把发现的接口登记为操作、页面登记为页面，sources 必须引用事实中的来源；无法得知页面时写空集合。' },
   { files: ['data-model.yaml', 'fixtures.yaml'], facts: ['command', 'environment-variable'], hint: '只有能确定只读查询时才登记 queries；夹具只登记事实中出现的重置或造数命令，不确定时写空集合。' },
   { files: ['guardrails.yaml'], facts: [], hint: '按环境 baseURL 的 host:port 生成 allowedHosts，不要放行其他主机。' },
 ];
