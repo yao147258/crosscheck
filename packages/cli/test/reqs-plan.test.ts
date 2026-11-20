@@ -16,6 +16,8 @@ vi.mock('node:fs/promises', { spy: true });
 const roots: string[] = [];
 afterEach(async () => {
   vi.restoreAllMocks();
+  // 模块被 vi.mock(spy) 自动监听时 restoreAllMocks 不会清掉 lstat 的伪实现，需显式重置，避免泄漏到后续用例
+  vi.mocked(fs.lstat).mockReset();
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 const finish = (input: unknown): ScriptStep => ({ toolCalls: [{ name: 'finish', input }] });
@@ -333,4 +335,71 @@ it('plan 真实画像读取错误不被当成画像门禁', async () => {
   expect(await cliMain(['plan', '--module', 'M', '--project', root], { log: (s) => out.push(s), dependencies: deps(model) })).toBe(3);
   expect(out.join('\n')).toContain('工件读取失败');
   expect(model.doGenerateCalls).toHaveLength(0);
+});
+
+const docTwo = '二号文档独有内容\n';
+async function addNestedDoc(root: string) {
+  await mkdir(path.join(root, 'docs', '子'), { recursive: true });
+  await writeFile(path.join(root, 'docs', '子', '二.md'), docTwo);
+}
+const notesWithDocs = '# 笔记\n\n## 需求文档\n\n- `docs/` 需求目录\n';
+
+it('reqs 支持目录写法，递归展开的文档都进入模型', async () => {
+  const { root } = await project(['docs/']);
+  await addNestedDoc(root);
+  const model = scriptedModel([finish([c1, c2])]);
+  expect(await cliMain(['reqs', '--module', 'M', '--project', root], { log: () => {}, dependencies: deps(model) })).toBe(0);
+  const prompt = JSON.stringify(model.doGenerateCalls[0]!.prompt);
+  expect(prompt).toContain('docs/需求.md');
+  expect(prompt).toContain('docs/子/二.md');
+  expect(prompt).toContain('二号文档独有内容');
+});
+
+it('reqs 目录不存在或没有 .md 时退出 2 且不调用模型', async () => {
+  const { root } = await project(['nothing/']);
+  const model = scriptedModel([]);
+  const out: string[] = [];
+  expect(await cliMain(['reqs', '--module', 'M', '--project', root], { log: (s) => out.push(s), dependencies: deps(model) })).toBe(2);
+  expect(out.join('\n')).toContain('没有 .md');
+  expect(model.doGenerateCalls).toHaveLength(0);
+});
+
+it('config 的 requirementsDocs 为空时使用已确认笔记的需求文档小节', async () => {
+  const { root, artifacts } = await project([]);
+  await addNestedDoc(root);
+  await artifacts.writeBytes('notes.md', Buffer.from(notesWithDocs));
+  const approvals = await Approvals.load(artifacts);
+  approvals.approve('notes', 'project', notesWithDocs, '人工');
+  await approvals.save(artifacts);
+  const model = scriptedModel([finish([c1, c2])]);
+  expect(await cliMain(['reqs', '--module', 'M', '--project', root], { log: () => {}, dependencies: deps(model) })).toBe(0);
+  expect(JSON.stringify(model.doGenerateCalls[0]!.prompt)).toContain('docs/子/二.md');
+});
+
+it('笔记未确认时拒绝使用其需求文档小节，提示先审核笔记', async () => {
+  const { root, artifacts } = await project([]);
+  await artifacts.writeBytes('notes.md', Buffer.from(notesWithDocs));
+  const model = scriptedModel([]);
+  const out: string[] = [];
+  expect(await cliMain(['reqs', '--module', 'M', '--project', root], { log: (s) => out.push(s), dependencies: deps(model) })).toBe(2);
+  expect(out.join('\n')).toContain('review notes');
+  expect(model.doGenerateCalls).toHaveLength(0);
+});
+
+it('config 的 requirementsDocs 非空时优先，忽略未确认的笔记小节', async () => {
+  const { root, artifacts } = await project(['docs/需求.md']);
+  await addNestedDoc(root);
+  await artifacts.writeBytes('notes.md', Buffer.from(notesWithDocs));
+  const model = scriptedModel([finish([c1, c2])]);
+  expect(await cliMain(['reqs', '--module', 'M', '--project', root], { log: () => {}, dependencies: deps(model) })).toBe(0);
+  expect(JSON.stringify(model.doGenerateCalls[0]!.prompt)).not.toContain('二号文档独有内容');
+});
+
+it('两处都没有登记时提示 requirementsDocs 为空并说明笔记小节', async () => {
+  const { root, artifacts } = await project([]);
+  await artifacts.writeBytes('notes.md', Buffer.from('# 笔记\n\n## 需求文档\n\n未发现\n'));
+  const out: string[] = [];
+  expect(await cliMain(['reqs', '--module', 'M', '--project', root], { log: (s) => out.push(s), dependencies: deps(scriptedModel([])) })).toBe(2);
+  expect(out.join('\n')).toContain('requirementsDocs 为空');
+  expect(out.join('\n')).toContain('需求文档');
 });

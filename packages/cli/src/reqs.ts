@@ -2,7 +2,8 @@ import { Approvals, ArtifactStore, BudgetTracker, clauseDuplicateKey, mergeDraft
 import { extractRequirements } from '@crosscheck/requirements';
 import type { CliArgs } from './args';
 import { loadModelContext, resolveModels, withInterrupt, type CommandDependencies } from './context';
-import { readRequirementDocuments } from './documents';
+import { createDiskDocLister, createProjectReader, expandRequirementDocs } from '@crosscheck/discovery';
+import { readRequirementDocuments, resolveRequirementEntries } from './documents';
 
 export async function reqsCommand(args: CliArgs, log: (s: string) => void, deps: CommandDependencies = {}, signal?: AbortSignal): Promise<number> {
   return withInterrupt(signal, async (sig) => {
@@ -11,8 +12,18 @@ export async function reqsCommand(args: CliArgs, log: (s: string) => void, deps:
     const context = await loadModelContext(artifacts, deps);
     const { config, redactor } = context;
     sig.throwIfAborted();
-    if (config.requirementsDocs.length === 0) { log('config.yaml 的 requirementsDocs 为空，请先登记需求文档'); return 2; }
-    const documents = await readRequirementDocuments(args.project, config.requirementsDocs, sig);
+    const resolved = await resolveRequirementEntries(artifacts, config.requirementsDocs);
+    if (!resolved.ok) { log(resolved.message); return 2; }
+    let files: string[];
+    try {
+      files = await expandRequirementDocs(resolved.entries, createDiskDocLister(createProjectReader(args.project), (line) => log(redactor.text(line))), sig);
+    } catch (error) {
+      sig.throwIfAborted();
+      log(redactor.text(error instanceof Error ? error.message : '需求文档展开失败'));
+      return 2;
+    }
+    log(`需求文档来源：${resolved.from === 'config' ? 'config.yaml' : '已确认笔记'}，共 ${files.length} 个文件`);
+    const documents = await readRequirementDocuments(args.project, files, sig);
     const approvals = await Approvals.load(artifacts);
     const { approved } = partitionClauses(await artifacts.loadClauses(module), approvals);
     sig.throwIfAborted();
