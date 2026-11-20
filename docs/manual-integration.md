@@ -105,6 +105,8 @@ budget:
 requirementsDocs: []
 ```
 
+**需求文档登记：** `requirementsDocs` 可写文件，也可写以 `/` 结尾的目录（如 `docs/prd/`）。目录会递归展开其中的 `.md` 文件（不区分大小写），最多下探 8 层子目录、共 100 个文件，超限报错而不是截断；符号链接、凭证文件以及 `node_modules`、`.git`、`.crosscheck` 会被跳过；不支持 glob，显式写出的文件不限扩展名。`config.yaml` 的 `requirementsDocs` 为空时，`reqs` 与 `impact` 改读 `notes.md` 的“## 需求文档”小节（每行 ``- `路径` 说明``，路径在反引号内），此时笔记必须已通过 `review notes` 确认，`reqs` 才会使用它。`init` 会让模型在笔记里写出这一小节作为草稿，由你审核后生效；程序不会改写 `config.yaml`。`config.yaml` 中的 `requirementsDocs` 非空时始终优先。
+
 模型 ref 可加 `[size]` 后缀声明上下文窗口，如 `jy:deepseek-flash[1M]`、`custom:x[200K]`（K/M 按 1000 进位），不写默认 256K；后缀不会发给厂商。每次请求的 maxOutputTokens 取“窗口 − 估算输入”，最高 128K；输入超出窗口时不发请求直接报错。
 
 图片配置键是**完整模型 ref**（provider:model，含 `[size]` 后缀），不是角色或裸型号；备用模型也要单独声明。每次实际候选重新装配附件，缺省 `images:false`；截图路径/ID 不代表模型看过图，无图候选不能对要求 screenshot 的预期伪造 PASS/FAIL。只为确认支持图片的型号配置 true，不是给任意型号自动增加视觉能力。
