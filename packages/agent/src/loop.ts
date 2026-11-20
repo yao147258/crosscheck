@@ -1,10 +1,14 @@
-import type { BudgetTracker } from '@crosscheck/core';
-import { callWithFallback, outputTokenLimit, reportProgress, summarizeInput, type ModelCandidate, type ResilienceOptions } from '@crosscheck/models';
-import { generateText, jsonSchema, tool, type ModelMessage, type ToolSet } from 'ai';
+import type { BudgetLimits, BudgetTracker } from '@crosscheck/core';
+import { callWithFallback, outputTokenLimitForEstimate, reportProgress, summarizeInput, type ModelCandidate, type ResilienceOptions } from '@crosscheck/models';
+import { generateText, jsonSchema, tool, type LanguageModelUsage, type ModelMessage, type ToolSet } from 'ai';
 import { z } from 'zod';
+import { applyCacheBreakpoints } from './cache';
 import { grantTools, type Stage } from './grants';
 import { defineTool, type AgentTool } from './tool';
-import { prepareContext, type ContextPolicy, type EvidencePresenter, type EvidencePresentedEvent } from './context';
+import { type ContextPolicy, type EvidencePresenter, type EvidencePresentedEvent } from './context';
+import { ContextManager, type ContextReport, type PreparedContext } from './context-manager';
+import { createModelSummarizer } from './summarizer';
+import { selectSubAgentTools, spawnSubAgent, SUBAGENT_NOTICE, type ParentContext, type SubAgentFinishedEvent } from './subagent';
 
 export const FINISH_TOOL = 'finish';
 export const REPORT_BLOCKED_TOOL = 'report_blocked';
@@ -20,7 +24,20 @@ export interface ToolCallEvent {
   ok: boolean;
   output?: unknown;
   error?: string;
+  agentId?: string;
+  parentId?: string;
 }
+
+export type ContextPreparedEvent = ContextReport & { agentId?: string; parentId?: string };
+
+export interface DelegateTemplate {
+  name: string;
+  description: string;
+  /** 只能从本阶段已授予的工具中选 */
+  tools: readonly string[];
+  cap?: Partial<BudgetLimits>;
+}
+const DelegateInput = z.object({ task: z.string().min(1), context: z.unknown().optional() });
 
 export interface RunAgentOptions<O> {
   stage: Stage;
@@ -46,15 +63,29 @@ export interface RunAgentOptions<O> {
   /** 可提前停止，但不能将累计额度放宽到三次以上。 */
   maxInvalidOutputs?: number;
   resilience?: ResilienceOptions;
-  onUsage?: (ref: string, usage: { inputTokens?: number; outputTokens?: number }) => void | Promise<void>;
+  onUsage?: (ref: string, usage: AttemptUsage) => void | Promise<void>;
   /** 每次真实 provider 调用终结后立即 await；宿主异常原样传播，不触发 provider 重试。 */
   onModelAttempt?: (attempt: ModelAttempt) => void | Promise<void>;
   /** 内存审计通知，未经清洗不能直接持久化为轨迹；异常传播，不允许继续 PASS。 */
   onToolCall?: (e: ToolCallEvent) => void | Promise<void>;
+  /** 省略时按 stage 构造；摘要权限由阶段决定 */
+  contextManager?: ContextManager;
+  /** 每个真实候选装配后 await；异常按宿主故障传播。 */
+  onContextPrepared?: (event: ContextPreparedEvent) => void | Promise<void>;
+  /** 宿主提供时所有事件附带；子代理由 spawnSubAgent 设置 */
+  agentId?: string;
+  parentId?: string;
+  /** 模型可调用的子代理委派工具；子代理中不可配置。 */
+  delegates?: DelegateTemplate[];
+  /** 核验子代理回传的证据 ID 真实存在 */
+  verifyEvidenceIds?: (ids: readonly string[]) => Promise<readonly string[]>;
+  onSubAgentFinished?: (event: SubAgentFinishedEvent) => void | Promise<void>;
 }
 
-export type ModelAttempt = { ref: string; status: 'error'; usage: null }
-  | { ref: string; status: 'success'; usage: { inputTokens?: number; outputTokens?: number } };
+export type AttemptUsage = { inputTokens?: number; outputTokens?: number; cacheReadTokens?: number; cacheWriteTokens?: number };
+/** purpose 仅在压缩摘要调用时出现；agentId/parentId 仅在宿主提供 agentId 或子代理中出现。 */
+export type ModelAttempt = ({ ref: string; status: 'error'; usage: null } | { ref: string; status: 'success'; usage: AttemptUsage })
+  & { purpose?: 'compact'; agentId?: string; parentId?: string };
 
 interface RunInfo {
   steps: number;
@@ -80,9 +111,10 @@ function schemaOf(s: z.ZodType) {
   return jsonSchema(z.toJSONSchema(s, { io: 'input' }) as Parameters<typeof jsonSchema>[0]);
 }
 
-function buildSdkTools(granted: AgentTool[], output: z.ZodType): ToolSet {
+function buildSdkTools(granted: AgentTool[], output: z.ZodType, delegates: readonly DelegateTemplate[]): ToolSet {
   const set: ToolSet = Object.create(null);
   for (const t of granted) set[t.name] = tool({ description: t.description, inputSchema: schemaOf(t.input) });
+  for (const d of delegates) set[d.name] = tool({ description: d.description, inputSchema: schemaOf(DelegateInput) });
   set[FINISH_TOOL] = tool({ description: '提交最终结果。参数必须完全符合给定结构。', inputSchema: schemaOf(output) });
   set[REPORT_BLOCKED_TOOL] = tool({
     description: '遇到无法自行解决的障碍时调用并说明原因。不要尝试绕过障碍。',
@@ -93,7 +125,7 @@ function buildSdkTools(granted: AgentTool[], output: z.ZodType): ToolSet {
 
 /** 自研代理循环：一轮一次生成；统一补齐调用结果，再检查终结条件。 */
 export async function runAgent<O>(opts: RunAgentOptions<O>): Promise<AgentResult<O>> {
-  const { stage, models, system, output, budget, signal, resilience, onUsage, onToolCall } = opts;
+  const { stage, models, system, output, budget, signal, resilience, onUsage } = opts;
   const maxInvalidOutputs = Math.min(opts.maxInvalidOutputs ?? 3, 3);
   if (!Number.isInteger(maxInvalidOutputs) || maxInvalidOutputs < 1) throw new Error('invalid 额度必须为 1 到 3');
   const names = new Set<string>();
@@ -106,17 +138,60 @@ export async function runAgent<O>(opts: RunAgentOptions<O>): Promise<AgentResult
   }
   const { granted } = grantTools(stage, opts.tools);
   const toolMap = new Map(granted.map((t) => [t.name, t]));
-  const sdkTools = buildSdkTools(granted, opts.outputSchema ?? output);
-  // 工具定义同样占用上下文窗口，参与输出上限的输入估算。
-  const toolSchemas = [...granted.map((t) => z.toJSONSchema(t.input, { io: 'input' })), z.toJSONSchema(opts.outputSchema ?? output, { io: 'input' })];
-  const messages: ModelMessage[] = [...opts.messages];
+  // 提前定义：委派父上下文需要持有同一个中断信号。
   const abortSignal = signal ?? new AbortController().signal;
+  const delegateList = opts.delegates ?? [];
+  if (delegateList.length && opts.parentId) throw new Error('子代理不能再派生子代理');
+  const parent: ParentContext = {
+    stage, models, tools: granted, budget, signal: abortSignal, agentId: opts.agentId ?? 'root', resilience,
+    evidencePresenter: opts.evidencePresenter, verifyEvidenceIds: opts.verifyEvidenceIds,
+    onModelAttempt: opts.onModelAttempt, onToolCall: opts.onToolCall, onContextPrepared: opts.onContextPrepared, onSubAgentFinished: opts.onSubAgentFinished,
+  };
+  const delegates = new Map<string, DelegateTemplate>();
+  for (const d of delegateList) {
+    defineTool({ name: d.name, category: 'profile', description: d.description, input: DelegateInput, execute: async () => null });
+    if (names.has(d.name) || d.name === FINISH_TOOL || d.name === REPORT_BLOCKED_TOOL) throw new Error(`工具名重复：${d.name}`);
+    names.add(d.name);
+    // 越权在任何模型调用前拒绝。
+    selectSubAgentTools(parent, d);
+    delegates.set(d.name, d);
+  }
+  const sdkTools = buildSdkTools(granted, opts.outputSchema ?? output, delegateList);
+  // 工具定义同样占用上下文窗口，参与输出上限的输入估算。
+  const toolSchemas = [...granted.map((t) => z.toJSONSchema(t.input, { io: 'input' })), ...delegateList.map(() => z.toJSONSchema(DelegateInput, { io: 'input' })), z.toJSONSchema(opts.outputSchema ?? output, { io: 'input' })];
+  const messages: ModelMessage[] = [...opts.messages];
   let steps = 0;
   let attempts = 0;
   let retried = false;
   let invalid = 0;
   let lastInvalidTruncated = false;
   const modelAttempts: ModelAttempt[] = [];
+  const tag = opts.agentId ? { agentId: opts.agentId, ...(opts.parentId ? { parentId: opts.parentId } : {}) } : {};
+  const onToolCall = opts.onToolCall && ((e: ToolCallEvent) => opts.onToolCall!({ ...e, ...tag }));
+  const usageOf = (u: LanguageModelUsage): AttemptUsage => ({
+    inputTokens: u.inputTokens, outputTokens: u.outputTokens,
+    ...(u.inputTokenDetails?.cacheReadTokens !== undefined ? { cacheReadTokens: u.inputTokenDetails.cacheReadTokens } : {}),
+    ...(u.inputTokenDetails?.cacheWriteTokens !== undefined ? { cacheWriteTokens: u.inputTokenDetails.cacheWriteTokens } : {}),
+  });
+  // 宿主故障状态需被摘要审计（发生在 manager.prepare 内）共享，故提升到循环外，每轮开始时重置。
+  let hostError: unknown;
+  let hostFailed = false;
+  const record = async (attempt: ModelAttempt) => {
+    const tagged = { ...attempt, ...tag } as ModelAttempt;
+    modelAttempts.push(tagged);
+    try { await opts.onModelAttempt?.(tagged); }
+    catch (error) {
+      hostError = error; hostFailed = true;
+      throw Object.assign(new Error('宿主模型审计失败'), { name: 'AbortError' });
+    }
+  };
+  const manager = opts.contextManager ?? new ContextManager({
+    stage, policy: opts.contextPolicy, presenter: opts.evidencePresenter, requiredEvidenceIds: opts.requiredEvidenceIds,
+    // 摘要调用也是真实模型调用：计入预算、attempts 与审计。
+    summarize: createModelSummarizer({ budget, onAttempt: async attempt => { attempts++; await record(attempt); } }),
+  });
+  // 摘要权限按管理器自身阶段判定；阶段不一致会让判定阶段借用 plan/extract 的摘要权限，须在模型调用前拒绝。
+  if (manager.stage !== stage) throw new Error(`注入的 contextManager 阶段（${manager.stage}）与 runAgent 的 stage（${stage}）不一致`);
   const info = (): RunInfo => ({ steps, attempts, modelAttempts, retried, messages });
   const blocked = (reason: BlockReason, detail: string): AgentResult<O> => ({ status: 'blocked', reason, detail, ...info() });
   // 面向用户的执行提示，按阶段加前缀，便于区分并行的多个代理。
@@ -139,8 +214,9 @@ export async function runAgent<O>(opts: RunAgentOptions<O>): Promise<AgentResult
     const genSignal = boundedSignal();
     let roundAttempts = 0;
     let incompleteEvidenceIds: readonly string[] = [];
-    let hostError: unknown;
-    let hostFailed = false;
+    // 原为每轮新建的局部状态，提升后按轮重置以保持语义。
+    hostError = undefined;
+    hostFailed = false;
     try {
       const r = await callWithFallback(
         models,
@@ -149,11 +225,14 @@ export async function runAgent<O>(opts: RunAgentOptions<O>): Promise<AgentResult
           if (hostFailed) throw hostError;
           const stopped = stop(genSignal);
           if (stopped) throw Object.assign(new Error(stopped.detail), { name: 'AbortError' });
-          let prepared: Awaited<ReturnType<typeof prepareContext>>;
+          let prepared: PreparedContext;
           try {
-            prepared = await prepareContext(messages, { ...opts.contextPolicy, ref, signal: genSignal, presenter: opts.evidencePresenter, requiredEvidenceIds: opts.requiredEvidenceIds });
+            prepared = await manager.prepare(messages, { candidate, system, toolSchemas, signal: genSignal });
             await opts.onEvidencePresented?.({ ref, evidence: prepared.presentedEvidence });
+            await opts.onContextPrepared?.({ ...prepared.report, ...tag });
           } catch (error) {
+            // 摘要审计回调失败时已登记宿主故障，保留其原错误。
+            if (hostFailed) throw error;
             // 只识别明确取消来源；同时abort的真实磁盘/verify错误仍为宿主原错。
             if (genSignal.aborted && (error === genSignal.reason || error instanceof Error && error.name === 'AbortError')) throw error;
             hostError = error; hostFailed = true;
@@ -163,28 +242,22 @@ export async function runAgent<O>(opts: RunAgentOptions<O>): Promise<AgentResult
           const afterPresentation = stop(genSignal);
           if (afterPresentation) throw Object.assign(new Error(afterPresentation.detail), { name: 'AbortError' });
           // 输入超出窗口时抛出不可重试错误，不计为真实模型调用。
-          const maxOutputTokens = outputTokenLimit(candidate.contextWindow, [system, prepared.messages, toolSchemas]);
+          const maxOutputTokens = outputTokenLimitForEstimate(candidate.contextWindow, prepared.estimatedInputTokens);
           attempts++;
           roundAttempts++;
           if (roundAttempts > 1) retried = true;
-          const notify = async (attempt: ModelAttempt) => {
-            modelAttempts.push(attempt);
-            try { await opts.onModelAttempt?.(attempt); }
-            catch (error) {
-              hostError = error; hostFailed = true;
-              throw Object.assign(new Error('宿主模型审计失败'), { name: 'AbortError' });
-            }
-          };
+          const request = applyCacheBreakpoints(system, prepared.messages, prepared.historyLength, candidate.providerType);
           let value: Awaited<ReturnType<typeof generateText>>;
           progress(`第 ${steps + 1} 轮：请求模型 ${ref} 思考下一步`);
           try {
-            value = await generateText({ model, system, messages: prepared.messages, tools: sdkTools, maxOutputTokens, maxRetries: 0, abortSignal: genSignal });
+            value = await generateText({ model, system: request.system, messages: request.messages, tools: sdkTools, maxOutputTokens, maxRetries: 0, abortSignal: genSignal });
           } catch (error) {
-            await notify({ ref, status: 'error', usage: null });
+            await record({ ref, status: 'error', usage: null });
             throw error;
           }
+          manager.observe(ref, prepared.estimatedInputTokens, value.usage.inputTokens);
           // 回调位于 provider catch 之外，不能把宿主失败计成额外模型调用。
-          await notify({ ref, status: 'success', usage: { inputTokens: value.usage.inputTokens, outputTokens: value.usage.outputTokens } });
+          await record({ ref, status: 'success', usage: usageOf(value.usage) });
           return value;
         },
         { ...resilience, signal: genSignal },
@@ -216,7 +289,7 @@ export async function runAgent<O>(opts: RunAgentOptions<O>): Promise<AgentResult
     const finishMustBeAlone = !hasReportBlocked && calls.some((c) => c.toolName === FINISH_TOOL) && calls.length > 1;
 
     try {
-      await onUsage?.(ref, { inputTokens: res.usage.inputTokens, outputTokens: res.usage.outputTokens });
+      await onUsage?.(ref, usageOf(res.usage));
       terminal ??= stop(genSignal);
       for (const call of calls) {
         const reply = (out: ToolResultOutput) => results.push({ type: 'tool-result', toolCallId: call.toolCallId, toolName: call.toolName, output: out });
@@ -262,6 +335,25 @@ export async function runAgent<O>(opts: RunAgentOptions<O>): Promise<AgentResult
           reply({ type: 'json', value: '已记录' });
           progress(`上报障碍：${reported.slice(0, 80)}`);
           await onToolCall?.({ name: REPORT_BLOCKED_TOOL, input: call.input, ok: true, output: reported });
+          continue;
+        }
+        const delegate = delegates.get(call.toolName);
+        if (delegate) {
+          const parsed = DelegateInput.safeParse(call.input);
+          if (!parsed.success) { await fail(`工具 ${delegate.name} 的输入不合法：\n${z.prettifyError(parsed.error)}`); continue; }
+          terminal ??= stop();
+          if (terminal) { await fail(`未执行：${terminal.detail}`); continue; }
+          // 宿主异常不转为工具错误，原样上抛；finally 会为本轮剩余调用补齐结果。
+          const sub = await spawnSubAgent({ ...parent, signal: boundedSignal() }, { name: delegate.name, task: parsed.data.task, context: parsed.data.context, tools: delegate.tools, cap: delegate.cap });
+          terminal ??= stop();
+          if (sub.status === 'blocked') { await fail(`子代理 ${delegate.name} 未完成（${sub.reason}）：${sub.detail}`); continue; }
+          // notice 放在输出展开之后，子代理输出中的同名键不能覆盖"非实测证据"标记。
+          const out = {
+            ...(toJsonValue(sub.output) as object), notice: SUBAGENT_NOTICE, evidenceIds: sub.evidenceIds,
+            ...(sub.droppedEvidenceIds.length ? { dropped: `[已丢弃无效证据ID: ${sub.droppedEvidenceIds.join(',')}]` } : {}),
+          };
+          reply({ type: 'json', value: out });
+          await onToolCall?.({ name: delegate.name, input: parsed.data, ok: true, output: out });
           continue;
         }
         const t = toolMap.get(call.toolName);

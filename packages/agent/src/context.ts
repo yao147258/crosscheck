@@ -63,6 +63,51 @@ function attachmentIds(message: ModelMessage): string[] {
   return end < 0 ? [] : text.slice(PREFIX.length, end).split(',').filter(Boolean);
 }
 
+export const SUMMARY_MARKER = '[上下文摘要，非实测证据]';
+const SUMMARY_EVIDENCE = /^\[证据 ([^\]]*)\]$/m;
+
+/** 摘要消息带标记与证据行，被摘要区间的证据 ID 不会丢失。 */
+export function summaryMessage(summary: string, evidenceIds: readonly string[]): ModelMessage {
+  return { role: 'user', content: `${SUMMARY_MARKER}\n[证据 ${evidenceIds.join(',')}]\n${summary}` };
+}
+
+function summaryIds(message: ModelMessage): string[] {
+  if (message.role !== 'user' || typeof message.content !== 'string' || !message.content.startsWith(SUMMARY_MARKER)) return [];
+  return SUMMARY_EVIDENCE.exec(message.content)?.[1]?.split(',').filter(Boolean) ?? [];
+}
+
+/** L0：所有旧宿主附件降为 ID 占位，再按候选重读；旧图片和正文不能绕过累计限额或泄漏到无图 fallback。 */
+export function demoteAttachments(messages: ModelMessage[]): ModelMessage[] {
+  return messages.map((message): ModelMessage => {
+    const ids = attachmentIds(message);
+    return ids.length ? { role: 'user', content: `${PREFIX}${ids.join(',')}]\n[compressed; truncated]` } : message;
+  });
+}
+
+/** 历史中引用的全部证据 ID：附件占位、工具结果约定字段与摘要证据行。 */
+export function collectHistoryEvidenceIds(messages: ModelMessage[]): string[] {
+  const ids = new Set<string>();
+  for (const message of messages) {
+    attachmentIds(message).forEach(id => ids.add(id));
+    summaryIds(message).forEach(id => ids.add(id));
+    if (message.role === 'tool') collectEvidenceIds(message.content).forEach(id => ids.add(id));
+  }
+  return [...ids];
+}
+
+/** L2：最近 keep 轮之外的工具结果只保留调用身份与证据 ID；调用对仍成对存在。 */
+export function stripToolResults(messages: ModelMessage[], keep: number): ModelMessage[] {
+  if (!Number.isSafeInteger(keep) || keep < 1) throw new Error('必须保留至少一轮完整调用对');
+  const toolIndexes = messages.flatMap((message, i) => message.role === 'tool' ? [i] : []);
+  const cut = toolIndexes.length > keep ? toolIndexes[toolIndexes.length - keep]! : -1;
+  return messages.map((message, index): ModelMessage => {
+    if (message.role !== 'tool' || index >= cut) return message;
+    return { ...message, content: message.content.map(part => part.type !== 'tool-result' ? part : {
+      ...part, output: { type: 'json' as const, value: { stripped: true, tool: part.toolName, ok: part.output.type !== 'error-text', evidenceIds: collectEvidenceIds(part.output) } },
+    }) };
+  });
+}
+
 /** 无模型摘要，只保留截断原文预览和全部 ID；绝不修改系统、条款或最近完整调用对。 */
 export function compressContext(messages: ModelMessage[], policy: ContextPolicy = {}) {
   const maxToolChars = policy.maxToolChars ?? 8000;
@@ -78,6 +123,7 @@ export function compressContext(messages: ModelMessage[], policy: ContextPolicy 
   const result = messages.map((message, index): ModelMessage => {
     const attachment = attachmentIds(message);
     attachment.forEach(id => ids.add(id));
+    summaryIds(message).forEach(id => ids.add(id));
     if (message.role === 'tool') {
       const evidence = collectEvidenceIds(message.content);
       evidence.forEach(id => ids.add(id));
@@ -112,17 +158,17 @@ export interface PrepareContextOptions extends ContextPolicy {
   requiredEvidenceIds?: readonly string[];
 }
 
-/** 每个真实候选（含重试/备用）重新从宿主物化，不复用候选附件，不附工具/执行器审计结论。 */
-export async function prepareContext(messages: ModelMessage[], options: PrepareContextOptions) {
-  options.signal.throwIfAborted();
-  // 所有旧宿主附件先降为 ID，再按本候选重读；旧图片和正文不能绕过累计限额或泄漏到无图 fallback。
-  const history = messages.map((message): ModelMessage => {
-    const ids = attachmentIds(message);
-    return ids.length ? { role: 'user', content: `${PREFIX}${ids.join(',')}]\n[compressed; truncated]` } : message;
-  });
-  const compressed = compressContext(history, options);
-  const required = options.requiredEvidenceIds ?? compressed.evidenceIds;
-  const evidenceIds = [...new Set([...required, ...compressed.evidenceIds])];
+export interface MaterializedEvidence {
+  evidenceIds: string[];
+  incompleteEvidenceIds: string[];
+  presentedEvidence: EvidencePresentation[];
+  attachments: ModelMessage[];
+}
+
+/** 每个真实候选重新从宿主物化，不复用候选附件，不附工具/执行器审计结论。 */
+export async function materializeEvidence(ids: readonly string[], options: PrepareContextOptions): Promise<MaterializedEvidence> {
+  const required = options.requiredEvidenceIds ?? ids;
+  const evidenceIds = [...new Set([...required, ...ids])];
   const maxChars = options.maxAttachmentChars ?? 64000;
   boundedText('', maxChars);
   const maxBytes = options.maxAttachmentBytes ?? 8 * 1024 * 1024;
@@ -168,5 +214,14 @@ export async function prepareContext(messages: ModelMessage[], options: PrepareC
   // 即使上限小到放不下正文，也明确告知缺失，不能仅凭 ID 允许通过。
   const incompleteEvidenceIds = required.filter(id => incomplete.has(id));
   if (incomplete.size) attachments.push({ role: 'user', content: `[宿主证据不完整 truncated] ${[...incomplete].join(',')}；不得将未完整呈现的内容作为通过依据。` });
-  return { ...compressed, evidenceIds, incompleteEvidenceIds, presentedEvidence, messages: [...compressed.messages, ...attachments] };
+  return { evidenceIds, incompleteEvidenceIds, presentedEvidence, attachments };
+}
+
+/** 每个真实候选（含重试/备用）重新从宿主物化，不复用候选附件，不附工具/执行器审计结论。 */
+export async function prepareContext(messages: ModelMessage[], options: PrepareContextOptions) {
+  options.signal.throwIfAborted();
+  const compressed = compressContext(demoteAttachments(messages), options);
+  const evidence = await materializeEvidence(compressed.evidenceIds, options);
+  return { ...compressed, evidenceIds: evidence.evidenceIds, incompleteEvidenceIds: evidence.incompleteEvidenceIds,
+    presentedEvidence: evidence.presentedEvidence, messages: [...compressed.messages, ...evidence.attachments] };
 }

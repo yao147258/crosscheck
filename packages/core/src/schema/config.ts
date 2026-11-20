@@ -51,7 +51,13 @@ export const ConfigSchema = z.object({
   budget: z.object({ perCase: BudgetLimitsSchema.prefault({}) }).prefault({}),
   /** 每百万 token 单价，键为模型引用 */
   pricing: z
-    .record(ModelRefSchema, z.object({ inputPerMTok: z.number().nonnegative(), outputPerMTok: z.number().nonnegative() }))
+    .record(ModelRefSchema, z.object({
+      inputPerMTok: z.number().nonnegative(),
+      outputPerMTok: z.number().nonnegative(),
+      /** 缓存读、写单价；未配置时按 inputPerMTok 计费 */
+      cacheReadPerMTok: z.number().nonnegative().optional(),
+      cacheWritePerMTok: z.number().nonnegative().optional(),
+    }))
     .prefault({}),
   requirementsDocs: z.array(z.string()).prefault([]),
   defaultEnvironment: z.string().optional(),
@@ -84,7 +90,11 @@ export function publicModelConfig(config: UserModelConfig) {
       type: provider.type, baseURL: provider.baseURL,
     }])),
     capabilities: Object.fromEntries(Object.entries(config.capabilities).map(([ref, capability]) => [ref, { images: capability.images }])),
-    pricing: Object.fromEntries(Object.entries(config.pricing).map(([ref, price]) => [ref, { inputPerMTok: price.inputPerMTok, outputPerMTok: price.outputPerMTok }])),
+    pricing: Object.fromEntries(Object.entries(config.pricing).map(([ref, price]) => [ref, {
+      inputPerMTok: price.inputPerMTok, outputPerMTok: price.outputPerMTok,
+      ...(price.cacheReadPerMTok !== undefined ? { cacheReadPerMTok: price.cacheReadPerMTok } : {}),
+      ...(price.cacheWritePerMTok !== undefined ? { cacheWritePerMTok: price.cacheWritePerMTok } : {}),
+    }])),
   };
 }
 
