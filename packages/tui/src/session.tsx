@@ -38,6 +38,8 @@ const ACTIVITY_LINES = 6;
 // SGR 鼠标上报序列（ink 已去掉开头的 ESC），按钮码 64/65 为滚轮上/下，4/8/16 位为修饰键。
 const MOUSE = /^\[<(\d+);\d+;\d+[Mm]$/;
 const WHEEL_STEP = 3;
+// 滚动条只画滑块不画轨道；两端用半截粗线收窄，呈圆角效果。
+const thumbChar = (index: number, length: number) => length === 1 ? '┃' : index === 0 ? '╻' : index === length - 1 ? '╹' : '┃';
 
 export function SessionApp({ options }: { options: RunSessionOptions }) {
   const { exit } = useApp();
@@ -68,8 +70,10 @@ export function SessionApp({ options }: { options: RunSessionOptions }) {
   const hintItems = busy ? [] : matchCommands(input);
   const hintHeight = hintItems.length;
   const viewport = Math.min(height || Math.max(0, rows - inputHeight - hintHeight), Math.max(0, rows - inputHeight - hintHeight));
-  // 不写终端最后一列：Windows 控制台写满末行最后一列会立即换行并整屏上滚，导致光标错位。
+  // 输入框与提示区不写终端最后一列：Windows 控制台写满末行最后一列会立即换行并整屏上滚，导致光标错位。
+  // 消息视口不含末行，可占满整宽，滚动条贴最右列。
   const width = Math.max(1, columns - 1);
+  const fullWidth = Math.max(1, columns);
   // 向上翻看的行数，0 表示贴底跟随最新内容。
   const [scrollUp, setScrollUp] = useState(0);
   const maxScroll = Math.max(0, height - viewport);
@@ -160,8 +164,9 @@ export function SessionApp({ options }: { options: RunSessionOptions }) {
     const text = safeText(input);
     const textWidth = [...text].reduce((sum, ch) => sum + ((ch.codePointAt(0) ?? 0) > 0xFF ? 2 : 1), 0);
     const x = Math.min(2 + textWidth, Math.max(0, width - 1));
-    // 输入文本行自输出顶部的行号 = 消息视口高度 + 顶边框。
-    const y = viewport + (inputHeight >= 3 ? 1 : 0);
+    // Ink 仅在末行有内容、输出不以换行结尾时需要补偿一行。
+    const cursorOffset = viewport + inputHeight + hintHeight >= rows ? 1 : 0;
+    const y = viewport + (inputHeight >= 3 ? 1 : 0) + cursorOffset;
     cursor.setCursorPosition({ x, y });
   }
   useInput((value, key) => {
@@ -221,9 +226,9 @@ export function SessionApp({ options }: { options: RunSessionOptions }) {
   // 滚动条：按可视比例计算滑块长度，按已翻看位置计算滑块起点。
   const thumb = maxScroll > 0 ? Math.max(1, Math.round(viewport * viewport / height)) : 0;
   const thumbStart = maxScroll > 0 ? Math.round((maxScroll - offset) / maxScroll * (viewport - thumb)) : 0;
-  return <Box flexDirection="column" height={Math.max(1, rows)} width={width}>
+  return <Box flexDirection="column" height={Math.max(1, rows)} width={fullWidth}>
     <Box height={viewport} overflow="hidden" flexShrink={0}>
-      <Box ref={content} position="absolute" top={-(maxScroll - offset)} width={Math.max(1, width - 1)} flexDirection="column">
+      <Box ref={content} position="absolute" top={-(maxScroll - offset)} width={Math.max(1, fullWidth - 2)} flexDirection="column">
         {columns >= 59 && <Text color="cyan">{banner}</Text>}
         <Text bold>Crosscheck 交互会话{options.info ? ` · v${safeText(options.info.version)}` : ''}</Text>
         {options.info && (['extractor', 'planner', 'executor', 'reviewer'] as const).map(role => <Text key={role}>{role}：{safeText(options.info?.models?.[role] ?? '未配置')}</Text>)}
@@ -232,12 +237,12 @@ export function SessionApp({ options }: { options: RunSessionOptions }) {
           : <Text key={i}>{safeText(m.content)}</Text>)}
         {busy && activity.map((line, i) => <Text key={`activity-${i}`} color="gray" wrap="truncate-end">  {safeText(line)}</Text>)}
       </Box>
-      {thumb > 0 && <Box position="absolute" left={width - 1} flexDirection="column">
-        {Array.from({ length: viewport }, (_, i) => <Text key={i} color="gray">{i >= thumbStart && i < thumbStart + thumb ? '█' : '│'}</Text>)}
+      {thumb > 0 && <Box position="absolute" left={fullWidth - 1} top={thumbStart} flexDirection="column">
+        {Array.from({ length: thumb }, (_, i) => <Text key={i} color="gray">{thumbChar(i, thumb)}</Text>)}
       </Box>}
     </Box>
-    <Box borderStyle="single" borderColor="white" borderLeft={false} borderRight={false} borderTop={inputHeight >= 3} borderBottom={inputHeight >= 2} flexShrink={0}><Text wrap="truncate-start">{busy ? `${SPINNER[tick % SPINNER.length]} 执行中 ${Math.max(0, Math.floor((Date.now() - startedAt) / 1000))}s，Ctrl+C 中断并等待清理` : `> ${safeText(input)}`}</Text></Box>
-    {hintHeight > 0 && <Box flexDirection="column" flexShrink={0}>
+    <Box width={width} borderStyle="single" borderColor="white" borderLeft={false} borderRight={false} borderTop={inputHeight >= 3} borderBottom={inputHeight >= 2} flexShrink={0}><Text wrap="truncate-start">{busy ? `${SPINNER[tick % SPINNER.length]} 执行中 ${Math.max(0, Math.floor((Date.now() - startedAt) / 1000))}s，Ctrl+C 中断并等待清理` : `> ${safeText(input)}`}</Text></Box>
+    {hintHeight > 0 && <Box width={width} flexDirection="column" flexShrink={0}>
       {hintItems.map((item, i) => <Text key={item.name} bold={i === hintIndex} color={i === hintIndex ? 'white' : 'gray'}>/{item.name} {item.description}</Text>)}
     </Box>}
   </Box>;

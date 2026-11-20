@@ -39,6 +39,39 @@ export function renderInteractive(tree: ReactElement) {
   };
 }
 
+export function terminalSnapshot(output: string, columns = 100, rows = 24) {
+  const lines = Array.from({ length: rows }, () => Array<string>(columns).fill(' '));
+  let x = 0, y = 0, visible = false;
+  const newline = () => {
+    x = 0;
+    if (++y >= rows) { lines.shift(); lines.push(Array<string>(columns).fill(' ')); y = rows - 1; }
+  };
+  for (const token of output.match(/\u001b\[[0-?]*[ -/]*[@-~]|[^\u001b]/gu) ?? []) {
+    if (token.startsWith('\u001b[')) {
+      const command = token.at(-1);
+      const values = token.slice(2, -1).split(';').map(Number);
+      const count = values[0] || 1;
+      if (command === 'A') y = Math.max(0, y - count);
+      else if (command === 'B') y = Math.min(rows - 1, y + count);
+      else if (command === 'G') x = count - 1;
+      else if (command === 'H') { y = count - 1; x = (values[1] || 1) - 1; }
+      else if (command === 'K') lines[y]!.fill(' ', values[0] === 2 ? 0 : x);
+      else if (command === 'J' && values[0] === 2) for (const line of lines) line.fill(' ');
+      else if (token === '\u001b[?25h') visible = true;
+      else if (token === '\u001b[?25l') visible = false;
+      continue;
+    }
+    if (token === '\n') { newline(); continue; }
+    if (token === '\r') { x = 0; continue; }
+    if (x >= columns) newline();
+    const width = (token.codePointAt(0) ?? 0) >= 0x1100 && !/[─-╿]/.test(token) ? 2 : 1;
+    lines[y]![x] = token;
+    if (width === 2) lines[y]![x + 1] = '';
+    x += width;
+  }
+  return { x, y, visible, lines: lines.map(line => line.join('').trimEnd()) };
+}
+
 export async function waitFor(check: () => boolean, timeout = 3000): Promise<void> {
   const start = Date.now();
   while (!check()) {

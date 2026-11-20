@@ -5,7 +5,7 @@ import { sessionSlashCommands, tokenizeCommand } from '../../cli/src/session';
 import { ReviewSession } from '../src/io/session';
 import { SessionApp, type RunSessionOptions } from '../src/session';
 import { cleanupProjects, createProject } from './fixture';
-import { deferred, KEYS, renderInteractive, waitFor } from './helpers';
+import { deferred, KEYS, renderInteractive, terminalSnapshot, waitFor } from './helpers';
 
 const exit = vi.hoisted(() => vi.fn());
 vi.mock('ink', async (importOriginal) => {
@@ -17,6 +17,8 @@ afterEach(async () => { cleanup(); exit.mockReset(); await cleanupProjects(); })
 const editor = { async edit() { throw new Error('unused'); } };
 const open = async () => {};
 const frame = (ui: ReturnType<typeof render>) => ui.lastFrame() ?? '';
+// 终端显示宽度：CJK 等全角字符按 2 列计。
+const displayWidth = (line: string) => [...line.trimEnd()].reduce((sum, ch) => sum + ((ch.codePointAt(0) ?? 0) >= 0x1100 && !/[─-╿]/.test(ch) ? 2 : 1), 0);
 
 it('启动时展示版本与各角色模型并过滤控制字符', () => {
   const options: RunSessionOptions = { info: { version: '1.2.3', models: { extractor: 'mock:extract', planner: 'mock:plan', executor: 'mock:execute', reviewer: 'mock:review\u001b' } }, tokenize: text => [text], runSlashCommand: async () => ({ kind: 'exit' }), resolveReview: async () => { throw new Error('unused'); }, chatReply: async () => '' };
@@ -174,25 +176,29 @@ it('内容超出视口时右侧显示滚动条，未超出时不显示', async (
   const ui = render(<SessionApp options={longReply(30)} />);
   resize(ui, 8);
   await waitFor(() => frame(ui).includes('>'));
-  expect(frame(ui)).not.toContain('█');
+  expect(frame(ui)).not.toMatch(/[╻┃╹]/);
   ui.stdin.write('你好'); ui.stdin.write(KEYS.enter);
   await waitFor(() => frame(ui).includes('回复行29'));
+  // 滑块贴最右列、两端圆角，不画轨道竖线。
   const bottom = frame(ui).split('\n').slice(0, -3);
-  expect(bottom.at(-1)?.trimEnd().endsWith('█')).toBe(true);
-  expect(bottom[0]?.trimEnd().endsWith('│')).toBe(true);
+  expect(bottom.at(-1)?.trimEnd()).toMatch(/[┃╹]$/);
+  expect(displayWidth(bottom.at(-1)!)).toBe(100);
+  expect(bottom[0]?.trimEnd()).not.toMatch(/[│╻┃╹]$/);
   ui.stdin.write(KEYS.pageUp); ui.stdin.write(KEYS.pageUp); ui.stdin.write(KEYS.pageUp); ui.stdin.write(KEYS.pageUp); ui.stdin.write(KEYS.pageUp); ui.stdin.write(KEYS.pageUp);
   await waitFor(() => frame(ui).includes('交互会话'));
   const top = frame(ui).split('\n').slice(0, -3);
-  expect(top[0]?.trimEnd().endsWith('█')).toBe(true);
-  expect(top.at(-1)?.trimEnd().endsWith('│')).toBe(true);
+  expect(top[0]?.trimEnd()).toMatch(/[┃╻]$/);
+  expect(top.at(-1)?.trimEnd()).not.toMatch(/[│╻┃╹]$/);
 });
 
-it('任何一行都不写入终端最后一列，避免 Windows 控制台自动换行导致整屏上滚', async () => {
+it('末行不写入终端最后一列，避免 Windows 控制台自动换行导致整屏上滚', async () => {
   const ui = render(<SessionApp options={longReply(30)} />);
   resize(ui, 8);
   ui.stdin.write('你好'); ui.stdin.write(KEYS.enter);
   await waitFor(() => frame(ui).includes('回复行29'));
-  for (const line of frame(ui).split('\n')) expect([...line.trimEnd()].length).toBeLessThan(100);
+  const lines = frame(ui).split('\n');
+  for (const line of lines) expect(displayWidth(line)).toBeLessThanOrEqual(100);
+  expect(displayWidth(lines.at(-1)!)).toBeLessThan(100);
 });
 
 it('审核退出返回聊天并重新解析会话', async () => {
@@ -438,15 +444,61 @@ it('补全后继续编辑会把高亮重置为第一项', async () => {
   await waitFor(() => frame(ui).includes('> /reqs'));
 });
 
-it('空闲时终端光标定位到输入框内', async () => {
+it('短对话下方留白时光标位于输入文本行而非下边框', async () => {
   const ui = renderInteractive(<SessionApp options={completionOptions()} />);
-  await mounted();
-  ui.stdin.write('hi');
-  await new Promise<void>((resolve) => setTimeout(resolve, 100));
-  // 显示光标并定位到提示符与输入文本之后（debug=false 才产生光标转义）。
-  expect(ui.writes()).toContain('\u001B[?25h');
-  expect(ui.writes()).toMatch(/\u001B\[\d+A\u001B\[\d+G\u001B\[\?25h/);
-  ui.unmount();
+  try {
+    await mounted();
+    await waitFor(() => terminalSnapshot(ui.writes()).visible);
+    let screen = terminalSnapshot(ui.writes());
+    expect(screen.lines[screen.y]).toBe('>');
+    expect(screen.x).toBe(2);
+    ui.stdin.write('hi');
+    await waitFor(() => terminalSnapshot(ui.writes()).lines.some(line => line === '> hi'));
+    screen = terminalSnapshot(ui.writes());
+    expect(screen.lines[screen.y]).toBe('> hi');
+    expect(screen.x).toBe(4);
+  } finally { ui.unmount(); }
+});
+
+it('满屏回复结束后光标仍在底部输入文本行', async () => {
+  const ui = renderInteractive(<SessionApp options={longReply(30)} />);
+  try {
+    await mounted();
+    ui.stdin.write('你好'); ui.stdin.write(KEYS.enter);
+    await waitFor(() => terminalSnapshot(ui.writes()).lines.some(line => line.startsWith('回复行29')) && terminalSnapshot(ui.writes()).visible);
+    const screen = terminalSnapshot(ui.writes());
+    expect(screen.lines[screen.y]).toBe('>');
+    expect(screen.y).toBe(22);
+    expect(screen.x).toBe(2);
+  } finally { ui.unmount(); }
+});
+
+it('命令候选出现与收起后光标保持在输入行', async () => {
+  const ui = renderInteractive(<SessionApp options={completionOptions()} />);
+  try {
+    await mounted();
+    ui.stdin.write('/');
+    await waitFor(() => terminalSnapshot(ui.writes()).lines.includes('/exit 退出会话'));
+    let screen = terminalSnapshot(ui.writes());
+    expect(screen.lines[screen.y]).toBe('> /');
+    expect(screen.x).toBe(3);
+    Object.defineProperty(ui.stdout, 'rows', { value: 8, configurable: true });
+    ui.stdout.emit('resize');
+    await waitFor(() => terminalSnapshot(ui.writes(), 100, 8).lines[7] === '/exit 退出会话');
+    screen = terminalSnapshot(ui.writes(), 100, 8);
+    expect(screen.lines[screen.y]).toBe('> /');
+    expect(screen.y).toBe(3);
+    Object.defineProperty(ui.stdout, 'rows', { value: 40, configurable: true });
+    ui.stdout.emit('resize');
+    await waitFor(() => terminalSnapshot(ui.writes(), 100, 40).lines.slice(8).includes('/exit 退出会话'));
+    screen = terminalSnapshot(ui.writes(), 100, 40);
+    expect(screen.lines[screen.y]).toBe('> /');
+    ui.stdin.write('\u007f');
+    await waitFor(() => !terminalSnapshot(ui.writes(), 100, 40).lines.includes('/exit 退出会话'));
+    screen = terminalSnapshot(ui.writes(), 100, 40);
+    expect(screen.lines[screen.y]).toBe('>');
+    expect(screen.x).toBe(2);
+  } finally { ui.unmount(); }
 });
 
 it('执行中隐藏终端光标，结束后重新显示', async () => {
