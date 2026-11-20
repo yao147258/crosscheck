@@ -34,9 +34,9 @@ export class BudgetTracker {
     return this.parent?.exhausted() ?? null;
   }
 
-  /** 剩余时长（毫秒），不会为负 */
+  /** 剩余时长（毫秒），不会为负；取整避免 AbortSignal.timeout 等 API 要求整数而偶发崩溃 */
   remainingMs(): number {
-    const own = Math.max(0, this.limits.minutes * 60_000 - (this.now() - this.startedAt));
+    const own = Math.max(0, Math.round(this.limits.minutes * 60_000 - (this.now() - this.startedAt)));
     return this.parent ? Math.min(own, this.parent.remainingMs()) : own;
   }
 
