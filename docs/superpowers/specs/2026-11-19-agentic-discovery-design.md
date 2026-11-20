@@ -1,7 +1,7 @@
 # 智能体式项目扫描（init / profile 多轮读文件）设计说明
 
 - 日期：2026-11-19
-- 状态：待评审
+- 状态：已实现
 - 前置：`2026-11-18-project-notes-design.md`（init/profile 拆分）、`2026-11-19-context-management-subagent-design.md` 第 1 期（ContextManager、SubAgent）均已合入 main
 - 对应上下文管理分期中的第 5 期（init/profile 扫描），本期不做按目录分区扇出
 

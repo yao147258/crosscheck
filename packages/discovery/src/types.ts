@@ -15,6 +15,7 @@ export type DiscoveryFact = FactBase & (
   | { kind: 'command'; name: string; command: string }
   | { kind: 'port'; port: number; service?: string }
   | { kind: 'environment-variable'; name: string }
+  | { kind: 'page'; path: string; summary: string }
 );
 
 export interface DiscoveryDiagnostic {

@@ -65,6 +65,6 @@ describe('全局模型配置', () => {
     await expect(loadUserModelConfig(dir)).rejects.toThrow(/不合法/);
   });
   it('项目配置不接受模型配置覆盖全局设置', () => {
-    expect(ProjectConfigSchema.parse({ providers: { evil: { apiKey: 'secret-value' } }, models: {}, requirementsDocs: ['a.md'] })).toEqual({ budget: { perCase: { steps: 60, tokens: 400000, minutes: 10 } }, requirementsDocs: ['a.md'] });
+    expect(ProjectConfigSchema.parse({ providers: { evil: { apiKey: 'secret-value' } }, models: {}, requirementsDocs: ['a.md'] })).toEqual({ budget: { perCase: { steps: 60, tokens: 400000, minutes: 10 }, discovery: { steps: 80, tokens: 600000, minutes: 15 } }, requirementsDocs: ['a.md'] });
   });
 });

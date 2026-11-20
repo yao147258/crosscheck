@@ -1,6 +1,6 @@
 import { loadUserModelConfig, publicModelConfig, type ArtifactStore, type Config, type Role } from '@crosscheck/core';
 import { createEvidenceRedactor } from '@crosscheck/tools';
-import { resolveRole, type ModelCandidate } from '@crosscheck/models';
+import { hasProgressListener, resolveRole, withProgress, type ModelCandidate } from '@crosscheck/models';
 import type { RunSuiteOptions } from '@crosscheck/runner';
 
 import type { ReviewDependencies } from './review';
@@ -40,6 +40,11 @@ export async function loadModelContext(artifacts: ArtifactStore, deps: CommandDe
   const config: Config = { ...project, ...publicModelConfig(user) };
   const redactor = createEvidenceRedactor([], Object.values(apiKeys).filter((key): key is string => !!key));
   return { config, deps: { ...deps, modelOptions: { ...deps.modelOptions, apiKeys } }, redactor };
+}
+
+/** 交互会话已登记进度监听时沿用会话显示；CLI 直接执行时把进度逐行写入日志。 */
+export function withCliProgress<T>(log: (line: string) => void, fn: () => T): T {
+  return hasProgressListener() ? fn() : withProgress(log, fn);
 }
 
 export function resolveModels(config: Config, role: Role, deps: CommandDependencies, log: (s: string) => void): ModelCandidate[] {

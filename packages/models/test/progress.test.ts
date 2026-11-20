@@ -1,5 +1,5 @@
 import { expect, it } from 'vitest';
-import { reportProgress, summarizeInput, withProgress } from '../src/progress';
+import { hasProgressListener, reportProgress, summarizeInput, withProgress } from '../src/progress';
 
 it('进度只送达当前异步上下文的监听器，监听器异常不外抛', async () => {
   const a: string[] = [], b: string[] = [];
@@ -18,3 +18,9 @@ it('概括工具输入时跳过敏感字段与非标量字段并截断', () => {
   expect(summarizeInput({ url: 'x'.repeat(60) })).toBe(`url=${'x'.repeat(40)}…`);
   expect(summarizeInput('文本')).toBe('');
 });
+
+it('仅在登记了进度监听器的异步上下文内报告存在监听器', async () => {
+  expect(hasProgressListener()).toBe(false);
+  await withProgress(() => {}, async () => { expect(hasProgressListener()).toBe(true); });
+});
+

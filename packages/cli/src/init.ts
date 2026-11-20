@@ -2,7 +2,7 @@ import { Approvals, ArtifactStore, BudgetTracker, decodeNotesUtf8, NotesTextSche
 import { synthesizeNotes, walkProject } from '@crosscheck/discovery';
 import { sanitizeMultiline } from '@crosscheck/discovery/sanitize';
 import type { CliArgs } from './args';
-import { loadModelContext, resolveModels, withInterrupt, type CommandDependencies } from './context';
+import { loadModelContext, resolveModels, withCliProgress, withInterrupt, type CommandDependencies } from './context';
 
 export const NOTES_FILE = 'notes.md';
 export const CONFIG_TEMPLATE = {
@@ -37,19 +37,24 @@ export async function initCommand(args: CliArgs, log: (s: string) => void, deps:
     const { config, redactor } = context;
     const walk = await walkProject(args.project, { signal: sig });
     for (const diagnostic of walk.diagnostics) log(redactor.text(`扫描诊断：${diagnostic}`));
-    log(`登记文件 ${walk.files.length} 个，摘录 ${walk.files.filter((file) => file.excerpt).length} 个`);
+    log(`登记文件 ${walk.files.length} 个，由模型按需读取`);
     sig.throwIfAborted();
     const models = resolveModels(config, 'extractor', context.deps, (line) => log(redactor.text(line)));
-    const result = await synthesizeNotes({
-      files: redactor.value(walk.files), diagnostics: walk.diagnostics.map((line) => redactor.text(line)),
+    const result = await withCliProgress((line) => log(redactor.text(line)), () => synthesizeNotes({
+      projectRoot: args.project, files: walk.files, diagnostics: walk.diagnostics.map((line) => redactor.text(line)),
       previous: args.refresh && existing !== undefined ? redactor.text(existing) : undefined,
-      models, budget: () => new BudgetTracker(config.budget.perCase), signal: sig, resilience: deps.resilience,
-    }).catch((error: unknown) => {
+      clean: (text) => redactor.text(text),
+      models, budget: () => new BudgetTracker(config.budget.discovery), signal: sig, resilience: deps.resilience,
+    })).catch((error: unknown) => {
       if (sig.aborted && (error === sig.reason || error instanceof Error && error.name === 'AbortError')) throw error;
       throw new Error(redactor.text(error instanceof Error ? error.message : '模型调用失败'));
     });
     sig.throwIfAborted();
-    if (result.status !== 'done') { log(redactor.text(`笔记生成失败：${result.detail}`)); return 2; }
+    if (result.status !== 'done') {
+      log(redactor.text(`笔记生成失败：${result.detail}`));
+      if (result.reason === 'budget') log('可在 .crosscheck/config.yaml 的 budget.discovery 中调大扫描预算');
+      return 2;
+    }
     const text = redactor.text(sanitizeMultiline(result.text));
     if (!NotesTextSchema.safeParse(text).success) { log('脱敏后的笔记格式不合法，未写入'); return 2; }
     const current = await artifacts.readBytes(NOTES_FILE);

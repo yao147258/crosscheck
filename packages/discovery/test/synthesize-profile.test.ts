@@ -326,4 +326,12 @@ describe('synthesizeProfile', () => {
     await expect(synthesizeProfile({ ...opts, models: [] })).rejects.toThrow('模型列表不能为空');
     expect(opts.budget).not.toHaveBeenCalled();
   });
+
+  it('接口与页面步骤同时提供 page 事实', async () => {
+    const model = scriptedModel(ALL_STEPS);
+    const page: DiscoveryFact = { kind: 'page', plugin: 'agent', path: '/login', summary: '登录页', source: { file: 'web/router.ts', line: 3, excerpt: "path: '/login'" } };
+    await synthesizeProfile({ ...options(model), facts: [...facts, page] });
+    expect(payload(model, 2).facts).toContainEqual(page);
+    expect(payload(model, 0).facts).not.toContainEqual(page);
+  });
 });

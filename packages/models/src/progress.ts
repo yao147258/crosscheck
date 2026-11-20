@@ -15,6 +15,11 @@ export function reportProgress(text: string): void {
   try { storage.getStore()?.(text); } catch { /* 提示失败不能影响执行。 */ }
 }
 
+/** 当前异步上下文是否已登记进度监听器（例如交互会话），用于决定是否由命令自行输出进度。 */
+export function hasProgressListener(): boolean {
+  return storage.getStore() !== undefined;
+}
+
 const SENSITIVE = /pass|secret|token|key|auth|cookie|credential|session/i;
 
 /** 把工具输入概括为一行：只取顶层标量字段，跳过疑似敏感的字段与取值，并截断过长内容。 */

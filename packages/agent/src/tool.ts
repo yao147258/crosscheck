@@ -1,6 +1,6 @@
 import type { z } from 'zod';
 
-export type ToolCategory = 'browser' | 'http' | 'db' | 'fixture' | 'profile' | 'requirements';
+export type ToolCategory = 'browser' | 'http' | 'db' | 'fixture' | 'profile' | 'requirements' | 'project';
 
 export interface ToolContext {
   signal: AbortSignal;

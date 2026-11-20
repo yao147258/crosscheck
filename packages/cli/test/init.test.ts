@@ -211,3 +211,24 @@ it('公共模型解析使用独立密钥集合，并记录备用模型缺密钥�
   expect(models.map((m) => m.ref)).toEqual(['mock:x']);
   expect(out.join('\n')).toContain('跳过备用模型');
 });
+
+it('模型按需读取项目文件，CLI 输出读取进度且不再报告摘录省略', async () => {
+  const { root, artifacts } = await project(true);
+  await writeFile(path.join(root, 'package.json'), '{ "scripts": { "dev": "vite" } }');
+  const model = scriptedModel([{ toolCalls: [{ name: 'read_file', input: { path: 'package.json' } }] }, { toolCalls: [{ name: 'finish', input: { markdown: '# 项目笔记' } }] }]);
+  const out: string[] = [];
+  expect(await cliMain(['init', '--project', root], { log: (s) => out.push(s), dependencies: deps(model) })).toBe(0);
+  expect(out).toContain('读取 package.json');
+  expect(out.join('\n')).not.toContain('摘录');
+  expect((await artifacts.readBytes(NOTES_FILE))?.toString()).toBe('# 项目笔记');
+});
+
+it('扫描预算耗尽时提示调大 budget.discovery', async () => {
+  const { root, artifacts } = await project(true);
+  await artifacts.writeYaml('config.yaml', { budget: { discovery: { steps: 1 } } });
+  const model = scriptedModel([{ toolCalls: [{ name: 'list_dir', input: {} }] }, { toolCalls: [{ name: 'finish', input: { markdown: '# 项目笔记' } }] }]);
+  const out: string[] = [];
+  expect(await cliMain(['init', '--project', root], { log: (s) => out.push(s), dependencies: deps(model) })).toBe(2);
+  expect(out.join('\n')).toContain('budget.discovery');
+  expect(await artifacts.readBytes(NOTES_FILE)).toBeUndefined();
+});

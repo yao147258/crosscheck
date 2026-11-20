@@ -157,6 +157,7 @@ it('init → review notes → profile → review profile → reqs → plan → r
   const finish = (input: unknown) => ({ toolCalls: [{ name: 'finish', input }] });
   const extractor = scriptedModel([
     finish({ markdown: '# 项目笔记\n\n本地回环服务，下单接口返回 ok。' }),
+    finish({ findings: [] }),
     finish({ 'environments.yaml': { version: 1, environments: { local: { baseURL: base, healthcheck: `${base}/health`, reset: null } } } }),
     finish({ 'auth.yaml': { version: 1, actors: { guest: { kind: 'anonymous' } } } }),
     finish({ 'api-catalog.yaml': { version: 1, operations: {} }, 'pages.yaml': { version: 1, pages: {} } }),

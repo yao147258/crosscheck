@@ -1,9 +1,9 @@
 import { Approvals, ArtifactStore, BudgetTracker, decodeNotesUtf8, PROFILE_FILES, PROFILE_SCHEMAS, ProjectConfigSchema, readProfileFiles, type ProfileFile } from '@crosscheck/core';
-import { discover, openApiPlugin, staticScanPlugin, synthesizeProfile } from '@crosscheck/discovery';
+import { discover, exploreProject, openApiPlugin, staticScanPlugin, synthesizeProfile, walkProject, type DiscoveryFact } from '@crosscheck/discovery';
 import { sanitizeContext } from '@crosscheck/discovery/sanitize';
 import { NOTES_FILE } from './init';
 import type { CliArgs } from './args';
-import { loadModelContext, resolveModels, withInterrupt, type CommandDependencies } from './context';
+import { loadModelContext, resolveModels, withCliProgress, withInterrupt, type CommandDependencies } from './context';
 
 export const DEFAULT_OPENAPI_FILES = [
   'openapi.yaml', 'openapi.yml', 'openapi.json', 'swagger.yaml', 'swagger.yml', 'swagger.json',
@@ -45,8 +45,29 @@ export async function profileCommand(args: CliArgs, log: (s: string) => void, de
     sig.throwIfAborted();
     const models = resolveModels(config, 'extractor', context.deps, (line) => log(redactor.text(line)));
     sig.throwIfAborted();
+    // 全部画像已确认时无需探索，不调用模型。
+    const explored: DiscoveryFact[] = [];
+    if (PROFILE_FILES.some((name) => !Object.hasOwn(existing, name))) {
+      const walk = await walkProject(args.project, { signal: sig });
+      const outcome = await withCliProgress((line) => log(redactor.text(line)), () => exploreProject({
+        projectRoot: args.project, files: walk.files, facts: redactor.value(scan.facts), notes: redactor.text(notes),
+        clean: (text) => redactor.text(text), models, budget: () => new BudgetTracker(config.budget.discovery),
+        signal: sig, resilience: deps.resilience,
+      })).catch((error: unknown) => {
+        if (sig.aborted) throw error;
+        return { status: 'failed' as const, reason: 'model-error', detail: error instanceof Error ? error.message : '探索失败', interrupted: false };
+      });
+      sig.throwIfAborted();
+      if (outcome.status === 'done') {
+        for (const line of outcome.diagnostics) log(redactor.text(line));
+        log(`模型探索新增事实 ${outcome.facts.length} 条`);
+        explored.push(...outcome.facts);
+      } else {
+        log(redactor.text(`模型探索未完成（${outcome.reason}）：${outcome.detail}；仅使用静态扫描事实`));
+      }
+    }
     const result = await synthesizeProfile({
-      facts: redactor.value(scan.facts),
+      facts: redactor.value([...scan.facts, ...explored]),
       notes: redactor.text(notes),
       existing: sanitizeContext(redactor.value(existing)),
       cleanContext: (value) => redactor.value(value),

@@ -30,6 +30,14 @@ export const BudgetLimitsSchema = z.object({
 });
 export type BudgetLimits = z.infer<typeof BudgetLimitsSchema>;
 
+/** 扫描（init 笔记、profile 探索）预算，需多轮读文件，缺省值高于单用例预算。 */
+export const DiscoveryBudgetSchema = z.object({
+  steps: z.number().int().positive().default(80),
+  tokens: z.number().int().positive().default(600000),
+  minutes: z.number().positive().default(15),
+});
+export type DiscoveryBudget = z.infer<typeof DiscoveryBudgetSchema>;
+
 export const ConfigSchema = z.object({
   models: z.object({
     extractor: ModelRefSchema,
@@ -48,7 +56,7 @@ export const ConfigSchema = z.object({
   providers: z.record(z.string(), ProviderConfigSchema).prefault({}),
   /** 按完整模型引用登记能力，未登记的引用一律视为不支持图片，含备用模型。 */
   capabilities: z.record(ModelRefSchema, z.object({ images: z.boolean().default(false) })).prefault({}),
-  budget: z.object({ perCase: BudgetLimitsSchema.prefault({}) }).prefault({}),
+  budget: z.object({ perCase: BudgetLimitsSchema.prefault({}), discovery: DiscoveryBudgetSchema.prefault({}) }).prefault({}),
   /** 每百万 token 单价，键为模型引用 */
   pricing: z
     .record(ModelRefSchema, z.object({

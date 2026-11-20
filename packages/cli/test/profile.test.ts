@@ -27,6 +27,8 @@ const FILES = {
 const finish = (names: (keyof typeof FILES)[]): ScriptStep => ({ toolCalls: [{ name: 'finish', input: Object.fromEntries(names.map((n) => [n, FILES[n]])) }] });
 const STEPS = [finish(['environments.yaml']), finish(['auth.yaml']), finish(['api-catalog.yaml', 'pages.yaml']), finish(['data-model.yaml', 'fixtures.yaml']), finish(['guardrails.yaml'])];
 
+const EXPLORE: ScriptStep = { toolCalls: [{ name: 'finish', input: { findings: [] } }] };
+
 async function project(withConfig: boolean) {
   const root = await mkdtemp(path.join(os.tmpdir(), 'cli-init-')); roots.push(root);
   const artifacts = new ArtifactStore(root);
@@ -42,7 +44,7 @@ it.each(['修改', '确认'] as const)('生成期间画像被人工%s时不覆�
   const { root, artifacts } = await project(true);
   await artifacts.writeYaml('system/auth.yaml', FILES['auth.yaml']);
   const before = await artifacts.readBytes('system/auth.yaml');
-  const model = scriptedModel(STEPS); const generate = model.doGenerate.bind(model);
+  const model = scriptedModel([EXPLORE, ...STEPS]); const generate = model.doGenerate.bind(model);
   let changed = false;
   vi.spyOn(model, 'doGenerate').mockImplementation(async (options) => {
     if (!changed) {
@@ -63,7 +65,7 @@ it('已确认画像作为上下文时密钥先脱敏', async () => {
   await artifacts.writeYaml('system/environments.yaml', value);
   const file = await readProfileFile(artifacts, 'environments.yaml'); if (!file.present || !file.ok) throw new Error('画像无效');
   const approvals = await Approvals.load(artifacts); approvals.approve('profile', 'environments.yaml', file.value, '人工'); await approvals.save(artifacts);
-  const model = scriptedModel(STEPS.slice(1));
+  const model = scriptedModel([EXPLORE, ...STEPS.slice(1)]);
   expect(await cliMain(['profile', '--project', root], { log: () => {}, dependencies: deps(model) })).toBe(0);
   expect(JSON.stringify(model.doGenerateCalls.map((call) => call.prompt))).not.toContain('fixture-key');
 });
@@ -97,9 +99,9 @@ it('全部画像已确认跳过时不声称写入草稿', async () => {
 it('前一步生成画像包含已知密钥时后续模型上下文不泄露', async () => {
   const { root } = await project(true);
   const env: ScriptStep = { toolCalls: [{ name: 'finish', input: { 'environments.yaml': { version: 1, environments: { local: { baseURL: 'http://localhost:3000/fixture-key', healthcheck: 'http://localhost:3000/health', reset: null } } } } }] };
-  const model = scriptedModel([env, ...STEPS.slice(1)]);
+  const model = scriptedModel([EXPLORE, env, ...STEPS.slice(1)]);
   expect(await cliMain(['profile', '--project', root], { log: () => {}, dependencies: deps(model) })).toBe(0);
-  expect(JSON.stringify(model.doGenerateCalls.slice(1).map((call) => call.prompt))).not.toContain('fixture-key');
+  expect(JSON.stringify(model.doGenerateCalls.slice(2).map((call) => call.prompt))).not.toContain('fixture-key');
 });
 
 it('画像上下文里的未知 URL 凭据不得发送给模型', async () => {
@@ -108,7 +110,7 @@ it('画像上下文里的未知 URL 凭据不得发送给模型', async () => {
   await artifacts.writeYaml('system/environments.yaml', value);
   const file = await readProfileFile(artifacts, 'environments.yaml'); if (!file.present || !file.ok) throw new Error('画像无效');
   const approvals = await Approvals.load(artifacts); approvals.approve('profile', file.name, file.value, '人工'); await approvals.save(artifacts);
-  const model = scriptedModel(STEPS.slice(1));
+  const model = scriptedModel([EXPLORE, ...STEPS.slice(1)]);
   expect(await cliMain(['profile', '--project', root], { log: () => {}, dependencies: deps(model) })).toBe(0);
   const prompt = JSON.stringify(model.doGenerateCalls.map((call) => call.prompt));
   for (const secret of ['unknownuser', 'unknownpass', 'unknownquery']) expect(prompt).not.toContain(secret);
@@ -119,7 +121,7 @@ it.each(['笔记修改', '笔记撤销', '画像修改', '画像撤销'] as cons
   await artifacts.writeYaml('system/environments.yaml', FILES['environments.yaml']);
   const env = await readProfileFile(artifacts, 'environments.yaml'); if (!env.present || !env.ok) throw new Error('画像无效');
   const approvals = await Approvals.load(artifacts); approvals.approve('profile', env.name, env.value, '人工'); await approvals.save(artifacts);
-  const model = scriptedModel(STEPS.slice(1)); const generate = model.doGenerate.bind(model); let changed = false;
+  const model = scriptedModel([EXPLORE, ...STEPS.slice(1)]); const generate = model.doGenerate.bind(model); let changed = false;
   vi.spyOn(model, 'doGenerate').mockImplementation(async (options) => {
     if (!changed) {
       changed = true;
@@ -136,7 +138,7 @@ it.each(['笔记修改', '笔记撤销', '画像修改', '画像撤销'] as cons
 it('脱敏导致画像结构非法时不写非法文件', async () => {
   const { root, artifacts } = await project(true);
   const auth: ScriptStep = { toolCalls: [{ name: 'finish', input: { 'auth.yaml': { version: 1, actors: { token_user: { kind: 'anonymous' } } } } }] };
-  const model = scriptedModel([STEPS[0]!, auth, ...STEPS.slice(2)]);
+  const model = scriptedModel([EXPLORE, STEPS[0]!, auth, ...STEPS.slice(2)]);
   const logs: string[] = [];
   expect(await cliMain(['profile', '--project', root], { log: (line) => logs.push(line), dependencies: deps(model) })).toBe(2);
   expect(await artifacts.readBytes('system/auth.yaml')).toBeUndefined();
@@ -146,7 +148,7 @@ it('脱敏导致画像结构非法时不写非法文件', async () => {
 
 it('生成 7 份画像草稿且不写确认记录；重跑时保留已确认文件的原字节和确认记录', async () => {
   const { root, artifacts } = await project(true);
-  const model = scriptedModel(STEPS); const out: string[] = [];
+  const model = scriptedModel([EXPLORE, ...STEPS]); const out: string[] = [];
   const originalApprovals = await artifacts.readBytes('approvals.json');
   expect(await cliMain(['profile', '--project', root], { log: (s) => out.push(s), dependencies: deps(model) })).toBe(0);
   for (const name of Object.keys(FILES)) expect(await readProfileFile(artifacts, name as keyof typeof FILES)).toMatchObject({ present: true, ok: true });
@@ -160,9 +162,9 @@ it('生成 7 份画像草稿且不写确认记录；重跑时保留已确认文�
   await approvals.save(artifacts);
   const envBytes = await artifacts.readBytes('system/environments.yaml');
   const approvalBytes = await artifacts.readBytes('approvals.json');
-  const second = scriptedModel(STEPS.slice(1));
+  const second = scriptedModel([EXPLORE, ...STEPS.slice(1)]);
   expect(await cliMain(['profile', '--project', root], { log: (s) => out.push(s), dependencies: deps(second) })).toBe(0);
-  expect(second.doGenerateCalls).toHaveLength(4);
+  expect(second.doGenerateCalls).toHaveLength(5);
   expect(await artifacts.readBytes('system/environments.yaml')).toEqual(envBytes);
   expect(await artifacts.readBytes('approvals.json')).toEqual(approvalBytes);
   expect(out.join('\n')).toContain('跳过（已确认）');
@@ -210,10 +212,10 @@ it('草稿、过期确认与无效画像不能作为已确认上下文跳过', a
   await artifacts.writeYaml('system/environments.yaml', { version: 1, environments: { local: { baseURL: 'http://localhost:4000' } } });
   await artifacts.writeYaml('system/auth.yaml', { invalid: true });
   await artifacts.writeYaml('system/pages.yaml', FILES['pages.yaml']);
-  const model = scriptedModel(STEPS);
+  const model = scriptedModel([EXPLORE, ...STEPS]);
   expect(await cliMain(['profile', '--project', root], { log: () => {}, dependencies: deps(model) })).toBe(0);
-  expect(model.doGenerateCalls).toHaveLength(5);
-  const first = JSON.stringify(model.doGenerateCalls[0]!.prompt);
+  expect(model.doGenerateCalls).toHaveLength(6);
+  const first = JSON.stringify(model.doGenerateCalls[1]!.prompt);
   expect(first).not.toContain('localhost:4000');
   expect(first).not.toContain('invalid');
   expect(await readProfileFile(artifacts, 'auth.yaml')).toMatchObject({ ok: true });
@@ -222,7 +224,7 @@ it('草稿、过期确认与无效画像不能作为已确认上下文跳过', a
 it('某步失败时退出 2，其余文件照常写入', async () => {
   const { root, artifacts } = await project(true);
   const bad: ScriptStep = { text: '不调用工具' };
-  const model = scriptedModel([STEPS[0]!, bad, bad, bad, ...STEPS.slice(2)]);
+  const model = scriptedModel([EXPLORE, STEPS[0]!, bad, bad, bad, ...STEPS.slice(2)]);
   expect(await cliMain(['profile', '--project', root], { log: () => {}, dependencies: deps(model) })).toBe(2);
   expect(await readProfileFile(artifacts, 'auth.yaml')).toEqual({ name: 'auth.yaml', present: false });
   expect(await readProfileFile(artifacts, 'guardrails.yaml')).toMatchObject({ ok: true });
@@ -273,14 +275,14 @@ it('T6 Minor：第1步已合成但第2步中断时丢弃未落盘草稿，退出
   await artifacts.writeYaml('system/pages.yaml', FILES['pages.yaml']);
   const before = await artifacts.readBytes('system/pages.yaml');
   const controller = new AbortController();
-  const model = scriptedModel([STEPS[0]!]);
+  const model = scriptedModel([EXPLORE, STEPS[0]!]);
   const generate = model.doGenerate.bind(model);
   vi.spyOn(model, 'doGenerate').mockImplementation(async (options) => {
-    if (model.doGenerateCalls.length === 1) { controller.abort(); options.abortSignal!.throwIfAborted(); }
+    if (model.doGenerateCalls.length === 2) { controller.abort(); options.abortSignal!.throwIfAborted(); }
     return generate(options);
   });
   expect(await cliMain(['profile', '--project', root], { log: () => {}, dependencies: deps(model), signal: controller.signal })).toBe(2);
-  expect(model.doGenerate).toHaveBeenCalledTimes(2);
+  expect(model.doGenerate).toHaveBeenCalledTimes(3);
   expect(await artifacts.readBytes('system/environments.yaml')).toBeUndefined();
   expect(await artifacts.readBytes('system/pages.yaml')).toEqual(before);
   expect(await artifacts.list('system')).toEqual(['pages.yaml']);
@@ -295,7 +297,7 @@ it.each(['environments.yaml', 'guardrails.yaml'])('写入 %s 期间取消保留�
     await original.call(this, rel, value);
     if (rel === `system/${cancelAt}`) controller.abort();
   });
-  expect(await cliMain(['profile', '--project', root], { log: () => {}, dependencies: deps(scriptedModel(STEPS)), signal: controller.signal })).toBe(2);
+  expect(await cliMain(['profile', '--project', root], { log: () => {}, dependencies: deps(scriptedModel([EXPLORE, ...STEPS])), signal: controller.signal })).toBe(2);
   expect(await readProfileFile(artifacts, 'environments.yaml')).toMatchObject({ ok: true });
   if (cancelAt === 'environments.yaml') expect(await artifacts.list('system')).toEqual(['environments.yaml']);
   else expect(await artifacts.list('system')).toHaveLength(7);
@@ -321,9 +323,33 @@ it('真实草稿写入失败即使信号同时取消也退出 3，保留已写�
     catch (error) { controller.abort(); throw error; }
   });
   const out: string[] = [];
-  expect(await cliMain(['profile', '--project', root], { log: (s) => out.push(s), dependencies: deps(scriptedModel(STEPS)), signal: controller.signal })).toBe(3);
+  expect(await cliMain(['profile', '--project', root], { log: (s) => out.push(s), dependencies: deps(scriptedModel([EXPLORE, ...STEPS])), signal: controller.signal })).toBe(3);
   expect(out.join('\n')).toContain('宿主错误');
   expect(out.join('\n')).toContain('工件写入失败');
   expect(await readProfileFile(artifacts, 'environments.yaml')).toMatchObject({ ok: true });
   expect(await artifacts.readBytes('approvals.json')).toBeDefined();
+});
+
+it('探索代理发现静态扫描遗漏的接口，核验后写入接口画像', async () => {
+  const { root, artifacts } = await project(true);
+  await mkdir(path.join(root, 'server'));
+  await writeFile(path.join(root, 'server/app.ts'), "const app = express();\napp.get('/health', handler);\n");
+  const source = { file: 'server/app.ts', line: 2, excerpt: "app.get('/health', handler);" };
+  const explore: ScriptStep = { toolCalls: [{ name: 'finish', input: { findings: [{ kind: 'api', method: 'GET', path: '/health', summary: '健康检查', source: { ...source, excerpt: "app.get('/health'" } }] } }] };
+  const api: ScriptStep = { toolCalls: [{ name: 'finish', input: { 'api-catalog.yaml': { version: 1, operations: { health: { environment: 'local', method: 'GET', path: '/health', description: '健康检查', sources: [source] } } }, 'pages.yaml': FILES['pages.yaml'] } }] };
+  const model = scriptedModel([explore, STEPS[0]!, STEPS[1]!, api, ...STEPS.slice(3)]);
+  const logs: string[] = [];
+  expect(await cliMain(['profile', '--project', root], { log: (line) => logs.push(line), dependencies: deps(model) })).toBe(0);
+  expect(logs.join('\n')).toContain('模型探索新增事实 1 条');
+  const catalog = await readProfileFile(artifacts, 'api-catalog.yaml');
+  expect(catalog).toMatchObject({ ok: true, value: { operations: { health: { path: '/health' } } } });
+});
+
+it('探索代理失败时降级为只用静态事实', async () => {
+  const { root } = await project(true);
+  const bad: ScriptStep = { text: '不调用工具' };
+  const model = scriptedModel([bad, bad, bad, ...STEPS]);
+  const logs: string[] = [];
+  expect(await cliMain(['profile', '--project', root], { log: (line) => logs.push(line), dependencies: deps(model) })).toBe(0);
+  expect(logs.join('\n')).toContain('仅使用静态扫描事实');
 });
