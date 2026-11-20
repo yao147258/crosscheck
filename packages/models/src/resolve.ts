@@ -8,6 +8,8 @@ export interface ModelCandidate {
   model: LanguageModel;
   /** 上下文窗口 token 数，来自模型引用的 [size] 后缀；缺省按 DEFAULT_CONTEXT_WINDOW */
   contextWindow?: number;
+  /** 决定是否设置 Anthropic 缓存断点；测试候选可省略 */
+  providerType?: ProviderType;
 }
 
 export interface ResolveOptions {
@@ -38,7 +40,7 @@ export function resolveModelRef(ref: string, config: Config, opts: ResolveOption
   const apiKey = opts.apiKeys?.[provider];
   if (!apiKey) throw new MissingModelKeyError(`模型 ${ref} 需要在全局配置中设置 apiKey`);
   const factory = opts.factories?.[type] ?? builtinFactories[type];
-  return { ref, model: factory({ name: provider, modelId, apiKey, baseURL: custom.baseURL }), contextWindow };
+  return { ref, model: factory({ name: provider, modelId, apiKey, baseURL: custom.baseURL }), contextWindow, providerType: type };
 }
 
 /** 角色候选按主、备排列；主模型缺 key 必须报错，仅备用缺 key 可跳过。 */

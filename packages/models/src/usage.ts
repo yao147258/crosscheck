@@ -6,6 +6,14 @@ interface Bucket {
   cost: number;
 }
 
+export interface TokenUsage {
+  inputTokens?: number;
+  outputTokens?: number;
+  /** 已包含在 inputTokens 内的缓存读、写部分 */
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
+}
+
 export interface UsageTotals extends Bucket {
   byRole: Record<string, Bucket>;
 }
@@ -19,12 +27,18 @@ export class UsageMeter {
   knownPricing(ref: string): boolean { return this.pricing[ref] !== undefined; }
 
   /** 精确事件供 runner 使用：缺价或任一 token 未知时 cost 为 null，不伪造失败用量。 */
-  measure(ref: string, usage: { inputTokens?: number; outputTokens?: number }) {
+  measure(ref: string, usage: TokenUsage) {
     const price = this.pricing[ref];
     const { inputTokens, outputTokens } = usage;
-    return { inputTokens, outputTokens, pricingKnown: !!price,
-      cost: price && inputTokens !== undefined && outputTokens !== undefined
-        ? (inputTokens * price.inputPerMTok + outputTokens * price.outputPerMTok) / 1_000_000 : null };
+    let cost: number | null = null;
+    if (price && inputTokens !== undefined && outputTokens !== undefined) {
+      const read = usage.cacheReadTokens ?? 0;
+      const write = usage.cacheWriteTokens ?? 0;
+      const plain = Math.max(0, inputTokens - read - write);
+      cost = (plain * price.inputPerMTok + read * (price.cacheReadPerMTok ?? price.inputPerMTok)
+        + write * (price.cacheWritePerMTok ?? price.inputPerMTok) + outputTokens * price.outputPerMTok) / 1_000_000;
+    }
+    return { inputTokens, outputTokens, pricingKnown: !!price, cost };
   }
 
   /** 兼容旧聚合接口；未知成本不能由此推定已知，宿主应使用 measure。 */
