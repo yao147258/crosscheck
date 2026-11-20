@@ -1,8 +1,9 @@
 import { MockLanguageModelV4 } from 'ai/test';
 
 export type ScriptStep =
-  | { text: string }
-  | { toolCalls: Array<{ name: string; input: unknown }> }
+  /** truncated 模拟输出达到 max_tokens 上限，finishReason 为 length */
+  | { text: string; truncated?: boolean }
+  | { toolCalls: Array<{ name: string; input: unknown }>; truncated?: boolean }
   | { error: Error }
   /** 永远不返回结果，直到调用方的 abortSignal 中止；中止后以 TimeoutError 拒绝，模拟模型调用超时 */
   | { hang: true }
@@ -44,7 +45,7 @@ export function scriptedModel(steps: ScriptStep[]): MockLanguageModelV4 {
       if ('text' in step) {
         return {
           content: [{ type: 'text' as const, text: step.text }],
-          finishReason: { unified: 'stop' as const, raw: undefined },
+          finishReason: { unified: step.truncated ? 'length' as const : 'stop' as const, raw: undefined },
           usage,
           warnings: [],
         };
@@ -56,7 +57,7 @@ export function scriptedModel(steps: ScriptStep[]): MockLanguageModelV4 {
           toolName: c.name,
           input: JSON.stringify(c.input),
         })),
-        finishReason: { unified: 'tool-calls' as const, raw: undefined },
+        finishReason: { unified: step.truncated ? 'length' as const : 'tool-calls' as const, raw: undefined },
         usage,
         warnings: [],
       };

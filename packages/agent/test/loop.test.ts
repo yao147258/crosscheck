@@ -128,6 +128,35 @@ describe('runAgent', () => {
     expect(r).toMatchObject({ status: 'blocked', reason: 'invalid-output' });
   });
 
+  it('按候选上下文窗口设置 maxOutputTokens', async () => {
+    const ok = { toolCalls: [{ name: 'finish', input: { answer: 'ok' } }] };
+    const { model, options } = opts([ok]);
+    await runAgent(options);
+    expect(model.doGenerateCalls[0]?.maxOutputTokens).toBe(128_000);
+    const small = opts([ok]);
+    await runAgent({ ...small.options, models: [{ ref: 'mock:small[32K]', model: small.model, contextWindow: 32_000 }] });
+    const limit = small.model.doGenerateCalls[0]?.maxOutputTokens ?? 0;
+    expect(limit).toBeGreaterThan(20_000);
+    expect(limit).toBeLessThan(32_000);
+  });
+
+  it('输入超出上下文窗口时不发请求，判为模型错误', async () => {
+    const { model, options } = opts([]);
+    const r = await runAgent({ ...options, models: [{ ref: 'mock:tiny[1K]', model, contextWindow: 1_000 }], messages: [{ role: 'user', content: '中'.repeat(5_000) }] });
+    expect(r).toMatchObject({ status: 'blocked', reason: 'model-error' });
+    expect((r as { detail: string }).detail).toMatch(/上下文窗口/);
+    expect(model.doGenerateCalls).toHaveLength(0);
+  });
+
+  it('输出被截断时提醒模型，最终错误写明截断', async () => {
+    const cut = { toolCalls: [{ name: 'finish', input: { answer: 1 } }], truncated: true };
+    const { model, options } = opts([cut, cut, cut]);
+    const r = await runAgent(options);
+    expect(r).toMatchObject({ status: 'blocked', reason: 'invalid-output' });
+    expect((r as { detail: string }).detail).toMatch(/截断/);
+    expect(promptText(model, 1)).toContain('截断');
+  });
+
   it('只回复文本不调用工具也计为不合格，并提醒模型', async () => {
     const { model, options } = opts([{ text: '我做完了' }, { toolCalls: [{ name: 'finish', input: { answer: 'ok' } }] }]);
     const r = await runAgent(options);
