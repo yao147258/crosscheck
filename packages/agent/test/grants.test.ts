@@ -12,6 +12,7 @@ const all = [
   mk('fixture_apply', 'fixture'),
   mk('profile_lookup', 'profile'),
   mk('requirements_read', 'requirements'),
+  mk('project_read', 'project'),
 ];
 
 const names = (ts: AgentTool[]) => ts.map((t) => t.name);
@@ -20,7 +21,7 @@ describe('grantTools', () => {
   it('执行阶段不授予夹具工具', () => {
     const { granted, denied } = grantTools('execute', all);
     expect(names(granted)).toEqual(['browser_click', 'http_request', 'db_query', 'profile_lookup']);
-    expect(names(denied)).toEqual(['fixture_apply', 'requirements_read']);
+    expect(names(denied)).toEqual(['fixture_apply', 'requirements_read', 'project_read']);
   });
 
   it('生成用例阶段只能读条款和画像，不能操作系统', () => {
@@ -33,6 +34,13 @@ describe('grantTools', () => {
 
   it('复核阶段没有任何工具', () => {
     expect(grantTools('review', all).granted).toEqual([]);
+  });
+
+  it('只有分析阶段可读项目文件', () => {
+    expect(names(grantTools('extract', all).granted)).toEqual(['profile_lookup', 'project_read']);
+    for (const stage of ['plan', 'prepare', 'execute', 'review'] as const) {
+      expect(names(grantTools(stage, all).granted)).not.toContain('project_read');
+    }
   });
 });
 
