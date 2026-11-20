@@ -340,8 +340,9 @@ export async function runAgent<O>(opts: RunAgentOptions<O>): Promise<AgentResult
           const sub = await spawnSubAgent({ ...parent, signal: boundedSignal() }, { name: delegate.name, task: parsed.data.task, context: parsed.data.context, tools: delegate.tools, cap: delegate.cap });
           terminal ??= stop();
           if (sub.status === 'blocked') { await fail(`子代理 ${delegate.name} 未完成（${sub.reason}）：${sub.detail}`); continue; }
+          // notice 放在输出展开之后，子代理输出中的同名键不能覆盖"非实测证据"标记。
           const out = {
-            notice: SUBAGENT_NOTICE, ...(toJsonValue(sub.output) as object), evidenceIds: sub.evidenceIds,
+            ...(toJsonValue(sub.output) as object), notice: SUBAGENT_NOTICE, evidenceIds: sub.evidenceIds,
             ...(sub.droppedEvidenceIds.length ? { dropped: `[已丢弃无效证据ID: ${sub.droppedEvidenceIds.join(',')}]` } : {}),
           };
           reply({ type: 'json', value: out });
