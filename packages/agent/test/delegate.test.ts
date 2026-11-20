@@ -78,6 +78,14 @@ describe('delegate 工具', () => {
     await expect(runAgent(options)).rejects.toBe(error);
   });
 
+  it('review 阶段配置任何 delegate 模板都在调用模型前抛错', async () => {
+    for (const tools of [[], ['look']]) {
+      const { model, options } = setup([{ toolCalls: [{ name: 'finish', input: { answer: 'ok' } }] }], { stage: 'review', delegates: [{ name: 'explore', description: 'x', tools }] });
+      await expect(runAgent(options)).rejects.toThrow(/review 阶段不允许派生子代理/);
+      expect(model.doGenerateCalls).toHaveLength(0);
+    }
+  });
+
   it('delegate 名称与已有工具冲突时抛错', async () => {
     const { options } = setup([], { delegates: [{ name: 'look', description: 'x', tools: [] }] });
     await expect(runAgent(options)).rejects.toThrow(/重复/);

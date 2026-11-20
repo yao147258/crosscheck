@@ -54,9 +54,11 @@ export type SubAgentResult<O = SubAgentReport> =
   | { name: string; agentId: string; status: 'done'; output: O; evidenceIds: string[]; droppedEvidenceIds: string[] }
   | { name: string; agentId: string; status: 'blocked'; reason: BlockReason; detail: string };
 
-/** 派生前同步检查：嵌套与越权在任何模型调用前拒绝；子代理工具只能收窄。 */
+/** 派生前同步检查：嵌套、review 阶段与越权在任何模型调用前拒绝；子代理工具只能收窄。 */
 export function selectSubAgentTools(parent: ParentContext, spec: Pick<SubAgentSpec<unknown>, 'name' | 'tools'>): AgentTool[] {
   if (parent.parentId) throw new Error(`子代理不能再派生子代理：${spec.name}`);
+  // 显式禁止而非依赖 review 恰好无授予工具：空工具集子代理仍能产出结论影响判定。
+  if (parent.stage === 'review') throw new Error(`review 阶段不允许派生子代理：${spec.name}`);
   const byName = new Map(parent.tools.map(t => [t.name, t]));
   return spec.tools.map(name => {
     const t = byName.get(name);

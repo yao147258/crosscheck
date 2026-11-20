@@ -29,6 +29,13 @@ describe('spawnSubAgent', () => {
     await expect(spawnSubAgent(parent(scriptedModel([]), { parentId: 'p' }), { name: 'x', task: 't', tools: [] })).rejects.toThrow(/不能再派生/);
   });
 
+  it('review 阶段拒绝派生子代理，即使不申请任何工具', async () => {
+    const model = scriptedModel([finishWith(REPORT)]);
+    await expect(spawnSubAgent(parent(model, { stage: 'review', tools: [] }), { name: 'x', task: 't', tools: [] })).rejects.toThrow(/review 阶段不允许派生子代理/);
+    await expect(runSubAgents(parent(model, { stage: 'review', tools: [] }), [{ name: 'x', task: 't', tools: [] }])).rejects.toThrow(/review 阶段不允许派生子代理/);
+    expect(model.doGenerateCalls).toHaveLength(0);
+  });
+
   it('只接收任务与上下文，回传经核验的证据 ID', async () => {
     const model = scriptedModel([finishWith(REPORT)]);
     const r = await spawnSubAgent(parent(model, { verifyEvidenceIds: async ids => ids.filter(id => id === 'e1') }), { name: 'explore', task: '打开设置页', context: { url: '/settings' }, tools: ['echo'] });
