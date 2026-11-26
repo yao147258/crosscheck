@@ -1,11 +1,13 @@
 import { Approvals, ArtifactStore, BudgetTracker, clauseDuplicateKey, mergeDrafts, partitionClauses } from '@crosscheck/core';
 import { extractRequirements } from '@crosscheck/requirements';
+import { createUsageObservationScope } from '@crosscheck/models';
 import type { CliArgs } from './args';
-import { loadModelContext, resolveModels, withInterrupt, type CommandDependencies } from './context';
+import { createCommandUsageObserver, loadModelContext, resolveModels, withInterrupt, type CommandDependencies } from './context';
 import { createDiskDocLister, createProjectReader, expandRequirementDocs } from '@crosscheck/discovery';
 import { readRequirementDocuments, resolveRequirementEntries } from './documents';
 
 export async function reqsCommand(args: CliArgs, log: (s: string) => void, deps: CommandDependencies = {}, signal?: AbortSignal): Promise<number> {
+  const usageObservationScope = deps.usageObservationScope ?? createUsageObservationScope();
   return withInterrupt(signal, async (sig) => {
     const module = args.modules![0]!;
     const artifacts = new ArtifactStore(args.project);
@@ -33,6 +35,7 @@ export async function reqsCommand(args: CliArgs, log: (s: string) => void, deps:
       module, documents, known: approved, models,
       budget: new BudgetTracker(config.budget.perCase),
       signal: sig, resilience: deps.resilience,
+      usageObserver: createCommandUsageObserver(args.project, 'reqs', 'extractor', config.pricing, deps, log), usageObservationScope,
     }).catch((error: unknown) => { throw new Error(redactor.text(error instanceof Error ? error.message : '模型调用失败')); });
     sig.throwIfAborted();
     if (result.status !== 'done') { log(redactor.text(`提炼未完成（${result.reason}）：${result.detail}；未修改条款文件`)); return 2; }
@@ -43,5 +46,5 @@ export async function reqsCommand(args: CliArgs, log: (s: string) => void, deps:
     for (const dropped of merged.dropped) log(redactor.text(`丢弃草稿 ${dropped.id}：${dropped.reason}`));
     log(`模块 ${module}：保留已确认 ${merged.kept} 条，写入草稿 ${merged.added} 条；请运行 crosscheck review clauses --module ${module} 审核`);
     return 0;
-  });
+  }, deps.usageObservationScope ? undefined : () => usageObservationScope.flush());
 }

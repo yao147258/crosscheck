@@ -1,4 +1,39 @@
 import type { Config } from '@crosscheck/core';
+import { parseModelRef } from './model-ref';
+
+export type UsagePrice = Config['pricing'][string];
+
+/** 优先使用完整引用的价格；无精确配置时回退到去除窗口后缀的模型。 */
+export function lookupUsagePrice(pricing: Config['pricing'], ref: string): UsagePrice | null {
+  const { provider, modelId } = parseModelRef(ref);
+  const price = pricing[ref] ?? pricing[`${provider}:${modelId}`];
+  if (!price) return null;
+  const { inputPerMTok, outputPerMTok, cacheReadPerMTok, cacheWritePerMTok } = price;
+  const valid = (value: number) => Number.isFinite(value) && value >= 0;
+  if (!valid(inputPerMTok) || !valid(outputPerMTok)
+    || (cacheReadPerMTok !== undefined && !valid(cacheReadPerMTok))
+    || (cacheWritePerMTok !== undefined && !valid(cacheWritePerMTok))) return null;
+  return {
+    inputPerMTok, outputPerMTok,
+    ...(cacheReadPerMTok === undefined ? {} : { cacheReadPerMTok }),
+    ...(cacheWritePerMTok === undefined ? {} : { cacheWritePerMTok }),
+  };
+}
+
+/** 缓存计数缺失时不假设为零；缓存属于输入 token 的一部分。 */
+export function conservativeUsageCost(price: UsagePrice | null, usage: {
+  inputTokens: number | null; outputTokens: number | null;
+  cacheReadTokens: number | null; cacheWriteTokens: number | null;
+}): number | null {
+  const { inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens } = usage;
+  if (!price || inputTokens === null || outputTokens === null || cacheReadTokens === null || cacheWriteTokens === null
+    || cacheReadTokens + cacheWriteTokens > inputTokens) return null;
+  const cost = ((inputTokens - cacheReadTokens - cacheWriteTokens) * price.inputPerMTok
+    + cacheReadTokens * (price.cacheReadPerMTok ?? price.inputPerMTok)
+    + cacheWriteTokens * (price.cacheWritePerMTok ?? price.inputPerMTok)
+    + outputTokens * price.outputPerMTok) / 1_000_000;
+  return Number.isFinite(cost) ? cost : null;
+}
 
 interface Bucket {
   inputTokens: number;

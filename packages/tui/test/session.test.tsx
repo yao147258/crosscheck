@@ -1,12 +1,19 @@
 import { cleanup, render } from 'ink-testing-library';
 import { afterEach, expect, it, vi } from 'vitest';
 import { Approvals, loadProfile } from '@crosscheck/core';
-import { sessionSlashCommands, tokenizeCommand } from '../../cli/src/session';
+import { createSlashDispatcher, sessionCommand, sessionSlashCommands, tokenizeCommand } from '../../cli/src/session';
+import * as tui from '../src/index';
+import { scriptedModel } from '../../agent/src/testing/scripted-model';
+import { createUsageObserver, projectUsageLocation, readUsage } from '../../models/src/usage-ledger';
+import { rm, writeFile } from 'node:fs/promises';
+import * as fs from 'node:fs/promises';
+import path from 'node:path';
 import { ReviewSession } from '../src/io/session';
 import { SessionApp, type RunSessionOptions } from '../src/session';
 import { cleanupProjects, createProject } from './fixture';
 import { deferred, KEYS, renderInteractive, terminalSnapshot, waitFor } from './helpers';
 
+vi.mock('node:fs/promises', { spy: true });
 const exit = vi.hoisted(() => vi.fn());
 vi.mock('ink', async (importOriginal) => {
   const ink = await importOriginal<typeof import('ink')>();
@@ -16,19 +23,20 @@ vi.mock('ink', async (importOriginal) => {
 afterEach(async () => { cleanup(); exit.mockReset(); await cleanupProjects(); });
 const editor = { async edit() { throw new Error('unused'); } };
 const open = async () => {};
+const noUsage = { resetSession: () => {}, loadSessionUsage: async () => '' };
 const frame = (ui: ReturnType<typeof render>) => ui.lastFrame() ?? '';
 // 终端显示宽度：CJK 等全角字符按 2 列计。
 const displayWidth = (line: string) => [...line.trimEnd()].reduce((sum, ch) => sum + ((ch.codePointAt(0) ?? 0) >= 0x1100 && !/[─-╿]/.test(ch) ? 2 : 1), 0);
 
 it('启动时展示版本与各角色模型并过滤控制字符', () => {
-  const options: RunSessionOptions = { info: { version: '1.2.3', models: { extractor: 'mock:extract', planner: 'mock:plan', executor: 'mock:execute', reviewer: 'mock:review\u001b' } }, tokenize: text => [text], runSlashCommand: async () => ({ kind: 'exit' }), resolveReview: async () => { throw new Error('unused'); }, chatReply: async () => '' };
+  const options: RunSessionOptions = { ...noUsage,info: { version: '1.2.3', models: { extractor: 'mock:extract', planner: 'mock:plan', executor: 'mock:execute', reviewer: 'mock:review\u001b' } }, tokenize: text => [text], runSlashCommand: async () => ({ kind: 'exit' }), resolveReview: async () => { throw new Error('unused'); }, chatReply: async () => '' };
   const ui = render(<SessionApp options={options} />);
   for (const value of ['1.2.3', 'extractor', 'mock:extract', 'planner', 'mock:plan', 'executor', 'mock:execute', 'reviewer', 'mock:review']) expect(frame(ui)).toContain(value);
   expect(frame(ui)).not.toContain('\u001b');
 });
 
 it('宽终端启动时展示 ASCII 标识，窄终端降级为简洁名称', async () => {
-  const options: RunSessionOptions = { info: { version: '1.2.3', models: undefined }, tokenize: text => [text], runSlashCommand: async () => ({ kind: 'exit' }), resolveReview: async () => { throw new Error('unused'); }, chatReply: async () => '' };
+  const options: RunSessionOptions = { ...noUsage,info: { version: '1.2.3', models: undefined }, tokenize: text => [text], runSlashCommand: async () => ({ kind: 'exit' }), resolveReview: async () => { throw new Error('unused'); }, chatReply: async () => '' };
   const ui = render(<SessionApp options={options} />);
   Object.defineProperty(ui.stdout, 'columns', { value: 100, configurable: true });
   Object.defineProperty(ui.stdout, 'rows', { value: 30, configurable: true });
@@ -43,13 +51,13 @@ it('宽终端启动时展示 ASCII 标识，窄终端降级为简洁名称', asy
 });
 
 it('未配置模型时启动界面显示未配置', () => {
-  const options: RunSessionOptions = { info: { version: '1.2.3', models: undefined }, tokenize: text => [text], runSlashCommand: async () => ({ kind: 'exit' }), resolveReview: async () => { throw new Error('unused'); }, chatReply: async () => '' };
+  const options: RunSessionOptions = { ...noUsage,info: { version: '1.2.3', models: undefined }, tokenize: text => [text], runSlashCommand: async () => ({ kind: 'exit' }), resolveReview: async () => { throw new Error('unused'); }, chatReply: async () => '' };
   const ui = render(<SessionApp options={options} />);
   expect(frame(ui)).toContain('未配置');
 });
 
 it('短对话输入区紧随消息并响应高度变化', async () => {
-  const options: RunSessionOptions = { tokenize: text => [text], runSlashCommand: async () => ({ kind: 'exit' }), resolveReview: async () => { throw new Error('unused'); }, chatReply: async () => '助手回复' };
+  const options: RunSessionOptions = { ...noUsage,tokenize: text => [text], runSlashCommand: async () => ({ kind: 'exit' }), resolveReview: async () => { throw new Error('unused'); }, chatReply: async () => '助手回复' };
   const ui = render(<SessionApp options={options} />);
   Object.defineProperty(ui.stdout, 'rows', { value: 12, configurable: true });
   ui.stdout.emit('resize');
@@ -69,7 +77,7 @@ it('短对话输入区紧随消息并响应高度变化', async () => {
 });
 
 it.skipIf(process.env.FORCE_COLOR !== '3')('用户消息与输入区使用浅灰背景并保留白色边线', async () => {
-  const options: RunSessionOptions = { tokenize: text => [text], runSlashCommand: async () => ({ kind: 'exit' }), resolveReview: async () => { throw new Error('unused'); }, chatReply: async () => '回答' };
+  const options: RunSessionOptions = { ...noUsage,tokenize: text => [text], runSlashCommand: async () => ({ kind: 'exit' }), resolveReview: async () => { throw new Error('unused'); }, chatReply: async () => '回答' };
   const ui = render(<SessionApp options={options} />);
   ui.stdin.write('用户消息'); ui.stdin.write(KEYS.enter);
   await waitFor(() => frame(ui).includes('用户消息'));
@@ -81,7 +89,7 @@ it.skipIf(process.env.FORCE_COLOR !== '3')('用户消息与输入区使用浅灰
 });
 
 it('长回复超出终端高度时仍显示最新内容和底部输入区', async () => {
-  const options: RunSessionOptions = { tokenize: text => [text], runSlashCommand: async () => ({ kind: 'exit' }), resolveReview: async () => { throw new Error('unused'); }, chatReply: async () => Array.from({ length: 30 }, (_, i) => `回复行${i}`).join('\n') };
+  const options: RunSessionOptions = { ...noUsage,tokenize: text => [text], runSlashCommand: async () => ({ kind: 'exit' }), resolveReview: async () => { throw new Error('unused'); }, chatReply: async () => Array.from({ length: 30 }, (_, i) => `回复行${i}`).join('\n') };
   const ui = render(<SessionApp options={options} />);
   Object.defineProperty(ui.stdout, 'rows', { value: 8, configurable: true });
   ui.stdout.emit('resize');
@@ -93,7 +101,7 @@ it('长回复超出终端高度时仍显示最新内容和底部输入区', asyn
   expect(frame(ui).split('\n').at(-1)).toContain('─');
 });
 
-const longReply = (count: number): RunSessionOptions => ({ tokenize: text => [text], runSlashCommand: async () => ({ kind: 'exit' }), resolveReview: async () => { throw new Error('unused'); }, chatReply: async () => Array.from({ length: count }, (_, i) => `回复行${i}`).join('\n') });
+const longReply = (count: number): RunSessionOptions => ({ ...noUsage,tokenize: text => [text], runSlashCommand: async () => ({ kind: 'exit' }), resolveReview: async () => { throw new Error('unused'); }, chatReply: async () => Array.from({ length: count }, (_, i) => `回复行${i}`).join('\n') });
 const resize = (ui: ReturnType<typeof render>, rows: number) => {
   Object.defineProperty(ui.stdout, 'rows', { value: rows, configurable: true });
   ui.stdout.emit('resize');
@@ -204,7 +212,7 @@ it('末行不写入终端最后一列，避免 Windows 控制台自动换行导�
 it('审核退出返回聊天并重新解析会话', async () => {
   const project = await createProject();
   const resolveReview = vi.fn(async () => ({ session: project.session, editor, open }));
-  const options: RunSessionOptions = { tokenize: (text) => text.split(' '), runSlashCommand: async () => ({ kind: 'review', args: { project: project.root, view: 'profile' } }), resolveReview, chatReply: async () => '回答' };
+  const options: RunSessionOptions = { ...noUsage,tokenize: (text) => text.split(' '), runSlashCommand: async () => ({ kind: 'review', args: { project: project.root, view: 'profile' } }), resolveReview, chatReply: async () => '回答' };
   const ui = render(<SessionApp options={options} />);
   ui.stdin.write('/review'); ui.stdin.write(KEYS.enter);
   await waitFor(() => frame(ui).includes('environments.yaml'));
@@ -220,7 +228,7 @@ it('外部取消等待审核写盘完成后才退出', async () => {
   const write = artifacts.writeJson.bind(artifacts);
   vi.spyOn(artifacts, 'writeJson').mockImplementation(async (...args) => { entered.resolve(); await gate.promise; return write(...args); });
   const controller = new AbortController();
-  const options: RunSessionOptions = { signal: controller.signal, tokenize: text => [text], runSlashCommand: async () => ({ kind: 'review', args: { project: root, view: 'profile' } }), resolveReview: async () => ({ session, editor, open }), chatReply: async () => '' };
+  const options: RunSessionOptions = { ...noUsage,signal: controller.signal, tokenize: text => [text], runSlashCommand: async () => ({ kind: 'review', args: { project: root, view: 'profile' } }), resolveReview: async () => ({ session, editor, open }), chatReply: async () => '' };
   const ui = render(<SessionApp options={options} />);
   ui.stdin.write('/review'); ui.stdin.write(KEYS.enter);
   await waitFor(() => frame(ui).includes('environments.yaml'));
@@ -235,7 +243,7 @@ it('外部取消等待审核写盘完成后才退出', async () => {
 
 it('会话显示去除不可信文本中的终端控制字符并保留换行', async () => {
   const payload = '甲\u001b]52;c;SGVsbG8=\u0007乙\u009b丙\u0000丁\n戊';
-  const options: RunSessionOptions = { tokenize: text => [text], runSlashCommand: async () => ({ kind: 'log', code: 0, lines: [payload] }), resolveReview: async () => { throw new Error('unused'); }, chatReply: async () => payload };
+  const options: RunSessionOptions = { ...noUsage,tokenize: text => [text], runSlashCommand: async () => ({ kind: 'log', code: 0, lines: [payload] }), resolveReview: async () => { throw new Error('unused'); }, chatReply: async () => payload };
   const ui = render(<SessionApp options={options} />);
   ui.stdin.write('hello'); ui.stdin.write(KEYS.enter);
   await waitFor(() => frame(ui).includes('丁\n戊'));
@@ -249,7 +257,7 @@ it('会话显示去除不可信文本中的终端控制字符并保留换行', a
 
 it('显示用户输入和错误时过滤控制字符，但不改变提交的原文', async () => {
   const chatReply = vi.fn(async (_history: unknown, _text: string) => { throw new Error('失败\u009b隐藏\u0000文本'); });
-  const options: RunSessionOptions = { tokenize: text => [text], runSlashCommand: async () => ({ kind: 'exit' }), resolveReview: async () => { throw new Error('unused'); }, chatReply };
+  const options: RunSessionOptions = { ...noUsage,tokenize: text => [text], runSlashCommand: async () => ({ kind: 'exit' }), resolveReview: async () => { throw new Error('unused'); }, chatReply };
   const ui = render(<SessionApp options={options} />);
   ui.stdin.write('用户\u009b输入');
   await waitFor(() => frame(ui).includes('用户输入'));
@@ -264,7 +272,7 @@ it('显示用户输入和错误时过滤控制字符，但不改变提交的原�
 it('外部中断的正常取消保持退出码二', async () => {
   const entered = deferred<void>(), gate = deferred<void>();
   const controller = new AbortController();
-  const options: RunSessionOptions = { signal: controller.signal, tokenize: text => [text], runSlashCommand: async (_tokens, signal) => { entered.resolve(); await gate.promise; signal.throwIfAborted(); return { kind: 'exit' }; }, resolveReview: async () => { throw new Error('unused'); }, chatReply: async () => '' };
+  const options: RunSessionOptions = { ...noUsage,signal: controller.signal, tokenize: text => [text], runSlashCommand: async (_tokens, signal) => { entered.resolve(); await gate.promise; signal.throwIfAborted(); return { kind: 'exit' }; }, resolveReview: async () => { throw new Error('unused'); }, chatReply: async () => '' };
   const ui = render(<SessionApp options={options} />);
   ui.stdin.write('/plan'); ui.stdin.write(KEYS.enter); await entered.promise;
   controller.abort(); gate.resolve();
@@ -278,7 +286,7 @@ it('外部中断审核等待结束后传播写盘错误', async () => {
   const failure = new Error('写盘失败');
   vi.spyOn(artifacts, 'writeJson').mockImplementation(async () => { entered.resolve(); await gate.promise; throw failure; });
   const controller = new AbortController();
-  const options: RunSessionOptions = { signal: controller.signal, tokenize: text => [text], runSlashCommand: async () => ({ kind: 'review', args: { project: root, view: 'profile' } }), resolveReview: async () => ({ session, editor, open }), chatReply: async () => '' };
+  const options: RunSessionOptions = { ...noUsage,signal: controller.signal, tokenize: text => [text], runSlashCommand: async () => ({ kind: 'review', args: { project: root, view: 'profile' } }), resolveReview: async () => ({ session, editor, open }), chatReply: async () => '' };
   const ui = render(<SessionApp options={options} />);
   ui.stdin.write('/review'); ui.stdin.write(KEYS.enter);
   await waitFor(() => frame(ui).includes('environments.yaml'));
@@ -292,7 +300,7 @@ it('外部中断操作等待结束后传播非取消错误', async () => {
   const entered = deferred<void>(), gate = deferred<void>();
   const failure = new Error('宿主失败');
   const controller = new AbortController();
-  const options: RunSessionOptions = { signal: controller.signal, tokenize: text => [text], runSlashCommand: async () => { entered.resolve(); await gate.promise; throw failure; }, resolveReview: async () => { throw new Error('unused'); }, chatReply: async () => '' };
+  const options: RunSessionOptions = { ...noUsage,signal: controller.signal, tokenize: text => [text], runSlashCommand: async () => { entered.resolve(); await gate.promise; throw failure; }, resolveReview: async () => { throw new Error('unused'); }, chatReply: async () => '' };
   const ui = render(<SessionApp options={options} />);
   ui.stdin.write('/plan'); ui.stdin.write(KEYS.enter); await entered.promise;
   controller.abort(); gate.resolve();
@@ -323,7 +331,7 @@ it('中断任务后等待清理，不接收重复输入并允许后续任务', a
     entered.resolve(); await release.promise; signal.throwIfAborted();
     return { kind: 'log' as const, code: 0, lines: [] };
   });
-  const options: RunSessionOptions = { tokenize: (text) => [text], runSlashCommand, resolveReview: async () => { throw new Error('unused'); }, chatReply: async () => '回答' };
+  const options: RunSessionOptions = { ...noUsage,tokenize: (text) => [text], runSlashCommand, resolveReview: async () => { throw new Error('unused'); }, chatReply: async () => '回答' };
   const ui = render(<SessionApp options={options} />);
   ui.stdin.write('/plan'); ui.stdin.write(KEYS.enter); await entered.promise;
   ui.stdin.write('\u0003'); ui.stdin.write('/again'); ui.stdin.write(KEYS.enter);
@@ -339,7 +347,7 @@ const completionCommands = [
   { name: 'review', description: '交互审核' },
   { name: 'exit', description: '退出会话' },
 ];
-const completionOptions = (overrides?: Partial<RunSessionOptions>): RunSessionOptions => ({ slashCommands: completionCommands, tokenize: text => [text], runSlashCommand: async () => ({ kind: 'exit' }), resolveReview: async () => { throw new Error('unused'); }, chatReply: async () => '', ...overrides });
+const completionOptions = (overrides?: Partial<RunSessionOptions>): RunSessionOptions => ({ ...noUsage,slashCommands: completionCommands, tokenize: text => [text], runSlashCommand: async () => ({ kind: 'exit' }), resolveReview: async () => { throw new Error('unused'); }, chatReply: async () => '', ...overrides });
 // ink 的 useInput 在挂载后才订阅 stdin，首次写入前需让事件循环先转一圈。
 const mounted = () => new Promise<void>((resolve) => setTimeout(resolve, 50));
 
@@ -513,6 +521,126 @@ it('执行中隐藏终端光标，结束后重新显示', async () => {
   expect(writes.indexOf('\u001B[?25l')).toBeGreaterThan(writes.indexOf('\u001B[?25h'));
   release.resolve();
   ui.unmount();
+});
+
+it('启动会话在聊天和模型命令后刷新用量，跨项目命令不混入且清空换 ID', async () => {
+  const { root } = await createProject();
+  const target = await createProject();
+  const home = path.join(root, 'user');
+  const prompt = '会话提示词不得写入账本';
+  const model = scriptedModel([{ text: '真实会话回复', usage: { cacheRead: 0 } }, { toolCalls: [{ name: 'finish', input: { markdown: '# 当前项目笔记' } }] }, { toolCalls: [{ name: 'finish', input: { markdown: '# 目标项目笔记' } }] }]);
+  const run = vi.spyOn(tui, 'runSession').mockResolvedValue(0);
+  try {
+    await sessionCommand({ command: 'session', project: root, open: false }, () => {}, { userConfigHome: home, session: { isTTY: true }, modelOptions: { env: {}, factories: { openai: () => model } } });
+    const ui = render(<SessionApp options={{ ...run.mock.calls[0]![0], mouseTracking: undefined }} />);
+    resize(ui, 45);
+    await mounted();
+    const send = (input: string) => { ui.stdin.write(input); ui.stdin.write(KEYS.enter); };
+    const id = () => /会话 ID：([a-f0-9-]{36})/.exec(frame(ui))?.[1];
+    await waitFor(() => Boolean(id()) && frame(ui).includes('调用 0'));
+    const oldId = id()!;
+    send(prompt);
+    await waitFor(() => frame(ui).includes('真实会话回复') && frame(ui).includes('调用 1'));
+    send('/init');
+    await waitFor(() => frame(ui).includes('退出码 0') && frame(ui).includes('调用 2'));
+    send(`/init --project "${target.root}"`);
+    await waitFor(() => (frame(ui).match(/退出码 0/g) ?? []).length === 2 && !frame(ui).includes('Ctrl+C 中断'));
+    expect(frame(ui)).toContain('调用 2');
+    expect((await readUsage({ project: target.root, home, sessionId: oldId })).total.calls).toBe(1);
+    const { directory } = await projectUsageLocation(root, home);
+    const contents = await Promise.all((await fs.readdir(directory)).map(file => fs.readFile(path.join(directory, file), 'utf8')));
+    const events = contents.map(text => JSON.parse(text));
+    const chatCalls = model.doGenerateCalls.filter(call => JSON.stringify(call.prompt).includes(prompt)).length;
+    expect(chatCalls).toBe(1);
+    expect(events.filter(event => event.command === 'chat')).toEqual([expect.objectContaining({
+      sessionId: oldId, status: 'success', price: null, cost: null,
+      usage: { inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: null },
+    })]);
+    expect(new Set(events.map(event => event.id)).size).toBe(events.length);
+    for (const privateText of ['fixture-key', prompt, '真实会话回复']) expect(contents.join('\n')).not.toContain(privateText);
+    send('/clear');
+    await waitFor(() => frame(ui).includes('已清空对话历史') && frame(ui).includes('调用 0') && Boolean(id()) && id() !== oldId);
+    expect((await readUsage({ project: root, home })).total.calls).toBe(2);
+    expect((await readUsage({ project: root, home, sessionId: id()! })).total.calls).toBe(0);
+  } finally { run.mockRestore(); }
+});
+
+it('账本写入告警在操作结束后仍可见，恢复可读也不把缺失统计标成完整', async () => {
+  const { root } = await createProject();
+  const home = path.join(root, 'user');
+  const { directory } = await projectUsageLocation(root, home);
+  const blocked = path.dirname(path.dirname(directory));
+  const model = scriptedModel([{ text: '未丢失的回复' }, { toolCalls: [{ name: 'finish', input: { markdown: '# 告警后仍保存' } }] }]);
+  const run = vi.spyOn(tui, 'runSession').mockResolvedValue(0);
+  try {
+    await sessionCommand({ command: 'session', project: root, open: false }, () => {}, { userConfigHome: home, session: { isTTY: true }, modelOptions: { env: {}, factories: { openai: () => model } } });
+    const ui = render(<SessionApp options={{ ...run.mock.calls[0]![0], mouseTracking: undefined }} />);
+    resize(ui, 40);
+    await mounted();
+    await writeFile(blocked, '暂时占用账本路径');
+    ui.stdin.write('问题'); ui.stdin.write(KEYS.enter);
+    await waitFor(() => frame(ui).includes('未丢失的回复') && !frame(ui).includes('Ctrl+C 中断'));
+    expect(frame(ui)).toContain('用量记录写入失败');
+    await rm(blocked);
+    ui.stdin.write('/usage --session'); ui.stdin.write(KEYS.enter);
+    await waitFor(() => frame(ui).includes('退出码 0'));
+    expect(frame(ui)).toMatch(/调用 0[^\n]*统计不完整/);
+    await writeFile(blocked, '再次占用账本路径');
+    ui.stdin.write('/init'); ui.stdin.write(KEYS.enter);
+    await waitFor(() => (frame(ui).match(/退出码 0/g) ?? []).length === 2 && !frame(ui).includes('Ctrl+C 中断'));
+    expect(frame(ui).match(/用量记录写入失败/g)).toHaveLength(2);
+  } finally { run.mockRestore(); }
+});
+
+it.each(['聊天', 'init'] as const)('%s 已确定结果后，账本屏障中的 Ctrl+C 不撤销结果', async kind => {
+  const { root, artifacts } = await createProject();
+  const home = path.join(root, 'user');
+  const { directory } = await projectUsageLocation(root, home);
+  const entered = deferred<void>(), release = deferred<void>();
+  const originalMkdir = (await vi.importActual<typeof fs>('node:fs/promises')).mkdir;
+  const mkdir = vi.mocked(fs.mkdir).mockImplementation((async (...args: Parameters<typeof fs.mkdir>) => {
+    if (args[0] === directory) { entered.resolve(); await release.promise; }
+    return originalMkdir(...args);
+  }) as typeof fs.mkdir);
+  const model = kind === '聊天' ? scriptedModel([{ text: '已生成的答案' }]) : scriptedModel([{ toolCalls: [{ name: 'finish', input: { markdown: '# 已保存的笔记' } }] }]);
+  const run = vi.spyOn(tui, 'runSession').mockResolvedValue(0);
+  try {
+    await sessionCommand({ command: 'session', project: root, open: false }, () => {}, { userConfigHome: home, session: { isTTY: true }, modelOptions: { env: {}, factories: { openai: () => model } } });
+    const ui = render(<SessionApp options={{ ...run.mock.calls[0]![0], mouseTracking: undefined }} />);
+    resize(ui, 35);
+    await mounted();
+    ui.stdin.write(kind === '聊天' ? '提问' : '/init'); ui.stdin.write(KEYS.enter);
+    await entered.promise;
+    if (kind === 'init') expect((await artifacts.readBytes('notes.md'))?.toString()).toBe('# 已保存的笔记');
+    ui.stdin.write('\u0003');
+    release.resolve();
+    await waitFor(() => frame(ui).includes('调用 1') && !frame(ui).includes('Ctrl+C 中断'));
+    expect(frame(ui)).not.toContain('操作已中断');
+    expect(frame(ui)).toContain(kind === '聊天' ? '已生成的答案' : '退出码 0');
+    expect(model.doGenerateCalls).toHaveLength(1);
+  } finally { release.resolve(); mkdir.mockRestore(); run.mockRestore(); }
+});
+
+it.each([42, 24])('/usage 在 %i 列可读完整 UUID 和每组费用，恶意模型名不折行', async columns => {
+  const { root } = await createProject();
+  const home = path.join(root, 'user');
+  const currentId = '12345678-1234-4123-8123-123456789abc';
+  const ref = `mock:${'x'.repeat(160)} 伪造退出码`;
+  await createUsageObserver({ project: root, home, sessionId: currentId, command: 'chat', role: 'planner', pricing: { [ref]: { inputPerMTok: 1, outputPerMTok: 2 } }, warn: () => {} })({
+    ref, status: 'success', purpose: 'request', usage: { inputTokens: 100, outputTokens: 10, cacheReadTokens: 0, cacheWriteTokens: 0 },
+  });
+  const ui = render(<SessionApp options={completionOptions({ tokenize: tokenizeCommand, runSlashCommand: createSlashDispatcher({ userConfigHome: home }, { currentId, project: root }) })} />);
+  Object.defineProperty(ui.stdout, 'columns', { value: columns, configurable: true });
+  resize(ui, 60);
+  await mounted();
+  ui.stdin.write('/usage --session'); ui.stdin.write(KEYS.enter);
+  await waitFor(() => frame(ui).includes('按模型分组'));
+  const output = frame(ui);
+  const idSection = output.split('会话 ID：')[1]?.split('总计：')[0];
+  expect(idSection?.replace(/\s/g, '')).toBe(currentId);
+  expect(output).toMatch(/mock:x+…/);
+  expect(output).not.toContain('伪造退出码');
+  expect(output.replace(/\s/g, '').match(/已知费用估算0\.00012/g)).toHaveLength(4);
 });
 
 it('clear 指令清空对话消息与模型历史', async () => {

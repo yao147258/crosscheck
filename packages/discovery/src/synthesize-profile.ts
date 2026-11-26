@@ -43,6 +43,8 @@ export interface SynthesizeProfileOptions {
   budget: () => BudgetTracker;
   signal?: AbortSignal;
   resilience?: RunAgentOptions<unknown>['resilience'];
+  usageObserver?: RunAgentOptions<unknown>['usageObserver'];
+  usageObservationScope?: RunAgentOptions<unknown>['usageObservationScope'];
 }
 
 export interface SynthesizeProfileResult {
@@ -98,6 +100,7 @@ export async function synthesizeProfile(options: SynthesizeProfileOptions): Prom
       budget: options.budget(),
       signal: options.signal,
       resilience: options.resilience,
+      usageObserver: options.usageObserver, usageObservationScope: options.usageObservationScope,
       tools: [],
       system: SYNTHESIS_SYSTEM,
       messages: [{

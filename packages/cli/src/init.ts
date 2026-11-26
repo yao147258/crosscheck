@@ -1,8 +1,9 @@
 import { Approvals, ArtifactStore, BudgetTracker, decodeNotesUtf8, NotesTextSchema, ProjectConfigSchema } from '@crosscheck/core';
 import { synthesizeNotes, walkProject } from '@crosscheck/discovery';
 import { sanitizeMultiline } from '@crosscheck/discovery/sanitize';
+import { createUsageObservationScope } from '@crosscheck/models';
 import type { CliArgs } from './args';
-import { loadModelContext, resolveModels, withCliProgress, withInterrupt, type CommandDependencies } from './context';
+import { createCommandUsageObserver, loadModelContext, resolveModels, withCliProgress, withInterrupt, type CommandDependencies } from './context';
 
 export const NOTES_FILE = 'notes.md';
 export const CONFIG_TEMPLATE = {
@@ -11,6 +12,7 @@ export const CONFIG_TEMPLATE = {
 };
 
 export async function initCommand(args: CliArgs, log: (s: string) => void, deps: CommandDependencies = {}, signal?: AbortSignal): Promise<number> {
+  const usageObservationScope = deps.usageObservationScope ?? createUsageObservationScope();
   return withInterrupt(signal, async (sig) => {
     const artifacts = new ArtifactStore(args.project);
     const projectConfig = await artifacts.readYaml('config.yaml', ProjectConfigSchema);
@@ -45,6 +47,7 @@ export async function initCommand(args: CliArgs, log: (s: string) => void, deps:
       previous: args.refresh && existing !== undefined ? redactor.text(existing) : undefined,
       clean: (text) => redactor.text(text),
       models, budget: () => new BudgetTracker(config.budget.discovery), signal: sig, resilience: deps.resilience,
+      usageObserver: createCommandUsageObserver(args.project, 'init', 'extractor', config.pricing, deps, log), usageObservationScope,
     })).catch((error: unknown) => {
       if (sig.aborted && (error === sig.reason || error instanceof Error && error.name === 'AbortError')) throw error;
       throw new Error(redactor.text(error instanceof Error ? error.message : '模型调用失败'));
@@ -71,5 +74,5 @@ export async function initCommand(args: CliArgs, log: (s: string) => void, deps:
     sig.throwIfAborted();
     log('项目笔记草稿已写入 .crosscheck/notes.md，请运行 crosscheck review notes 审核');
     return 0;
-  });
+  }, deps.usageObservationScope ? undefined : () => usageObservationScope.flush());
 }

@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
@@ -10,6 +10,7 @@ const cliMain: typeof realCliMain = (argv, options = {}) => {
   return realCliMain(argv, { ...options, dependencies: { ...options.dependencies, userConfigHome: index >= 0 ? path.join(argv[index + 1]!, 'user') : undefined } });
 };
 import { CONFIG_TEMPLATE } from '../src/init';
+import { projectUsageLocation, readUsage, type UsageEvent } from '@crosscheck/models';
 import { InterruptedError, resolveModels, withInterrupt } from '../src/context';
 
 const roots: string[] = [];
@@ -150,7 +151,12 @@ it('生成 7 份画像草稿且不写确认记录；重跑时保留已确认文�
   const { root, artifacts } = await project(true);
   const model = scriptedModel([EXPLORE, ...STEPS]); const out: string[] = [];
   const originalApprovals = await artifacts.readBytes('approvals.json');
-  expect(await cliMain(['profile', '--project', root], { log: (s) => out.push(s), dependencies: deps(model) })).toBe(0);
+  expect(await cliMain(['profile', '--project', root], { log: (s) => out.push(s), dependencies: { ...deps(model), usageContext: { sessionId: 's1', warn: (s) => out.push(s) } } })).toBe(0);
+  expect(model.doGenerateCalls).toHaveLength(6);
+  const usage = await readUsage({ project: root, home: path.join(root, 'user'), sessionId: 's1' });
+  expect(usage.total.calls).toBe(model.doGenerateCalls.length);
+  expect(usage.byCommand.profile?.calls).toBe(model.doGenerateCalls.length);
+  expect(usage.byRole.extractor?.calls).toBe(model.doGenerateCalls.length);
   for (const name of Object.keys(FILES)) expect(await readProfileFile(artifacts, name as keyof typeof FILES)).toMatchObject({ present: true, ok: true });
   expect(await artifacts.readBytes('approvals.json')).toEqual(originalApprovals);
   for (const call of model.doGenerateCalls) expect(JSON.stringify(call.prompt)).toContain('# 项目笔记');
@@ -165,6 +171,14 @@ it('生成 7 份画像草稿且不写确认记录；重跑时保留已确认文�
   const second = scriptedModel([EXPLORE, ...STEPS.slice(1)]);
   expect(await cliMain(['profile', '--project', root], { log: (s) => out.push(s), dependencies: deps(second) })).toBe(0);
   expect(second.doGenerateCalls).toHaveLength(5);
+  const { directory } = await projectUsageLocation(root, path.join(root, 'user'));
+  const contents = await Promise.all((await readdir(directory)).map(file => readFile(path.join(directory, file), 'utf8')));
+  const events: UsageEvent[] = contents.map(text => JSON.parse(text));
+  expect(events.filter(event => event.command === 'profile' && event.sessionId === 's1')).toHaveLength(model.doGenerateCalls.length);
+  expect(events.filter(event => event.command === 'profile' && event.sessionId === null)).toHaveLength(second.doGenerateCalls.length);
+  expect(events).toHaveLength(model.doGenerateCalls.length + second.doGenerateCalls.length);
+  expect(new Set(events.map(event => event.id)).size).toBe(events.length);
+  for (const privateText of ['fixture-key', '# 项目笔记']) expect(contents.join('\n')).not.toContain(privateText);
   expect(await artifacts.readBytes('system/environments.yaml')).toEqual(envBytes);
   expect(await artifacts.readBytes('approvals.json')).toEqual(approvalBytes);
   expect(out.join('\n')).toContain('跳过（已确认）');

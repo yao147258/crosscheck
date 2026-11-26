@@ -1,4 +1,5 @@
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { existsSync, readdirSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { RunStore } from '../src/store/run-store';
@@ -11,9 +12,10 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { MockLanguageModelV4 } from 'ai/test';
 import { Approvals, ArtifactStore, ClauseSchema, TestCaseSchema, loadProfile, RunResultSchema } from '@crosscheck/core';
 import { scriptedModel } from '../../agent/src/testing/scripted-model';
+import { readUsage } from '@crosscheck/models';
 import { runSuite as realRunSuite, type RunSuiteOptions } from '../src/run-suite';
 const userFile = (artifacts: ArtifactStore) => path.join(path.dirname(artifacts.root), 'user', '.crosscheck', 'config.yaml');
-const runSuite = (options: RunSuiteOptions) => realRunSuite({ ...options, userConfigHome: path.join(path.dirname(options.artifacts.root), 'user') });
+const runSuite = (options: RunSuiteOptions) => realRunSuite({ usageContext: { sessionId: null, warn: () => {} }, ...options, userConfigHome: path.join(path.dirname(options.artifacts.root), 'user') });
 async function changeUser(artifacts: ArtifactStore, change: (config: any) => void) { const file = userFile(artifacts); const config = JSON.parse(await readFile(file, 'utf8')); change(config); await writeFile(file, JSON.stringify(config)); }
 
 const roots: string[] = [];
@@ -140,10 +142,62 @@ describe('Task9真实编排边界', () => {
   });
   it('review主模型重试和fallback每次provider输入都隔离执行结论', async () => {
     const { artifacts } = await setup(); const h = harness(artifacts, 'pass', 'pass', 10);
-    const r = await runSuite(h.options); expect(r.result?.status).toBe('PASS');
+    const project = path.dirname(artifacts.root);
+    const r = await runSuite({ ...h.options, usageProject: project }); expect(r.result?.status).toBe('PASS');
     expect(h.reviewer.doGenerateCalls).toHaveLength(2); expect(h.fallback.doGenerateCalls).toHaveLength(1);
+    const usage = await readUsage({ project, home: path.join(project, 'user') });
+    expect(usage.total.calls).toBe(h.executor.doGenerateCalls.length + h.reviewer.doGenerateCalls.length + h.fallback.doGenerateCalls.length);
+    expect(usage.byRole.reviewer?.calls).toBe(3);
+    expect(usage.byModel['mock:r']?.calls).toBe(2);
+    expect(usage.byModel['mock:f']?.calls).toBe(1);
     for (const call of [...h.reviewer.doGenerateCalls, ...h.fallback.doGenerateCalls]) { expect(JSON.stringify(call.prompt)).not.toContain('EXECUTOR_SENTINEL_8291'); expect(JSON.stringify(call.prompt)).toContain('原文'); }
     expect(r.result?.cases[0]?.reliability.attempts).toBe(5);
+  });
+  it('账本写入失败只在定案及释放锁后告警，不增加请求或改变严格审计', async () => {
+    const { artifacts } = await setup(); const h = harness(artifacts);
+    const project = path.dirname(artifacts.root);
+    await writeFile(path.join(project, 'user', '.crosscheck', 'projects'), '占用目录');
+    const warnings: string[] = [];
+    const snapshots: boolean[][] = [];
+    const outcome = await runSuite({ ...h.options, usageProject: project, usageContext: { sessionId: 's1', warn: message => {
+      warnings.push(message);
+      const [id] = readdirSync(artifacts.resolve('runs'));
+      snapshots.push([existsSync(artifacts.resolve(`runs/${id}/lock.json`)), existsSync(artifacts.resolve(`runs/${id}/results.json`))]);
+    } } });
+    expect(outcome.exitCode).toBe(0);
+    expect(outcome.result?.status).toBe('PASS');
+    expect(outcome.result?.usage).toMatchObject({ inputTokens: 30, outputTokens: 15 });
+    expect(h.executor.doGenerateCalls).toHaveLength(2);
+    expect(h.reviewer.doGenerateCalls).toHaveLength(1);
+    expect(warnings).toEqual(Array(3).fill('用量记录写入失败，本次统计不完整'));
+    expect(snapshots).toEqual([[false, true], [false, true], [false, true]]);
+    const id = outcome.result!.manifest.runId;
+    const audit = (await artifacts.readBytes(`runs/${id}/cases/M-TC-1/attempts/1/models.json`))!;
+    expect(JSON.parse(audit.toString()).map((item: { phase: string; attempts: unknown[] }) => [item.phase, item.attempts.length])).toEqual([['execution', 2], ['review', 1]]);
+  });
+  it('严格模型审计写入失败仍退出 3，已经发生的请求照常记账', async () => {
+    const { artifacts } = await setup(); const h = harness(artifacts);
+    const project = path.dirname(artifacts.root);
+    const outcome = await runSuite({ ...h.options, usageProject: project, transport: async url => {
+      const [id] = await artifacts.list('runs');
+      await mkdir(artifacts.resolve(`runs/${id}/cases/M-TC-1/attempts/1/models.json`), { recursive: true });
+      return h.options.transport(url);
+    } });
+    expect(outcome.exitCode).toBe(3);
+    expect(outcome.result).toBeUndefined();
+    expect(h.executor.doGenerateCalls).toHaveLength(2);
+    expect(h.reviewer.doGenerateCalls).toHaveLength(1);
+    const usage = await readUsage({ project, home: path.join(project, 'user') });
+    expect(usage.total.calls).toBe(3);
+  });
+  it('外部 SDK 缺省 usageProject 时警告并跳过账本，业务照常完成', async () => {
+    const { artifacts } = await setup(); const h = harness(artifacts);
+    const warnings: string[] = [];
+    const outcome = await runSuite({ ...h.options, usageContext: { sessionId: 's1', warn: message => warnings.push(message) } });
+    expect(outcome.result?.status).toBe('PASS');
+    expect(warnings).toEqual([expect.stringContaining('usageProject')]);
+    const project = path.dirname(artifacts.root);
+    expect((await readUsage({ project, home: path.join(project, 'user') })).total.calls).toBe(0);
   });
   it('主模型缺少全局密钥时返回安全配置诊断及退出码2', async () => {
     const { artifacts } = await setup();
@@ -305,8 +359,15 @@ describe('Task9恢复/证据/资源故障', () => {
       return scriptedModel([step]).doGenerate(opts);
     } });
     const urls: string[] = [];
-    const r = await runSuite({ artifacts, modelOptions: { factories: { openai: () => model } }, transport: async url => { urls.push(url); return new Response('{}', { headers: { 'content-type': 'application/json' } }); } });
+    const project = path.dirname(artifacts.root);
+    const r = await runSuite({ artifacts, usageProject: project, usageContext: { sessionId: 's1', warn: () => {} }, modelOptions: { factories: { openai: () => model } }, transport: async url => { urls.push(url); return new Response('{}', { headers: { 'content-type': 'application/json' } }); } });
     expect(r.result?.status).toBe('UNCLEAR'); expect(urls).toEqual(['http://localhost:39999/health', 'http://localhost:39999/seed']);
+    expect(model.doGenerateCalls).toHaveLength(4);
+    const usage = await readUsage({ project, home: path.join(project, 'user'), sessionId: 's1' });
+    expect(usage.total.calls).toBe(model.doGenerateCalls.length);
+    expect(usage.byCommand.run?.calls).toBe(model.doGenerateCalls.length);
+    expect(usage.byRole.executor?.calls).toBe(3);
+    expect(usage.byRole.reviewer?.calls).toBe(1);
     expect(r.result?.cases[0]?.reliability.errors).toContain('fixture-ad-hoc:missing'); expect(r.result?.cases[0]?.suggestions).toHaveLength(1);
     expect(JSON.stringify(model.doGenerateCalls[2]?.tools)).not.toMatch(/fixture_execute|program|command/);
     expect(JSON.stringify(model.doGenerateCalls[3]?.prompt)).not.toContain('fixture');
@@ -399,7 +460,7 @@ describe('Task9恢复/证据/资源故障', () => {
   it('单用例仍真实审批，运行期输入变更不改变已固定快照，后续resume拒绝', async () => {
     const { artifacts } = await setup(); let changed = false;
     const model = scriptedModel([finish('unclear', [], '原条款不可判定'), finish('unclear', [], '独立不可判定')]);
-    const r = await runCase({ artifacts, userConfigHome: path.join(path.dirname(artifacts.root), 'user'), caseId: tc.id, modelOptions: { factories: { openai: () => model } }, transport: async () => { if (!changed) { changed = true; await artifacts.saveClauses('M', [{ ...clause, text: 'MUTATED_MID_RUN' }]); } return new Response('{}', { headers: { 'content-type': 'application/json' } }); } });
+    const r = await runCase({ artifacts, userConfigHome: path.join(path.dirname(artifacts.root), 'user'), usageContext: { sessionId: null, warn: () => {} }, caseId: tc.id, modelOptions: { factories: { openai: () => model } }, transport: async () => { if (!changed) { changed = true; await artifacts.saveClauses('M', [{ ...clause, text: 'MUTATED_MID_RUN' }]); } return new Response('{}', { headers: { 'content-type': 'application/json' } }); } });
     expect(r.result?.status).toBe('UNCLEAR');
     expect(JSON.stringify(model.doGenerateCalls)).not.toContain('MUTATED_MID_RUN');
     const next = await runSuite({ artifacts, resume: r.result!.manifest.runId }); expect(next.exitCode).toBe(2); expect(next.error).toContain('指纹');

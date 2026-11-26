@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { BudgetLimits, BudgetTracker } from '@crosscheck/core';
-import type { ModelCandidate, ResilienceOptions } from '@crosscheck/models';
+import { createUsageObservationScope, type ModelCandidate, type ResilienceOptions, type UsageObservationScope, type UsageObserver } from '@crosscheck/models';
 import { z } from 'zod';
 import { collectEvidenceIds, type EvidencePresenter } from './context';
 import type { Stage } from './grants';
@@ -33,6 +33,8 @@ export interface ParentContext {
   evidencePresenter?: EvidencePresenter;
   /** 返回其中真实存在于证据库的 ID；省略时全部视为未核验而丢弃（fail-closed）。 */
   verifyEvidenceIds?: (ids: readonly string[]) => Promise<readonly string[]>;
+  usageObserver?: UsageObserver;
+  usageObservationScope?: UsageObservationScope;
   onModelAttempt?: (attempt: ModelAttempt) => void | Promise<void>;
   onToolCall?: (event: ToolCallEvent) => void | Promise<void>;
   onContextPrepared?: (event: ContextPreparedEvent) => void | Promise<void>;
@@ -79,6 +81,12 @@ function keepEvidence(value: unknown, keep: ReadonlySet<string>): unknown {
 }
 
 export async function spawnSubAgent<O = SubAgentReport>(parent: ParentContext, spec: SubAgentSpec<O>, share = 0.5): Promise<SubAgentResult<O>> {
+  const scope = parent.usageObservationScope ?? createUsageObservationScope();
+  try { return await spawnSubAgentInScope({ ...parent, usageObservationScope: scope }, spec, share); }
+  finally { if (!parent.usageObservationScope) await scope.flush(); }
+}
+
+async function spawnSubAgentInScope<O>(parent: ParentContext, spec: SubAgentSpec<O>, share: number): Promise<SubAgentResult<O>> {
   const tools = selectSubAgentTools(parent, spec);
   const agentId = `${parent.agentId}/${spec.name}-${randomUUID().slice(0, 8)}`;
   const budget = parent.budget.child(spec.cap, share);
@@ -91,7 +99,7 @@ export async function spawnSubAgent<O = SubAgentReport>(parent: ParentContext, s
     messages: [{ role: 'user', content: JSON.stringify({ task: spec.task, ...(spec.context === undefined ? {} : { context: spec.context }) }) }],
     tools, output, budget, signal: parent.signal, resilience: parent.resilience,
     evidencePresenter: parent.evidencePresenter, requiredEvidenceIds: [],
-    agentId, parentId: parent.agentId,
+    agentId, parentId: parent.agentId, usageObserver: parent.usageObserver, usageObservationScope: parent.usageObservationScope,
     onModelAttempt: parent.onModelAttempt, onToolCall: parent.onToolCall, onContextPrepared: parent.onContextPrepared,
   });
   if (result.status === 'blocked') {
@@ -112,6 +120,12 @@ export async function spawnSubAgent<O = SubAgentReport>(parent: ParentContext, s
 
 /** 宿主编排扇出：仅用于只读或无状态工具；各子代理平分父剩余步数与 token 的 share。 */
 export async function runSubAgents<O = SubAgentReport>(parent: ParentContext, specs: SubAgentSpec<O>[], opts: { concurrency?: number; share?: number } = {}): Promise<SubAgentResult<O>[]> {
+  const scope = parent.usageObservationScope ?? createUsageObservationScope();
+  try { return await runSubAgentsInScope({ ...parent, usageObservationScope: scope }, specs, opts); }
+  finally { if (!parent.usageObservationScope) await scope.flush(); }
+}
+
+async function runSubAgentsInScope<O>(parent: ParentContext, specs: SubAgentSpec<O>[], opts: { concurrency?: number; share?: number }): Promise<SubAgentResult<O>[]> {
   const concurrency = opts.concurrency ?? 3;
   if (!Number.isSafeInteger(concurrency) || concurrency < 1) throw new Error('并发数必须为正整数');
   for (const spec of specs) selectSubAgentTools(parent, spec);

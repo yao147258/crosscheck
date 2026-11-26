@@ -6,6 +6,7 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { Approvals, ArtifactStore, ClauseSchema, TestCaseSchema, loadProfile } from '@crosscheck/core';
 import { scriptedModel, type ScriptStep } from '../../agent/src/testing/scripted-model';
 import { cliMain as realCliMain } from '../src/main';
+import { projectUsageLocation, readUsage } from '@crosscheck/models';
 const cliMain: typeof realCliMain = (argv, options = {}) => {
   const index = argv.indexOf('--project');
   return realCliMain(argv, { ...options, dependencies: { ...options.dependencies, userConfigHome: index >= 0 ? path.join(argv[index + 1]!, 'user') : undefined } });
@@ -18,6 +19,7 @@ afterEach(async () => {
   vi.restoreAllMocks();
   // 模块被 vi.mock(spy) 自动监听时 restoreAllMocks 不会清掉 lstat 的伪实现，需显式重置，避免泄漏到后续用例
   vi.mocked(fs.lstat).mockReset();
+  vi.mocked(fs.mkdir).mockReset();
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 const finish = (input: unknown): ScriptStep => ({ toolCalls: [{ name: 'finish', input }] });
@@ -88,6 +90,58 @@ it('reqs 初次写草稿且不写确认记录，重跑仅保留真正已确认�
   expect(userMessage(second).known).toEqual([{ id: c1.id, text: c1.text, source: c1.source }]);
   expect(await artifacts.readBytes('approvals.json')).toEqual(approvalBytes);
   expect(out.join('\n')).toContain('保留已确认 1 条');
+});
+
+it.each([['reqs', 'extractor'], ['plan', 'planner']] as const)('%s 每次实际请求仅记一次并归入 %s', async (command, role) => {
+  const { root } = await plannableProject();
+  const model = scriptedModel([finish(command === 'reqs' ? [c2] : [case1])]);
+  expect(await cliMain([command, '--module', 'M', '--project', root], { log: () => {}, dependencies: deps(model) })).toBe(0);
+  expect(model.doGenerateCalls).toHaveLength(1);
+  const usage = await readUsage({ project: root, home: path.join(root, 'user') });
+  expect(usage.total.calls).toBe(model.doGenerateCalls.length);
+  expect(usage.byCommand[command]?.calls).toBe(model.doGenerateCalls.length);
+  expect(usage.byRole[role]?.calls).toBe(model.doGenerateCalls.length);
+});
+
+it.each([['reqs', 'SIGINT'], ['plan', 'SIGTERM']] as const)('%s 在业务提交后等待账本，期间 %s 不撤销结果或重发请求', async (command, event) => {
+  const { root, artifacts } = command === 'reqs' ? await project() : await plannableProject();
+  const home = path.join(root, 'user');
+  const { directory } = await projectUsageLocation(root, home);
+  const originalMkdir = (await vi.importActual<typeof fs>('node:fs/promises')).mkdir;
+  let markEntered!: () => void;
+  let release!: () => void;
+  const entered = new Promise<void>(resolve => { markEntered = resolve; });
+  const released = new Promise<void>(resolve => { release = resolve; });
+  vi.mocked(fs.mkdir).mockImplementation(async (...args: Parameters<typeof fs.mkdir>) => {
+    if (args[0] === directory) {
+      markEntered();
+      await released;
+    }
+    return originalMkdir(...args);
+  });
+  const priorListeners = process.listeners(event);
+  const model = scriptedModel([finish(command === 'reqs' ? [c1] : [case1])]);
+  const result = cliMain([command, '--module', 'M', '--project', root], { log: () => {}, dependencies: deps(model) });
+  const installed = process.listeners(event).filter(listener => !priorListeners.includes(listener));
+  let activeDuringDrain = false;
+  let saved: unknown;
+  try {
+    await Promise.race([entered, result.then(() => { throw new Error('命令在写账本之前已返回'); })]);
+    saved = command === 'reqs' ? await artifacts.loadClauses('M') : await artifacts.loadCases('M');
+    const [listener] = installed;
+    activeDuringDrain = !!listener && process.listeners(event).includes(listener);
+    // 只调用本命令注册的信号处理器，不向测试进程发送原生信号。
+    if (activeDuringDrain) listener?.call(process, event);
+  } finally {
+    release();
+    await result;
+  }
+  expect(activeDuringDrain).toBe(true);
+  expect(process.listeners(event)).toEqual(priorListeners);
+  expect(await result).toBe(0);
+  expect(saved).toEqual(command === 'reqs' ? [c1] : [case1]);
+  expect(model.doGenerateCalls).toHaveLength(1);
+  expect((await readUsage({ project: root, home })).total.calls).toBe(1);
 });
 
 it('reqs 提炼失败退出 2，原条款文件字节保持不变', async () => {
