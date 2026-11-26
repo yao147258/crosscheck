@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { BudgetTracker } from '@crosscheck/core';
+import type { UsageAttempt } from '@crosscheck/models';
 import { MockLanguageModelV4 } from 'ai/test';
 import { describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
@@ -53,10 +54,15 @@ describe('spawnSubAgent', () => {
   it('子账本消耗同时计入父账本，事件带 agentId 与 parentId', async () => {
     const attempts: ModelAttempt[] = [];
     const finished: SubAgentFinishedEvent[] = [];
-    const p = parent(scriptedModel([finishWith(REPORT)]), { onModelAttempt: a => { attempts.push(a); }, onSubAgentFinished: e => { finished.push(e); } });
+    const usage: UsageAttempt[] = [];
+    const p = parent(scriptedModel([finishWith(REPORT)]), {
+      onModelAttempt: a => { attempts.push(a); }, onSubAgentFinished: e => { finished.push(e); },
+      usageObserver: attempt => { usage.push(attempt); },
+    });
     const r = await spawnSubAgent(p, { name: 'explore', task: 't', tools: [] });
     expect(p.budget.snapshot()).toMatchObject({ steps: 1, tokens: 15 });
     expect(attempts[0]).toMatchObject({ parentId: 'root', agentId: r.agentId });
+    expect(usage).toEqual([{ ref: 'mock:a', status: 'success', purpose: 'request', usage: { inputTokens: 10, outputTokens: 5 } }]);
     expect(r.agentId.startsWith('root/explore-')).toBe(true);
     expect(finished).toEqual([{ name: 'explore', agentId: r.agentId, parentId: 'root', status: 'done' }]);
   });

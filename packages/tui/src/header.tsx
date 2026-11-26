@@ -22,7 +22,7 @@ const pad = (value: number) => String(value).padStart(2, '0');
 export const formatTime = (date: Date) =>
   `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
 
-export function SessionHeader({ info, width, busy, launchedAt }: { info?: SessionInfo; width: number; busy: boolean; launchedAt: string }) {
+export function SessionHeader({ info, width, busy, launchedAt, usage }: { info?: SessionInfo; width: number; busy: boolean; launchedAt: string; usage?: string }) {
   const rule = <Text color="gray">{'─'.repeat(Math.max(1, width))}</Text>;
   const version = info ? `v${safeText(info.version)}` : undefined;
   const sideBySide = width >= BANNER_WIDTH + 34;
@@ -44,7 +44,8 @@ export function SessionHeader({ info, width, busy, launchedAt }: { info?: Sessio
       <Text bold color="cyan">Crosscheck{version ? ` ${version}` : ''}</Text>
       <Text wrap="truncate-end">{SUBTITLE}</Text>
     </Box>;
-  if (!info) return <Box flexDirection="column">{title}</Box>;
+  const usageLines = usage?.split('\n').map((line, index) => <Text key={index} wrap="truncate-end">{safeText(line)}</Text>);
+  if (!info) return <Box flexDirection="column">{title}{usageLines}</Box>;
   const columns = width >= 60;
   const nameWidth = Math.max(...ROLES.map((role) => role.length));
   return (
@@ -66,6 +67,7 @@ export function SessionHeader({ info, width, busy, launchedAt }: { info?: Sessio
           {info.configFile && <Text wrap="truncate-end"><Text color="gray">▤ </Text>配置文件：{safeText(info.configFile)}</Text>}
         </Box>
       </Box>
+      {usageLines}
       {rule}
     </Box>
   );

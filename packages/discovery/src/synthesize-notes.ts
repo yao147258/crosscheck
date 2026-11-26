@@ -36,6 +36,8 @@ export interface SynthesizeNotesOptions {
   budget: () => BudgetTracker;
   signal?: AbortSignal;
   resilience?: RunAgentOptions<unknown>['resilience'];
+  usageObserver?: RunAgentOptions<unknown>['usageObserver'];
+  usageObservationScope?: RunAgentOptions<unknown>['usageObservationScope'];
 }
 
 export type SynthesizeNotesResult =
@@ -50,6 +52,7 @@ export async function synthesizeNotes(options: SynthesizeNotesOptions): Promise<
   const readme = await readReadmeHead(options.projectRoot, options.files, options.signal, clean);
   const result = await runAgent({
     stage: 'extract', models: options.models, budget, signal: options.signal, resilience: options.resilience,
+    usageObserver: options.usageObserver, usageObservationScope: options.usageObservationScope,
     tools: createProjectTools({ projectRoot: options.projectRoot, files: options.files, budget, clean }),
     system: NOTES_SYSTEM,
     messages: [{ role: 'user', content: JSON.stringify({

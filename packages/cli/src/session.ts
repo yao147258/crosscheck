@@ -1,12 +1,14 @@
 import { Approvals, ArtifactStore, loadUserModelConfig, resolveReviewer } from '@crosscheck/core';
-import { builtinFactories, callWithFallback, reportProgress, withProgress } from '@crosscheck/models';
-import { createEditorHost, createOpener, loadHomeSummary, loadStatus, ReviewSession, runSession, type ChatMessage, type SlashCommandResult } from '@crosscheck/tui';
+import { atGenerateBoundary, builtinFactories, callWithFallback, createUsageObservationScope, readUsage, reportProgress, withProgress, type TokenUsage } from '@crosscheck/models';
+import { randomUUID } from 'node:crypto';
+import { createEditorHost, createOpener, loadHomeSummary, loadStatus, ReviewSession, runSession, type ChatMessage, type RegisterSessionSettle, type SessionProgress, type SlashCommandResult } from '@crosscheck/tui';
 import { APICallError, generateText } from 'ai';
-import { appendFile, mkdir } from 'node:fs/promises';
+import { appendFile, mkdir, realpath } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { parseArgs, type CliArgs } from './args';
-import { loadModelContext, resolveModels, withInterrupt, type CommandDependencies } from './context';
+import { createCommandUsageObserver, loadModelContext, resolveModels, withInterrupt, withSessionUsageContext, type CommandDependencies } from './context';
+import { formatUsageReport, formatUsageTotal } from './session-usage';
 import { cliMain } from './main';
 import cliPackage from '../package.json';
 
@@ -44,19 +46,60 @@ export const sessionSlashCommands = [
   { name: 'report', description: '离线重建运行报告' },
   { name: 'impact', description: '只读分析当前磁盘相对 Git 基线的影响' },
   { name: 'status', description: '查看项目阶段、待审核任务与最近测试' },
+  { name: 'usage', description: '查看启动项目或指定会话的模型用量' },
   { name: 'help', description: '显示命令帮助' },
-  { name: 'clear', description: '清空对话历史' },
+  { name: 'clear', description: '清空对话历史并开始新会话' },
   { name: 'exit', description: '退出会话' },
 ];
 
-export function createSlashDispatcher(deps: CommandDependencies) {
+type SessionState = { currentId: string; project: string };
+const sessionUuid = /^(?:[\da-f]{8}-[\da-f]{4}-[1-8][\da-f]{3}-[89ab][\da-f]{3}-[\da-f]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$/i;
+const modelCommands = new Set(['init', 'profile', 'reqs', 'plan', 'run']);
+const projectCommands = new Set([...modelCommands, 'report', 'impact']);
+
+function sessionUsage(session: SessionState, deps: CommandDependencies) {
+  // 未落盘的缺口无法从账本重建；在本进程内按启动项目和会话保留提示。
+  const missing = new Set<string>();
+  const projectPath = (project: string) => realpath(project).catch(() => path.resolve(project));
+  return {
+    markMissing: async (project: string, sessionId: string) => {
+      if (project === session.project || await projectPath(project) === await projectPath(session.project)) missing.add(sessionId);
+    },
+    read: async (sessionId?: string) => {
+      const report = await readUsage({ project: session.project, home: deps.userConfigHome, sessionId });
+      if (sessionId === undefined ? missing.size > 0 : missing.has(sessionId)) {
+        report.incomplete = true;
+        report.diagnostics.push('存在未落盘的用量记录，无法计入已知部分');
+      }
+      return report;
+    },
+  };
+}
+
+export function createSlashDispatcher(deps: CommandDependencies, session?: SessionState) {
+  return createDispatcher(deps, session, session && sessionUsage(session, deps));
+}
+
+function createDispatcher(deps: CommandDependencies, session?: SessionState, usage?: ReturnType<typeof sessionUsage>) {
   // 命令日志与模型/工具执行提示都实时推给会话界面，最终输出仍随结果返回。
-  return (tokens: string[], signal: AbortSignal, onProgress?: (text: string) => void): Promise<SlashCommandResult> =>
-    withProgress(onProgress, () => dispatch(tokens, signal, onProgress));
-  async function dispatch(tokens: string[], signal: AbortSignal, onProgress?: (text: string) => void): Promise<SlashCommandResult> {
+  return (tokens: string[], signal: AbortSignal, onProgress?: SessionProgress, registerSettle?: RegisterSessionSettle): Promise<SlashCommandResult> =>
+    withProgress(onProgress, () => dispatch(tokens, signal, onProgress, registerSettle));
+  async function dispatch(tokens: string[], signal: AbortSignal, onProgress?: SessionProgress, registerSettle?: RegisterSessionSettle): Promise<SlashCommandResult> {
     if (!tokens.length || !tokens[0]) return { kind: 'log', code: 2, lines: ['斜杠命令不能为空'] };
     if (tokens[0] === 'exit') return tokens.length === 1 ? { kind: 'exit' } : { kind: 'log', code: 2, lines: ['exit 不接受参数'] };
     if (tokens[0] === 'clear') return tokens.length === 1 ? { kind: 'clear' } : { kind: 'log', code: 2, lines: ['clear 不接受参数'] };
+    if (tokens[0] === 'usage') {
+      if (!session || !usage) return { kind: 'log', code: 2, lines: ['用量查询仅在交互会话中可用'] };
+      const [ , flag, id ] = tokens;
+      if (tokens.length > 1 && (flag !== '--session' || tokens.length > 3 || (tokens.length === 3 && !sessionUuid.test(id ?? '')))) {
+        return { kind: 'log', code: 2, lines: ['用法：/usage [--session [UUID]]'] };
+      }
+      const sessionId = flag === '--session' ? (id?.toLowerCase() ?? session.currentId) : undefined;
+      signal.throwIfAborted();
+      const report = await usage.read(sessionId);
+      signal.throwIfAborted();
+      return { kind: 'log', code: 0, ...formatUsageReport(session.project, sessionId, report) };
+    }
     if (tokens[0] === 'status') {
       if (tokens.length !== 1 && !(tokens.length === 3 && tokens[1] === '--project' && tokens[2] && !tokens[2].startsWith('--'))) {
         return { kind: 'log', code: 2, lines: ['用法：/status [--project <目录>]'] };
@@ -93,8 +136,26 @@ export function createSlashDispatcher(deps: CommandDependencies) {
       catch (error) { return { kind: 'log', code: 2, lines: [error instanceof Error ? error.message : String(error)] }; }
     }
     const lines: string[] = [];
-    const code = await cliMain(tokens, { dependencies: deps, signal, log: (line) => { lines.push(line); onProgress?.(line); } });
-    return { kind: 'log', code, lines };
+    const projectIndex = tokens.indexOf('--project');
+    const argv = session && projectCommands.has(tokens[0]!) && projectIndex < 0 ? [...tokens, '--project', session.project] : tokens;
+    const sessionId = session?.currentId;
+    let missing = false;
+    const dependencies = sessionId === undefined ? deps : withSessionUsageContext(deps, sessionId, line => {
+      missing = true;
+      if (onProgress) onProgress(line, 'warning');
+      else lines.push(line);
+    });
+    const scope = registerSettle && modelCommands.has(tokens[0]!) ? createUsageObservationScope() : undefined;
+    const markMissing = async () => {
+      if (missing && session && sessionId !== undefined) {
+        await usage?.markMissing(projectIndex < 0 ? session.project : tokens[projectIndex + 1]!, sessionId);
+      }
+    };
+    if (scope) registerSettle?.(async () => { await scope.flush(); await markMissing(); });
+    try {
+      const code = await cliMain(argv, { dependencies: scope ? { ...dependencies, usageObservationScope: scope } : dependencies, signal, log: (line) => { lines.push(line); onProgress?.(line); } });
+      return { kind: 'log', code, lines };
+    } finally { if (!scope) await markMissing(); }
   }
 }
 
@@ -131,28 +192,36 @@ export async function chatReply(project: string, history: ChatMessage[], text: s
     openai: (settings: Parameters<typeof builtinFactories.openai>[0]) => (factories?.openai ?? builtinFactories.openai)({ ...settings, fetch: requestFetch }),
   } } };
   const models = resolveModels(config, 'planner', modelDeps, () => {});
+  const observer = createCommandUsageObserver(project, 'chat', 'planner', config.pricing, deps, line => console.warn(line));
+  const scope = deps.usageObservationScope ?? createUsageObservationScope();
   try {
-  const result = await callWithFallback(models, async (model, ref) => {
-    try {
-      reportProgress(`请求模型 ${ref} 生成回复`);
-      const response = await generateText({ model, maxRetries: 0, system: `你是只读助手。仅根据项目摘要回答，不可执行写入或确认操作；请引导用户使用斜杠命令或 /review 自行操作。项目摘要：${JSON.stringify(summary)}`, messages: [...history.slice(-20), { role: 'user', content: text }], abortSignal: signal });
-      return response.text;
-    } catch (error) {
+    const result = await callWithFallback(models, async (model, ref) => {
+      let started = false;
+      let receipt: TokenUsage | null = null;
+      let response: Awaited<ReturnType<typeof generateText>>;
       try {
-        const provider = config.providers[ref.split(':')[0]!];
-        const endpoint = provider ? new URL(provider.baseURL).origin : undefined;
-        const apiError = APICallError.isInstance(error) ? error : undefined;
-        const requestId = apiError?.responseHeaders?.['x-request-id'];
-        const record = { time: new Date().toISOString(), stage: 'model-request', ref: redactor.text(ref), endpoint: endpoint ? redactor.text(endpoint) : undefined, statusCode: apiError?.statusCode, requestId: requestId && /^[\w.-]{1,128}$/.test(requestId) ? redactor.text(requestId) : undefined };
-        const directory = path.join(deps.userConfigHome ?? os.homedir(), '.crosscheck');
-        await mkdir(directory, { recursive: true });
-        await appendFile(path.join(directory, 'chat-errors.jsonl'), `${JSON.stringify(record)}\n`, { mode: 0o600 });
-      } catch { /* 日志故障不能遮盖模型调用错误。 */ }
-      throw error;
-    }
-  }, { ...deps.resilience, signal });
-  return redactor.text(result.value);
+        reportProgress(`请求模型 ${ref} 生成回复`);
+        response = await generateText({ model: atGenerateBoundary(model, () => { started = true; }, usage => { receipt = usage; }), maxRetries: 0, system: `你是只读助手。仅根据项目摘要回答，不可执行写入或确认操作；请引导用户使用斜杠命令或 /review 自行操作。项目摘要：${JSON.stringify(summary)}`, messages: [...history.slice(-20), { role: 'user', content: text }], abortSignal: signal });
+      } catch (error) {
+        if (started) scope.enqueue(observer, { ref, purpose: 'request', status: signal.aborted ? 'cancelled' : 'error', usage: receipt });
+        try {
+          const provider = config.providers[ref.split(':')[0]!];
+          const endpoint = provider ? new URL(provider.baseURL).origin : undefined;
+          const apiError = APICallError.isInstance(error) ? error : undefined;
+          const requestId = apiError?.responseHeaders?.['x-request-id'];
+          const record = { time: new Date().toISOString(), stage: 'model-request', ref: redactor.text(ref), endpoint: endpoint ? redactor.text(endpoint) : undefined, statusCode: apiError?.statusCode, requestId: requestId && /^[\w.-]{1,128}$/.test(requestId) ? redactor.text(requestId) : undefined };
+          const directory = path.join(deps.userConfigHome ?? os.homedir(), '.crosscheck');
+          await mkdir(directory, { recursive: true });
+          await appendFile(path.join(directory, 'chat-errors.jsonl'), `${JSON.stringify(record)}\n`, { mode: 0o600 });
+        } catch { /* 日志故障不能遮盖模型调用错误。 */ }
+        throw error;
+      }
+      if (started) scope.enqueue(observer, { ref, purpose: 'request', status: 'success', usage: receipt });
+      return response.text;
+    }, { ...deps.resilience, signal });
+    return redactor.text(result.value);
   } catch (error) { throw new Error(redactor.text(error instanceof Error ? error.message : '模型调用失败')); }
+  finally { if (!deps.usageObservationScope) await scope.flush(); }
 }
 
 export async function sessionCommand(args: CliArgs, log: (s: string) => void, deps: CommandDependencies, signal?: AbortSignal): Promise<number> {
@@ -160,12 +229,20 @@ export async function sessionCommand(args: CliArgs, log: (s: string) => void, de
     log('交互会话需要交互式终端（stdin 与 stdout 都必须是 TTY）');
     return 2;
   }
+  const state = { currentId: randomUUID(), project: path.resolve(args.project) };
+  const usage = sessionUsage(state, deps);
   return withInterrupt(signal, async (sig) => runSession({
     info: await loadSessionInfo(deps.userConfigHome),
     slashCommands: sessionSlashCommands,
     signal: sig,
     tokenize: tokenizeCommand,
-    runSlashCommand: createSlashDispatcher(deps),
+    runSlashCommand: createDispatcher(deps, state, usage),
+    resetSession: () => { state.currentId = randomUUID(); },
+    loadSessionUsage: async () => {
+      const id = state.currentId;
+      const report = await usage.read(id);
+      return `会话 ID：${id}\n会话用量：${formatUsageTotal(report.total, report.incomplete)}`;
+    },
     resolveReview: async (reviewArgs, operationSignal) => {
       operationSignal.throwIfAborted();
       const env = deps.env ?? process.env;
@@ -175,7 +252,20 @@ export async function sessionCommand(args: CliArgs, log: (s: string) => void, de
       operationSignal.throwIfAborted();
       return { session, editor: createEditorHost(artifacts, env), open: createOpener() };
     },
-    chatReply: (history, text, operationSignal, onProgress) => withProgress(onProgress, () => chatReply(args.project, history, text, deps, operationSignal)),
+    chatReply: async (history, text, operationSignal, onProgress, registerSettle) => {
+      const id = state.currentId;
+      let missing = false;
+      const chatDeps = withSessionUsageContext(deps, id, line => {
+        missing = true;
+        if (onProgress) onProgress(line, 'warning');
+        else console.warn(line);
+      });
+      const scope = registerSettle ? createUsageObservationScope() : undefined;
+      const markMissing = async () => { if (missing) await usage.markMissing(state.project, id); };
+      if (scope) registerSettle?.(async () => { await scope.flush(); await markMissing(); });
+      try { return await withProgress(onProgress, () => chatReply(state.project, history, text, { ...chatDeps, usageObservationScope: scope }, operationSignal)); }
+      finally { if (!scope) await markMissing(); }
+    },
     // SGR 鼠标上报：会话界面据此响应滚轮翻看历史。
     mouseTracking: (enabled) => { process.stdout.write(enabled ? '\u001b[?1000h\u001b[?1006h' : '\u001b[?1000l\u001b[?1006l'); },
   }));

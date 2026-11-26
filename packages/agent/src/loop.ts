@@ -1,6 +1,6 @@
 import type { BudgetLimits, BudgetTracker } from '@crosscheck/core';
-import { callWithFallback, outputTokenLimitForEstimate, reportProgress, summarizeInput, type ModelCandidate, type ResilienceOptions } from '@crosscheck/models';
-import { generateText, jsonSchema, tool, type LanguageModelUsage, type ModelMessage, type ToolSet } from 'ai';
+import { atGenerateBoundary, callWithFallback, createUsageObservationScope, outputTokenLimitForEstimate, reportProgress, summarizeInput, usageOf, type ModelCandidate, type ResilienceOptions, type TokenUsage, type UsageObservationScope, type UsageObserver } from '@crosscheck/models';
+import { generateText, jsonSchema, tool, type ModelMessage, type ToolSet } from 'ai';
 import { z } from 'zod';
 import { applyCacheBreakpoints } from './cache';
 import { grantTools, type Stage } from './grants';
@@ -64,6 +64,10 @@ export interface RunAgentOptions<O> {
   maxInvalidOutputs?: number;
   resilience?: ResilienceOptions;
   onUsage?: (ref: string, usage: AttemptUsage) => void | Promise<void>;
+  /** 记录真实模型调用；业务结束后通知观察者，异常不传播。 */
+  usageObserver?: UsageObserver;
+  /** 省略时由 runAgent 在结束后排空；共享预算的宿主可传入范围并自行排空。 */
+  usageObservationScope?: UsageObservationScope;
   /** 每次真实 provider 调用终结后立即 await；宿主异常原样传播，不触发 provider 重试。 */
   onModelAttempt?: (attempt: ModelAttempt) => void | Promise<void>;
   /** 内存审计通知，未经清洗不能直接持久化为轨迹；异常传播，不允许继续 PASS。 */
@@ -125,6 +129,12 @@ function buildSdkTools(granted: AgentTool[], output: z.ZodType, delegates: reado
 
 /** 自研代理循环：一轮一次生成；统一补齐调用结果，再检查终结条件。 */
 export async function runAgent<O>(opts: RunAgentOptions<O>): Promise<AgentResult<O>> {
+  const scope = opts.usageObservationScope ?? createUsageObservationScope();
+  try { return await runAgentLoop(opts, scope); }
+  finally { if (!opts.usageObservationScope) await scope.flush(); }
+}
+
+async function runAgentLoop<O>(opts: RunAgentOptions<O>, scope: UsageObservationScope): Promise<AgentResult<O>> {
   const { stage, models, system, output, budget, signal, resilience, onUsage } = opts;
   const maxInvalidOutputs = Math.min(opts.maxInvalidOutputs ?? 3, 3);
   if (!Number.isInteger(maxInvalidOutputs) || maxInvalidOutputs < 1) throw new Error('invalid 额度必须为 1 到 3');
@@ -144,7 +154,7 @@ export async function runAgent<O>(opts: RunAgentOptions<O>): Promise<AgentResult
   if (delegateList.length && opts.parentId) throw new Error('子代理不能再派生子代理');
   const parent: ParentContext = {
     stage, models, tools: granted, budget, signal: abortSignal, agentId: opts.agentId ?? 'root', resilience,
-    evidencePresenter: opts.evidencePresenter, verifyEvidenceIds: opts.verifyEvidenceIds,
+    evidencePresenter: opts.evidencePresenter, verifyEvidenceIds: opts.verifyEvidenceIds, usageObserver: opts.usageObserver, usageObservationScope: scope,
     onModelAttempt: opts.onModelAttempt, onToolCall: opts.onToolCall, onContextPrepared: opts.onContextPrepared, onSubAgentFinished: opts.onSubAgentFinished,
   };
   const delegates = new Map<string, DelegateTemplate>();
@@ -168,11 +178,6 @@ export async function runAgent<O>(opts: RunAgentOptions<O>): Promise<AgentResult
   const modelAttempts: ModelAttempt[] = [];
   const tag = opts.agentId ? { agentId: opts.agentId, ...(opts.parentId ? { parentId: opts.parentId } : {}) } : {};
   const onToolCall = opts.onToolCall && ((e: ToolCallEvent) => opts.onToolCall!({ ...e, ...tag }));
-  const usageOf = (u: LanguageModelUsage): AttemptUsage => ({
-    inputTokens: u.inputTokens, outputTokens: u.outputTokens,
-    ...(u.inputTokenDetails?.cacheReadTokens !== undefined ? { cacheReadTokens: u.inputTokenDetails.cacheReadTokens } : {}),
-    ...(u.inputTokenDetails?.cacheWriteTokens !== undefined ? { cacheWriteTokens: u.inputTokenDetails.cacheWriteTokens } : {}),
-  });
   // 宿主故障状态需被摘要审计（发生在 manager.prepare 内）共享，故提升到循环外，每轮开始时重置。
   let hostError: unknown;
   let hostFailed = false;
@@ -227,7 +232,7 @@ export async function runAgent<O>(opts: RunAgentOptions<O>): Promise<AgentResult
           if (stopped) throw Object.assign(new Error(stopped.detail), { name: 'AbortError' });
           let prepared: PreparedContext;
           try {
-            prepared = await manager.prepare(messages, { candidate, system, toolSchemas, signal: genSignal });
+            prepared = await manager.prepare(messages, { candidate, system, toolSchemas, signal: genSignal, usageObserver: opts.usageObserver, usageObservationScope: scope });
             await opts.onEvidencePresented?.({ ref, evidence: prepared.presentedEvidence });
             await opts.onContextPrepared?.({ ...prepared.report, ...tag });
           } catch (error) {
@@ -243,18 +248,30 @@ export async function runAgent<O>(opts: RunAgentOptions<O>): Promise<AgentResult
           if (afterPresentation) throw Object.assign(new Error(afterPresentation.detail), { name: 'AbortError' });
           // 输入超出窗口时抛出不可重试错误，不计为真实模型调用。
           const maxOutputTokens = outputTokenLimitForEstimate(candidate.contextWindow, prepared.estimatedInputTokens);
+          const request = applyCacheBreakpoints(system, prepared.messages, prepared.historyLength, candidate.providerType);
+          // 明确的本地空消息守卫：不进入 SDK，也不产生尝试、审计或容错。
+          if (request.messages.length === 0) {
+            throw Object.assign(new Error('Invalid prompt: messages must not be empty'), { name: 'AbortError' });
+          }
+          let value: Awaited<ReturnType<typeof generateText>>;
+          progress(`第 ${steps + 1} 轮：请求模型 ${ref} 思考下一步`);
+          // 进度监听器也可能发出取消；进入模型调用前不计尝试。
+          genSignal.throwIfAborted();
+          let started = false;
+          let receipt: TokenUsage | null = null;
+          // 严格审计与旧计数以 SDK 调用为边界；账本才要求实际请求。
           attempts++;
           roundAttempts++;
           if (roundAttempts > 1) retried = true;
-          const request = applyCacheBreakpoints(system, prepared.messages, prepared.historyLength, candidate.providerType);
-          let value: Awaited<ReturnType<typeof generateText>>;
-          progress(`第 ${steps + 1} 轮：请求模型 ${ref} 思考下一步`);
           try {
-            value = await generateText({ model, system: request.system, messages: request.messages, tools: sdkTools, maxOutputTokens, maxRetries: 0, abortSignal: genSignal });
+            const trackedModel = atGenerateBoundary(model, () => { started = true; }, usage => { receipt = usage; });
+            value = await generateText({ model: trackedModel, system: request.system, messages: request.messages, tools: sdkTools, maxOutputTokens, maxRetries: 0, abortSignal: genSignal });
           } catch (error) {
+            if (started && opts.usageObserver) scope.enqueue(opts.usageObserver, { ref, purpose: 'request', status: genSignal.aborted ? 'cancelled' : 'error', usage: receipt });
             await record({ ref, status: 'error', usage: null });
             throw error;
           }
+          if (started && opts.usageObserver) scope.enqueue(opts.usageObserver, { ref, purpose: 'request', status: 'success', usage: receipt });
           manager.observe(ref, prepared.estimatedInputTokens, value.usage.inputTokens);
           // 回调位于 provider catch 之外，不能把宿主失败计成额外模型调用。
           await record({ ref, status: 'success', usage: usageOf(value.usage) });

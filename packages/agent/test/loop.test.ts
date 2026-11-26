@@ -1,10 +1,14 @@
 import { BudgetTracker } from '@crosscheck/core';
-import { withProgress } from '@crosscheck/models';
-import type { ModelMessage } from 'ai';
+import { builtinFactories, createUsageObservationScope, withProgress, type UsageAttempt } from '@crosscheck/models';
+import { generateText, type ModelMessage } from 'ai';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
-import { defineTool, runAgent, type RunAgentOptions } from '../src/index';
+import { ContextManager, createModelSummarizer, defineTool, runAgent, type RunAgentOptions } from '../src/index';
 import { scriptedModel, type ScriptStep } from '../src/testing/scripted-model';
+
+vi.mock(import('ai'), { spy: true });
+
+const realGenerateText = (await vi.importActual<typeof import('ai')>('ai')).generateText;
 
 const Output = z.object({ answer: z.string() });
 
@@ -157,8 +161,10 @@ describe('runAgent', () => {
   });
 
   it('输入超出上下文窗口时不发请求，判为模型错误', async () => {
-    const { model, options } = opts([]);
+    const usageObserver = vi.fn();
+    const { model, options } = opts([], { usageObserver });
     const r = await runAgent({ ...options, models: [{ ref: 'mock:tiny[1K]', model, contextWindow: 1_000 }], messages: [{ role: 'user', content: '中'.repeat(5_000) }] });
+    expect(usageObserver).not.toHaveBeenCalled();
     expect(r).toMatchObject({ status: 'blocked', reason: 'model-error' });
     expect((r as { detail: string }).detail).toMatch(/上下文窗口/);
     expect(model.doGenerateCalls).toHaveLength(0);
@@ -197,24 +203,285 @@ describe('runAgent', () => {
   it('已中断时不调用模型', async () => {
     const ac = new AbortController();
     ac.abort();
-    const { model, options } = opts([], { signal: ac.signal });
+    const usageObserver = vi.fn();
+    const { model, options } = opts([], { signal: ac.signal, usageObserver });
     expect(await runAgent(options)).toMatchObject({ status: 'blocked', reason: 'interrupted' });
     expect(model.doGenerateCalls).toHaveLength(0);
+    expect(usageObserver).not.toHaveBeenCalled();
   });
 
-  it('主模型失败时切换备用模型，并标记为发生过重试', async () => {
-    const primary = scriptedModel([{ error: new Error('503') }, { error: new Error('503') }]);
+  it('本地空消息守卫不进入 SDK，不计账、不审计、不重试或切换候选', async () => {
+    const usageObserver = vi.fn();
+    const onModelAttempt = vi.fn();
+    const sleep = vi.fn(async () => {});
+    const onFallback = vi.fn();
+    const backup = scriptedModel([]);
+    const { model, options } = opts([], { messages: [], usageObserver, onModelAttempt, resilience: { retries: 2, sleep, onFallback } });
+    const result = await runAgent({ ...options, models: [...options.models, { ref: 'mock:backup', model: backup }] });
+    expect(result).toMatchObject({ status: 'blocked', reason: 'model-error', detail: expect.stringContaining('empty'), attempts: 0, modelAttempts: [], retried: false });
+    expect(model.doGenerateCalls).toHaveLength(0);
+    expect(backup.doGenerateCalls).toHaveLength(0);
+    expect(sleep).not.toHaveBeenCalled();
+    expect(onFallback).not.toHaveBeenCalled();
+    expect(usageObserver).not.toHaveBeenCalled();
+    expect(onModelAttempt).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])('主候选图片预下载失败只计旧审计；审计异常可阻断备用（%s）', async auditFails => {
+    const url = new URL('https://example.com/image.png');
+    const usage: UsageAttempt[] = [];
+    const auditError = new Error('审计写入失败');
+    const onModelAttempt = vi.fn(() => { if (auditFails) throw auditError; });
+    const onFallback = vi.fn();
+    const download = vi.fn<NonNullable<Parameters<typeof generateText>[0]['experimental_download']>>(async requests =>
+      requests.map(request => {
+        if (!request.isUrlSupportedByModel) throw new Error('图片下载失败');
+        return null;
+      }));
+    const backup = scriptedModel([{ toolCalls: [{ name: 'finish', input: { answer: 'ok' } }] }]);
+    Object.defineProperty(backup, 'supportedUrls', { value: { 'image/png': [/^https:\/\/example\.com\//] } });
+    const { model, options } = opts([], {
+      messages: [{ role: 'user', content: [{ type: 'file', data: url, mediaType: 'image/png' }] }],
+      usageObserver: attempt => { usage.push(attempt); }, onModelAttempt,
+      resilience: { retries: 0, onFallback },
+    });
+    vi.mocked(generateText).mockImplementation(options => realGenerateText({ ...options, experimental_download: download }));
+    try {
+      const pending = runAgent({ ...options, models: [...options.models, { ref: 'mock:backup', model: backup }] });
+      const primaryError = { ref: 'mock:primary', status: 'error', usage: null };
+      if (auditFails) {
+        await expect(pending).rejects.toBe(auditError);
+        expect(onModelAttempt.mock.calls).toEqual([[primaryError]]);
+        expect(onFallback).not.toHaveBeenCalled();
+        expect(backup.doGenerateCalls).toHaveLength(0);
+        expect(usage).toEqual([]);
+        return;
+      }
+      const result = await pending;
+      expect(download).toHaveBeenNthCalledWith(1, [{ url, isUrlSupportedByModel: false }]);
+      expect(result).toMatchObject({ status: 'done', output: { answer: 'ok' }, attempts: 2, retried: true, modelAttempts: [primaryError, { ref: 'mock:backup', status: 'success' }] });
+      expect(download).toHaveBeenNthCalledWith(2, [{ url, isUrlSupportedByModel: true }]);
+      expect(onFallback).toHaveBeenCalledWith('mock:primary', 'mock:backup', expect.objectContaining({ message: '图片下载失败' }));
+      expect(model.doGenerateCalls).toHaveLength(0);
+      expect(backup.doGenerateCalls).toHaveLength(1);
+      expect(promptText(backup, 0)).toContain(url.href);
+      expect(usage).toEqual([{ ref: 'mock:backup', status: 'success', purpose: 'request', usage: { inputTokens: 10, outputTokens: 5 } }]);
+      expect(onModelAttempt.mock.calls).toEqual([[primaryError], [{ ref: 'mock:backup', status: 'success', usage: { inputTokens: 10, outputTokens: 5 } }]]);
+    } finally {
+      vi.mocked(generateText).mockReset();
+    }
+  });
+
+  it.each(['openai', 'anthropic'] as const)('内置 %s 拒绝本地文件转换时只走旧审计，不入账', async type => {
+    const fetch = vi.fn(async () => { throw new Error('不应进入 fetch'); });
+    const model = builtinFactories[type]({ name: type, modelId: 'test', baseURL: 'https://example.invalid/v1', apiKey: 'fixture-key', fetch });
+    const onModelAttempt = vi.fn();
+    const usageObserver = vi.fn();
+    const ref = `${type}:test`;
+    const { options } = opts([], {
+      models: [{ ref, model }], onModelAttempt, usageObserver,
+      messages: [{ role: 'user', content: [{ type: 'file', mediaType: 'application/zip', data: new Uint8Array([1, 2, 3]) }] }],
+    });
+    const result = await runAgent(options);
+    const attempt = { ref, status: 'error', usage: null };
+    expect(result).toMatchObject({ status: 'blocked', reason: 'model-error', detail: expect.stringContaining('application/zip'), attempts: 1, modelAttempts: [attempt] });
+    expect(fetch).not.toHaveBeenCalled();
+    expect(onModelAttempt.mock.calls).toEqual([[attempt]]);
+    expect(usageObserver).not.toHaveBeenCalled();
+  });
+
+  it('并行复用同一内置模型时，后进入的本地失败不覆盖先进入调用的 fetch 与回执', async () => {
+    let notifyGenerate!: () => void;
+    let releaseGenerate!: () => void;
+    const entered = new Promise<void>(resolve => { notifyGenerate = resolve; });
+    const hold = new Promise<void>(resolve => { releaseGenerate = resolve; });
+    const fetch = vi.fn(async () => Response.json({ usage: { input_tokens: 21, output_tokens: 8 } }));
+    const model = builtinFactories.openai({ name: 'openai', modelId: 'test', baseURL: 'https://example.invalid/v1', apiKey: 'fixture-key', fetch });
+    if (typeof model === 'string' || model.specificationVersion !== 'v4') throw new Error('预期内置 V4 模型');
+    const generate = model.doGenerate.bind(model);
+    vi.spyOn(model, 'doGenerate').mockImplementationOnce(async options => {
+      notifyGenerate();
+      await hold;
+      return generate(options);
+    });
+    const models = [{ ref: 'openai:test', model }];
+    const sent = vi.fn();
+    const local = vi.fn();
+    const pending = runAgent(opts([], { models, usageObserver: sent }).options);
+    try {
+      await Promise.race([entered, pending.then(() => { throw new Error('模型未进入 doGenerate'); })]);
+      const result = await runAgent(opts([], {
+        models, usageObserver: local,
+        messages: [{ role: 'user', content: [{ type: 'file', mediaType: 'application/zip', data: new Uint8Array([1, 2, 3]) }] }],
+      }).options);
+      expect(result).toMatchObject({ status: 'blocked', detail: expect.stringContaining('application/zip') });
+      expect(local).not.toHaveBeenCalled();
+    } finally { releaseGenerate(); }
+    expect(await pending).toMatchObject({ status: 'blocked', reason: 'model-error' });
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(sent.mock.calls).toEqual([[{ ref: 'openai:test', purpose: 'request', status: 'error', usage: { inputTokens: 21, outputTokens: 8 } }]]);
+  });
+
+  it('预算已耗尽时不调用模型且不记录用量', async () => {
+    const budget = new BudgetTracker({ steps: 1, tokens: 1_000, minutes: 10 });
+    budget.recordStep();
+    const usageObserver = vi.fn();
+    const { model, options } = opts([], { budget, usageObserver });
+    expect(await runAgent(options)).toMatchObject({ status: 'blocked', reason: 'budget', attempts: 0 });
+    expect(model.doGenerateCalls).toHaveLength(0);
+    expect(usageObserver).not.toHaveBeenCalled();
+  });
+
+  it('请求进度回调中取消时仍属于预取消，不调用模型且不记录用量', async () => {
+    const ac = new AbortController();
+    const usageObserver = vi.fn();
+    const { model, options } = opts([{ toolCalls: [{ name: 'finish', input: { answer: 'ok' } }] }], { signal: ac.signal, usageObserver });
+    const result = await withProgress(() => ac.abort(), () => runAgent(options));
+    expect(result).toMatchObject({ status: 'blocked', reason: 'interrupted', attempts: 0 });
+    expect(model.doGenerateCalls).toHaveLength(0);
+    expect(usageObserver).not.toHaveBeenCalled();
+  });
+
+  it('主模型重试后切换备用模型，每个真实请求只上报一次用量', async () => {
+    const usage: UsageAttempt[] = [];
+    const primary = scriptedModel(Array.from({ length: 3 }, () => ({ error: new Error('503') })));
     const backup = scriptedModel([{ toolCalls: [{ name: 'finish', input: { answer: 'ok' } }] }]);
     const { options } = opts([], {
       models: [
         { ref: 'mock:primary', model: primary },
         { ref: 'mock:backup', model: backup },
       ],
-      resilience: { retries: 1, sleep: async () => {} },
+      resilience: { retries: 2, sleep: async () => {} },
+      usageObserver: attempt => { usage.push(attempt); },
     });
     const r = await runAgent(options);
     expect(r).toMatchObject({ status: 'done', retried: true });
-    expect(primary.doGenerateCalls).toHaveLength(2);
+    expect(primary.doGenerateCalls).toHaveLength(3);
+    expect(usage).toEqual([
+      { ref: 'mock:primary', purpose: 'request', status: 'error', usage: null },
+      { ref: 'mock:primary', purpose: 'request', status: 'error', usage: null },
+      { ref: 'mock:primary', purpose: 'request', status: 'error', usage: null },
+      { ref: 'mock:backup', purpose: 'request', status: 'success', usage: { inputTokens: 10, outputTokens: 5 } },
+    ]);
+  });
+
+  it('SDK 后处理失败时账本保留原始回执，严格审计仍记为未知用量', async () => {
+    const usageObserver = vi.fn();
+    const onModelAttempt = vi.fn();
+    const { model, options } = opts([{ text: '不会显示', usage: { input: 19, output: 7, cacheRead: 0, cacheWrite: 2 } }], { usageObserver, onModelAttempt });
+    const generate = model.doGenerate.bind(model);
+    vi.spyOn(model, 'doGenerate').mockImplementation(async options => ({
+      ...await generate(options),
+      get content(): never { throw new Error('SDK 后处理读取内容失败'); },
+    }));
+    const result = await runAgent(options);
+    expect(result).toMatchObject({ status: 'blocked', reason: 'model-error', detail: 'SDK 后处理读取内容失败' });
+    expect(onModelAttempt.mock.calls).toEqual([[{ ref: 'mock:primary', status: 'error', usage: null }]]);
+    expect(usageObserver.mock.calls).toEqual([[{ ref: 'mock:primary', purpose: 'request', status: 'error', usage: { inputTokens: 19, outputTokens: 7, cacheReadTokens: 0, cacheWriteTokens: 2 } }]]);
+  });
+
+  it.each([false, true])('用量观察者拒绝不影响宿主审计及其阻断行为（审计失败：%s）', async (auditFails) => {
+    const seen: UsageAttempt[] = [];
+    const auditError = new Error('磁盘满');
+    const onModelAttempt = vi.fn(() => { if (auditFails) throw auditError; });
+    const { options } = opts([{ toolCalls: [{ name: 'finish', input: { answer: 'ok' } }], usage: { input: 100, cacheRead: 60, cacheWrite: 0 } }], {
+      usageObserver: async attempt => { seen.push(attempt); throw new Error('账本不可用'); },
+      onModelAttempt,
+    });
+    const result = runAgent(options);
+    if (auditFails) await expect(result).rejects.toBe(auditError);
+    else await expect(result).resolves.toMatchObject({ status: 'done', output: { answer: 'ok' }, attempts: 1 });
+    const usage = { inputTokens: 100, outputTokens: 5, cacheReadTokens: 60, cacheWriteTokens: 0 };
+    expect(seen).toEqual([{ ref: 'mock:primary', purpose: 'request', status: 'success', usage }]);
+    expect(onModelAttempt.mock.calls).toEqual([[{ ref: 'mock:primary', status: 'success', usage }]]);
+  });
+
+  it.each([false, true])('慢观察者在业务及严格审计结束后才执行，返回前排空（审计失败：%s）', async (auditFails) => {
+    const phases: string[] = [];
+    const error = new Error('宿主审计失败');
+    let now = 0;
+    const budget = new BudgetTracker({ steps: 1, tokens: 1_000, minutes: 1 }, () => now);
+    const { options } = opts([{ toolCalls: [{ name: 'finish', input: { answer: 'ok' } }] }], {
+      budget,
+      onModelAttempt: () => { phases.push('审计'); if (auditFails) throw error; },
+      onToolCall: () => { phases.push('完成'); },
+      usageObserver: async () => { await Promise.resolve(); now = 60_001; phases.push('用量'); },
+    });
+    const result = runAgent(options);
+    if (auditFails) await expect(result).rejects.toBe(error);
+    else await expect(result).resolves.toMatchObject({ status: 'done', output: { answer: 'ok' } });
+    expect(phases).toEqual(auditFails ? ['审计', '用量'] : ['审计', '完成', '用量']);
+  });
+
+  it('宿主可跨阶段共用排空范围，只在明确排空时通知且不重复', async () => {
+    const usage: UsageAttempt[] = [];
+    let now = 0;
+    const budget = new BudgetTracker({ steps: 10, tokens: 1_000, minutes: 1 }, () => now);
+    const scope = createUsageObservationScope();
+    for (const input of [20, 30]) {
+      const { options } = opts([{ toolCalls: [{ name: 'finish', input: { answer: 'ok' } }], usage: { input } }], {
+        budget, usageObservationScope: scope,
+        usageObserver: async attempt => { await Promise.resolve(); now = 60_001; usage.push(attempt); },
+      });
+      await expect(runAgent(options)).resolves.toMatchObject({ status: 'done' });
+      expect(usage).toEqual([]);
+    }
+    await scope.flush();
+    await scope.flush();
+    expect(usage.map(attempt => attempt.usage?.inputTokens)).toEqual([20, 30]);
+  });
+
+  it('准备阶段取消或准备失败时不产生请求用量', async () => {
+    const ac = new AbortController();
+    const usage: UsageAttempt[] = [];
+    const { model, options } = opts([], { usageObserver: attempt => { usage.push(attempt); } });
+    const error = new Error('装配失败');
+    await expect(runAgent({ ...options, onContextPrepared: () => { throw error; } })).rejects.toBe(error);
+    await expect(runAgent({ ...options, signal: ac.signal, onContextPrepared: () => ac.abort() }))
+      .resolves.toMatchObject({ status: 'blocked', reason: 'interrupted' });
+    expect(model.doGenerateCalls).toHaveLength(0);
+    expect(usage).toEqual([]);
+  });
+
+  it.each(['默认', '仅调用时提供', '调用时与构造时均提供'])('上下文摘要和随后请求分别上报（观察者：%s）', async (mode) => {
+    const injected = mode !== '默认';
+    const scope = createUsageObservationScope();
+    const usage: UsageAttempt[] = [];
+    const model = scriptedModel([
+      { text: JSON.stringify({ goal: '测试', done: [], findings: [], evidenceIds: [], pending: [] }) },
+      { toolCalls: [{ name: 'finish', input: { answer: 'ok' } }] },
+    ]);
+    const { options } = opts([], {
+      stage: 'plan', models: [{ ref: 'mock:primary', model, contextWindow: 40_000 }],
+      messages: [
+        { role: 'user', content: '开始' },
+        ...Array.from({ length: 4 }, () => ({ role: 'assistant' as const, content: 'y'.repeat(30_000) })),
+        { role: 'user', content: '继续' },
+      ],
+      usageObserver: attempt => { usage.push(attempt); },
+    });
+    const contextManager = injected ? new ContextManager({
+      stage: 'plan', summarize: createModelSummarizer({ budget: options.budget, usageObserver: mode === '调用时与构造时均提供' ? options.usageObserver : undefined }),
+    }) : undefined;
+    const result = await runAgent({ ...options, contextManager, usageObservationScope: scope });
+    expect(result).toMatchObject({ status: 'done', attempts: injected ? 1 : 2 });
+    expect(usage).toEqual([]);
+    await scope.flush();
+    expect(usage).toEqual([
+      { ref: 'mock:primary', purpose: 'compact', status: 'success', usage: { inputTokens: 10, outputTokens: 5 } },
+      { ref: 'mock:primary', purpose: 'request', status: 'success', usage: { inputTokens: 10, outputTokens: 5 } },
+    ]);
+  });
+
+  it('委派请求与父代理请求使用同一个观察者，不在子代理汇总时重复计数', async () => {
+    const usage: UsageAttempt[] = [];
+    const { options } = opts([
+      { toolCalls: [{ name: 'delegate', input: { task: '检查设置' } }], usage: { input: 20 } },
+      { toolCalls: [{ name: 'finish', input: { summary: '有设置', findings: [], status: 'done' } }], usage: { input: 30 } },
+      { toolCalls: [{ name: 'finish', input: { answer: 'ok' } }], usage: { input: 40 } },
+    ], { delegates: [{ name: 'delegate', description: '委派检查', tools: [] }], usageObserver: attempt => { usage.push(attempt); } });
+    expect(await runAgent(options)).toMatchObject({ status: 'done' });
+    expect(usage.map(attempt => attempt.usage?.inputTokens)).toEqual([20, 30, 40]);
   });
 
   it('所有模型都失败时判为 model-error', async () => {
@@ -334,10 +601,13 @@ describe('runAgent', () => {
         budget,
         resilience: { retries: 3, sleep: async () => {} },
       });
-      const r = await runAgent(options);
+      const usage: UsageAttempt[] = [];
+      const r = await runAgent({ ...options, usageObserver: attempt => { usage.push(attempt); } });
       expect(r).toMatchObject({ status: 'blocked', reason: 'budget' });
       expect(primary.doGenerateCalls).toHaveLength(1);
       expect(backup.doGenerateCalls).toHaveLength(0);
+      expect(r.modelAttempts).toEqual([{ ref: 'mock:primary', status: 'error', usage: null }]);
+      expect(usage).toEqual([{ ref: 'mock:primary', purpose: 'request', status: 'cancelled', usage: null }]);
     });
 
     it('工具执行挂起且时长预算即将耗尽时判为 budget（而非一直挂起）', async () => {
