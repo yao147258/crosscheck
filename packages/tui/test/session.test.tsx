@@ -52,6 +52,13 @@ it('宽终端启动时展示 ASCII 标识，窄终端降级为简洁名称', asy
   expect(frame(ui)).toContain('1.2.3');
 });
 
+it('启动界面提示 Windows Terminal 原生选中和复制方式', () => {
+  const options: RunSessionOptions = { ...noUsage, tokenize: text => [text], runSlashCommand: async () => ({ kind: 'exit' }), resolveReview: async () => { throw new Error('unused'); }, chatReply: async () => '' };
+  const ui = render(<SessionApp options={options} />);
+  expect(frame(ui)).toContain('Shift+拖选');
+  expect(frame(ui)).toContain('Ctrl+C 复制');
+});
+
 it('未配置模型时启动界面显示未配置', () => {
   const options: RunSessionOptions = { ...noUsage,info: { version: '1.2.3', models: undefined }, tokenize: text => [text], runSlashCommand: async () => ({ kind: 'exit' }), resolveReview: async () => { throw new Error('unused'); }, chatReply: async () => '' };
   const ui = render(<SessionApp options={options} />);

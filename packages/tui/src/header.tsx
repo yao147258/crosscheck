@@ -45,7 +45,8 @@ export function SessionHeader({ info, width, busy, launchedAt, usage }: { info?:
       <Text wrap="truncate-end">{SUBTITLE}</Text>
     </Box>;
   const usageLines = usage?.split('\n').map((line, index) => <Text key={index} wrap="truncate-end">{safeText(line)}</Text>);
-  if (!info) return <Box flexDirection="column">{title}{usageLines}</Box>;
+  const copyHint = <Text color="gray" wrap="wrap">Windows Terminal：Shift+拖选，Ctrl+C 复制（取决于终端配置）</Text>;
+  if (!info) return <Box flexDirection="column">{title}{usageLines}{copyHint}</Box>;
   const columns = width >= 60;
   const nameWidth = Math.max(...ROLES.map((role) => role.length));
   return (
@@ -68,6 +69,7 @@ export function SessionHeader({ info, width, busy, launchedAt, usage }: { info?:
         </Box>
       </Box>
       {usageLines}
+      {copyHint}
       {rule}
     </Box>
   );

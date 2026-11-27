@@ -14,6 +14,10 @@ crosscheck --help
 
 无参数运行 `crosscheck` 在 stdin、stdout 均为 TTY 时进入交互会话。使用 `/init`、`/profile`、`/reqs`、`/plan`、`/review`、`/run`、`/report`、`/impact`、`/status`、`/usage`、`/help`、`/clear` 和 `/exit`；参数与独立命令相同，含空格的路径使用引号，例如 `/review --project "my project"`。`/review` 默认审核启动项目，显式 `--project` 可以覆盖；审核每次重新读取所选项目的确认记录，`q` 或顶层 `Esc` 返回聊天。命令失败显示退出码但不退出会话；Ctrl+C 取消当前操作并等待清理，空闲时使用 `/exit`。
 
+### 选择和复制对话
+
+会话支持鼠标滚轮、PageUp/PageDown 和方向键翻看历史。在 Windows Terminal 中，按住 **Shift** 并用鼠标拖选当前屏幕上的文本；默认快捷键配置下，有选区时按 **Ctrl+C** 复制。选区和复制由终端处理，实际快捷键取决于 Windows Terminal 设置；没有选区时，Ctrl+C 仍由会话处理。历史内容需先滚动到屏幕上才能选择；执行中的界面刷新可能影响选区。其他终端的选区修饰键和复制方式请参照其设置。
+
 `/status [--project <目录>]` 只读展示推断的项目阶段、待审核数量和最新测试运行；运行缺失、未完成或损坏时明确提示。结果待裁决数量仅针对最新运行，阶段为推断而非完成保证。
 
 每次启动默认新建会话。`/sessions` 列出启动项目的历史；`/resume` 不带参数只列候选并显示用法，`/resume <UUID>` 恢复指定会话的界面历史、有效聊天上下文和用量 ID。不调用模型，不重放历史命令或审核，不自动恢复中断的测试，且不改变 `run --resume`。`/clear` 清空界面和模型上下文，生成新 ID，但保留旧历史和用量；`/exit` 等待写入收尾。
