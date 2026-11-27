@@ -1,13 +1,26 @@
 import { expect, it, vi } from 'vitest';
-import { readFile, rm, writeFile, mkdir } from 'node:fs/promises';
+import { readFile, readdir, rm, writeFile, mkdir } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { createUsageObserver, projectUsageLocation, readUsage, withProgress, type UsageEvent } from '@crosscheck/models';
 import path from 'node:path';
 import { afterEach } from 'vitest';
-import { APICallError } from 'ai';
+import { APICallError, type LanguageModel } from 'ai';
+import { MockLanguageModelV3 } from 'ai/test';
+
+type ModelV2 = Extract<LanguageModel, { specificationVersion: 'v2' }>;
+class TestModelV2 implements ModelV2 {
+  readonly specificationVersion = 'v2';
+  readonly provider = 'mock-provider';
+  readonly modelId = 'mock-model';
+  readonly supportedUrls = {};
+  doGenerate: ModelV2['doGenerate'] = async () => { throw new Error('未设置模型回执'); };
+  doStream: ModelV2['doStream'] = async () => { throw new Error('不应启动流'); };
+}
 import { ReviewSession, approveClause } from '@crosscheck/tui';
-import { AUTO_REVIEWER, readProfileFile } from '@crosscheck/core';
+import { Approvals, AUTO_REVIEWER, readProfileFile } from '@crosscheck/core';
 import { clause } from '../../tui/test/fixture';
 import { scriptedModel } from '../../agent/src/testing/scripted-model';
-import { cleanupProjects, createProject } from '../../tui/test/fixture';
+import { cleanupProjects, createProject, PROFILE_FILES_CONTENT } from '../../tui/test/fixture';
 import { chatReply as realChatReply, createSlashDispatcher, loadSessionInfo, sessionSlashCommands, tokenizeCommand } from '../src/session';
 import cliPackage from '../package.json';
 const chatReply: typeof realChatReply = (root, history, text, deps, signal) => realChatReply(root, history, text, { ...deps, userConfigHome: path.join(root, 'user') }, signal);
@@ -34,6 +47,130 @@ it('可重试模型错误只由 fallback 控制重试次数', async () => {
   const model = scriptedModel([{ error }, { text: '不应重试' }]);
   await expect(chatReply(root, [], '你好', { resilience: { retries: 0 }, modelOptions: { env: {}, factories: { openai: () => model } } }, new AbortController().signal)).rejects.toThrow();
   expect(model.doGenerateCalls).toHaveLength(1);
+});
+
+async function usageEvents(project: string, home = path.join(project, 'user')): Promise<UsageEvent[]> {
+  const { directory } = await projectUsageLocation(project, home);
+  const files = await readdir(directory).catch(error => { if (error.code === 'ENOENT') return []; throw error; });
+  return Promise.all(files.map(async file => JSON.parse(await readFile(path.join(directory, file), 'utf8'))));
+}
+
+it('聊天仅为实际主备请求逐次入账，成功回执保留四项用量', async () => {
+  const { root } = await createProject();
+  const sessionId = randomUUID();
+  await writeFile(path.join(root, 'user', '.crosscheck', 'config.yaml'), JSON.stringify({ models: { extractor: 'mock:x', planner: 'mock:primary', executor: 'mock:e', reviewer: 'mock:r', fallback: { planner: 'mock:backup' } }, providers: { mock: { type: 'openai', baseURL: 'https://example.invalid/v1', apiKey: 'fixture-key' } } }));
+  const primary = scriptedModel([{ error: new Error('首次失败') }, { error: new Error('重试失败') }]);
+  const backup = scriptedModel([{ text: '备用回复', usage: { input: 19, output: 7, cacheRead: 4, cacheWrite: 2 } }]);
+  expect(await chatReply(root, [], '提问', { usageContext: { sessionId, warn: () => {} }, resilience: { retries: 1, sleep: async () => {} }, modelOptions: { env: {}, factories: { openai: ({ modelId }) => modelId === 'primary' ? primary : backup } } }, new AbortController().signal)).toBe('备用回复');
+  const events = await usageEvents(root);
+  expect(events).toHaveLength(3);
+  for (const event of events) expect(event).toMatchObject({ sessionId, command: 'chat', role: 'planner', purpose: 'request' });
+  expect(events.filter(event => event.status === 'error')).toEqual(Array(2).fill(expect.objectContaining({ configuredRef: 'mock:primary', usage: { inputTokens: null, outputTokens: null, cacheReadTokens: null, cacheWriteTokens: null } })));
+  expect(events.find(event => event.status === 'success')).toMatchObject({ configuredRef: 'mock:backup', usage: { inputTokens: 19, outputTokens: 7, cacheReadTokens: 4, cacheWriteTokens: 2 } });
+});
+
+it('聊天仅将进入模型后取消的请求记为 cancelled，预取消不记账', async () => {
+  const { root } = await createProject();
+  const controller = new AbortController();
+  const model = scriptedModel([{ hangWithGenericError: true }]);
+  const generate = model.doGenerate.bind(model);
+  vi.spyOn(model, 'doGenerate').mockImplementation(options => {
+    const result = generate(options);
+    controller.abort();
+    return result;
+  });
+  const deps = { modelOptions: { env: {}, factories: { openai: () => model } } };
+  await expect(chatReply(root, [], '预取消', deps, AbortSignal.abort())).rejects.toThrow();
+  const beforeGenerate = new AbortController();
+  await expect(withProgress(line => {
+    if (line.startsWith('请求模型')) beforeGenerate.abort();
+  }, () => chatReply(root, [], '生成前取消', deps, beforeGenerate.signal))).rejects.toThrow();
+  expect(await usageEvents(root)).toEqual([]);
+  expect(model.doGenerateCalls).toHaveLength(0);
+  await expect(chatReply(root, [], '取消请求', deps, controller.signal)).rejects.toThrow('连接中断');
+  expect(await usageEvents(root)).toEqual([expect.objectContaining({ status: 'cancelled', sessionId: null, usage: { inputTokens: null, outputTokens: null, cacheReadTokens: null, cacheWriteTokens: null } })]);
+});
+
+it.each([
+  { raw: { input_tokens: 19, output_tokens: 7, input_tokens_details: { cached_tokens: 0, cache_write_tokens: 2 } }, expected: { inputTokens: 19, outputTokens: 7, cacheReadTokens: 0, cacheWriteTokens: 2 } },
+  { raw: { input_tokens: '19', output_tokens: 7, input_tokens_details: { cached_tokens: -1, cache_write_tokens: 1.5 } }, expected: { inputTokens: null, outputTokens: 7, cacheReadTokens: null, cacheWriteTokens: null } },
+  { raw: undefined, expected: { inputTokens: null, outputTokens: null, cacheReadTokens: null, cacheWriteTokens: null } },
+])('内置 OpenAI 拒绝无 output 的回执时，聊天失败且仅记录有效白名单用量（$raw）', async ({ raw, expected }) => {
+  const { root } = await createProject();
+  const fetch = vi.fn(async () => Response.json({
+    id: 'response', created_at: 1, model: 'p', secret: '不可落入账本的响应正文', usage: raw,
+  }));
+  vi.stubGlobal('fetch', fetch);
+  await expect(chatReply(root, [], '提问', { modelOptions: { env: {} }, resilience: { retries: 0 } }, new AbortController().signal)).rejects.toThrow(/output|Invalid JSON response/i);
+  expect(fetch).toHaveBeenCalledTimes(1);
+  const events = await usageEvents(root);
+  expect(events).toEqual([expect.objectContaining({ status: 'error', usage: expected })]);
+  expect(JSON.stringify(events)).not.toContain('不可落入账本的响应正文');
+});
+
+it.each([undefined, 0])('内置 OpenAI 成功原始回执的缓存读 %s 与费用对应', async cachedTokens => {
+  const { root } = await createProject();
+  const config = path.join(root, 'user', '.crosscheck', 'config.yaml');
+  const settings = JSON.parse(await readFile(config, 'utf8'));
+  await writeFile(config, JSON.stringify({ ...settings, pricing: { 'mock:p': { inputPerMTok: 10, outputPerMTok: 20 } } }));
+  const fetch = vi.fn(async () => Response.json({
+    id: 'response', created_at: 1, model: 'p',
+    output: [{ type: 'message', role: 'assistant', id: 'msg', content: [{ type: 'output_text', text: '真实回复', annotations: [] }] }],
+    usage: { input_tokens: 19, output_tokens: 7, input_tokens_details: { cached_tokens: cachedTokens, cache_write_tokens: 2 } },
+  }));
+  vi.stubGlobal('fetch', fetch);
+  await expect(chatReply(root, [], '提问', { modelOptions: { env: {} }, resilience: { retries: 0 } }, new AbortController().signal)).resolves.toBe('真实回复');
+  expect(fetch).toHaveBeenCalledTimes(1);
+  expect(await usageEvents(root)).toEqual([expect.objectContaining({
+    status: 'success', usage: { inputTokens: 19, outputTokens: 7, cacheReadTokens: cachedTokens ?? null, cacheWriteTokens: 2 },
+    cost: cachedTokens === undefined ? null : expect.closeTo(0.00033, 10),
+  })]);
+});
+
+it('模型已返回回执但 SDK 后处理失败时保留用量和原错误', async () => {
+  const { root } = await createProject();
+  const model = scriptedModel([{ text: '不会显示', usage: { input: 19, output: 7, cacheRead: 0, cacheWrite: 2 } }]);
+  const generate = model.doGenerate.bind(model);
+  vi.spyOn(model, 'doGenerate').mockImplementation(async options => ({
+    ...await generate(options),
+    get content(): never { throw new Error('SDK 后处理读取内容失败'); },
+  }));
+  await expect(chatReply(root, [], '提问', { resilience: { retries: 0 }, modelOptions: { env: {}, factories: { openai: () => model } } }, new AbortController().signal)).rejects.toThrow('SDK 后处理读取内容失败');
+  expect(await usageEvents(root)).toEqual([expect.objectContaining({ status: 'error', usage: { inputTokens: 19, outputTokens: 7, cacheReadTokens: 0, cacheWriteTokens: 2 } })]);
+});
+
+it.each(['v2', 'v3'] as const)('%s 转换内容失败前保留原始用量及接收者', async version => {
+  const { root } = await createProject();
+  const brokenContent = { get content(): never { throw new Error('版本适配读取内容失败'); } };
+  const model = version === 'v2'
+    ? new TestModelV2()
+    : new MockLanguageModelV3();
+  if (version === 'v2') {
+    const original = model as TestModelV2;
+    vi.spyOn(original, 'doGenerate').mockImplementation(async function (this: TestModelV2, options) {
+      expect(this).toBe(original);
+      expect(options.prompt.at(-1)?.role).toBe('user');
+      return { get content(): never { return brokenContent.content; }, finishReason: 'stop', usage: { inputTokens: 19, outputTokens: 7, totalTokens: 26, cachedInputTokens: 0 }, warnings: [] };
+    });
+  } else {
+    const original = model as MockLanguageModelV3;
+    vi.spyOn(original, 'doGenerate').mockImplementation(async function (this: MockLanguageModelV3, options) {
+      expect(this).toBe(original);
+      expect(options.prompt.at(-1)?.role).toBe('user');
+      return { get content(): never { return brokenContent.content; }, finishReason: { unified: 'stop', raw: undefined }, usage: { inputTokens: { total: 19, noCache: 17, cacheRead: 0, cacheWrite: 2 }, outputTokens: { total: 7, text: 7, reasoning: undefined } }, warnings: [] };
+    });
+  }
+  await expect(chatReply(root, [], '提问', { resilience: { retries: 0 }, modelOptions: { env: {}, factories: { openai: () => model } } }, new AbortController().signal)).rejects.toThrow('版本适配读取内容失败');
+  expect(await usageEvents(root)).toEqual([expect.objectContaining({ status: 'error', usage: { inputTokens: 19, outputTokens: 7, cacheReadTokens: 0, cacheWriteTokens: version === 'v2' ? null : 2 } })]);
+});
+
+it('聊天账本写入失败不丢回复且只发脱敏告警', async () => {
+  const { root } = await createProject();
+  await writeFile(path.join(root, 'user', '.crosscheck', 'projects'), '占用目录');
+  const warn = vi.fn();
+  const model = scriptedModel([{ text: '保留回复' }]);
+  expect(await chatReply(root, [], '提问', { usageContext: { sessionId: randomUUID(), warn }, modelOptions: { env: {}, factories: { openai: () => model } } }, new AbortController().signal)).toBe('保留回复');
+  expect(warn.mock.calls).toEqual([['用量记录写入失败，本次统计不完整']]);
 });
 
 it('聊天结果和模型错误均清除全局密钥', async () => {
@@ -99,6 +236,7 @@ it('默认记录实际模型请求并隐藏凭据', async () => {
   expect(record.headers['x-api-key']).toBe('[REDACTED]');
   expect(sent?.headers.get('x-api-key')).toBe(secret);
   expect(await sent?.clone().text()).toContain('这是测试问题');
+  expect(await usageEvents(root)).toEqual([expect.objectContaining({ status: 'error', usage: { inputTokens: null, outputTokens: null, cacheReadTokens: null, cacheWriteTokens: null } })]);
 });
 
 it('日志不可写时仍保留原始模型错误', async () => {
@@ -188,8 +326,87 @@ it('status 保留摘要，只列当前已确认画像及可见转义后的确认
   expect(await artifacts.readBytes('approvals.json')).toEqual(before);
 });
 
+it('/usage 固定查询启动项目，区分项目和指定会话，并显示已知部分及损坏诊断', async () => {
+  const { root } = await createProject();
+  const home = path.join(root, 'user');
+  const currentId = randomUUID(), otherId = randomUUID();
+  const options = { project: root, home, command: 'chat' as const, role: 'planner' as const, pricing: { 'mock:p': { inputPerMTok: 1, outputPerMTok: 2, cacheReadPerMTok: 3, cacheWritePerMTok: 4 } }, warn: () => {} };
+  await createUsageObserver({ ...options, sessionId: currentId })({ ref: 'mock:p', status: 'success', purpose: 'request', usage: { inputTokens: 100, outputTokens: 20, cacheReadTokens: 5, cacheWriteTokens: 3 } });
+  await createUsageObserver({ ...options, sessionId: otherId, command: 'init', role: 'extractor' })({ ref: 'mock:x', status: 'error', purpose: 'request', usage: null });
+  const { directory } = await projectUsageLocation(root, home);
+  await writeFile(path.join(directory, 'broken.json'), '{');
+  const dispatch = createSlashDispatcher({ userConfigHome: home }, { currentId, project: root });
+  const signal = new AbortController().signal;
+  const query = async (...args: string[]) => {
+    const result = await dispatch(['usage', ...args], signal);
+    expect(result).toMatchObject({ kind: 'log', code: 0 });
+    if (result.kind !== 'log') throw new Error('用量命令应返回日志');
+    return result.lines.join('\n');
+  };
+  const project = await query();
+  for (const text of [root, '项目', '已知输入 100', '已知输出 20', '已知缓存读 5', '已知缓存写 3', '已知费用估算 0.000159', '未知调用 1', '统计不完整', '命令', '角色', '模型', 'mock:p', '无法读取用量记录']) expect(project).toContain(text);
+  expect(await query('--session')).toContain(currentId);
+  expect(await query('--session')).not.toContain('mock:x');
+  expect(await query('--session', otherId)).toContain(otherId);
+  expect(await query('--session', otherId)).not.toContain('mock:p');
+  for (const args of [['--project', root], ['--session', 'bad'], ['--session', ''], ['--session', otherId, 'extra'], [otherId]]) {
+    expect(await dispatch(['usage', ...args], signal)).toMatchObject({ kind: 'log', code: 2 });
+  }
+});
+
+it('/usage 对项目与模型名中的终端和 Unicode 控制字符作单行转义', async () => {
+  const { root } = await createProject();
+  const home = path.join(root, 'user');
+  const id = randomUUID();
+  const tail = '值\n\u001b\u0085\u061c\u200f\u2028\u2029\u202e\u2067';
+  const encoded = '值' + ['000a', '001b', '0085', '061c', '200f', '2028', '2029', '202e', '2067'].map(code => '\\u' + code).join('') + '结束';
+  await createUsageObserver({ project: root, home, sessionId: id, command: 'chat', role: 'planner', pricing: {}, warn: () => {} })({ ref: `mock:${tail}结束`, status: 'error', purpose: 'request', usage: null });
+  const dispatch = createSlashDispatcher({ userConfigHome: home }, { currentId: id, project: root });
+  const result = await dispatch(['usage'], new AbortController().signal);
+  if (result.kind !== 'log') throw new Error('用量命令应返回日志');
+  expect(result.lines.some(line => line.includes(`mock:${encoded}`))).toBe(true);
+  const badProject = createSlashDispatcher({ userConfigHome: home }, { currentId: id, project: `${root}/${tail}结束` });
+  const query = await badProject(['usage'], new AbortController().signal);
+  expect(query).toMatchObject({ kind: 'log', lines: expect.arrayContaining([expect.stringContaining(encoded)]) });
+});
+
+it.each([false, true])('/init 用实际目标项目交接画像，模型请求仅在目标账本收尾后逐次入账（跨项目：%s）', async crossProject => {
+  const startup = await createProject();
+  const target = crossProject ? await createProject() : startup;
+  const home = startup.userHome;
+  const currentId = randomUUID();
+  const approvals = Approvals.empty();
+  for (const [name, value] of Object.entries(PROFILE_FILES_CONTENT)) {
+    if (name !== 'guardrails.yaml') approvals.approve('profile', name, value, '测试人');
+  }
+  await approvals.save(target.artifacts);
+  const model = scriptedModel([
+    { toolCalls: [{ name: 'finish', input: { markdown: '# 项目笔记' } }], usage: { input: 11 } },
+    { toolCalls: [{ name: 'finish', input: { findings: [] } }], usage: { input: 13 } },
+    { toolCalls: [{ name: 'finish', input: { 'guardrails.yaml': PROFILE_FILES_CONTENT['guardrails.yaml'] } }], usage: { input: 17 } },
+  ]);
+  const dispatch = createSlashDispatcher({ userConfigHome: home, resilience: { retries: 0 }, modelOptions: { env: {}, factories: { openai: () => model } } }, { currentId, project: startup.root });
+  const signal = new AbortController().signal;
+  const settles: Array<() => Promise<void>> = [];
+  const argv = crossProject ? tokenizeCommand(`init --project "${target.root}"`) : ['init'];
+  const result = await dispatch(argv, signal, undefined, settle => settles.push(settle));
+  expect(await usageEvents(target.root, home)).toEqual([]);
+  expect(settles).toHaveLength(1);
+  await settles[0]!();
+  expect(result).toMatchObject({ kind: 'review', args: { project: target.root, view: 'profile', only: ['guardrails.yaml'] }, lines: expect.arrayContaining([expect.stringContaining('需要人工确认')]) });
+  expect((await Approvals.load(target.artifacts)).record('notes', 'project')?.by).toBe(AUTO_REVIEWER);
+  const events = await usageEvents(target.root, home);
+  expect(events).toHaveLength(3);
+  expect(events.map(event => event.usage.inputTokens).sort((a, b) => Number(a) - Number(b))).toEqual([11, 13, 17]);
+  for (const event of events) expect(event).toMatchObject({ sessionId: currentId, role: 'extractor', status: 'success' });
+  expect(events.find(event => event.usage.inputTokens === 11)?.command).toBe('init');
+  const startupCalls = crossProject ? 0 : 3;
+  expect((await readUsage({ project: startup.root, home })).total.calls).toBe(startupCalls);
+  expect(await dispatch(['usage', '--session'], signal)).toMatchObject({ kind: 'log', code: 0, lines: expect.arrayContaining([expect.stringContaining(`总计：调用 ${startupCalls}`)]) });
+});
+
 it('会话命令清单覆盖全部斜杠命令且带描述', () => {
-  expect(sessionSlashCommands.map((command) => command.name)).toEqual(['init', 'profile', 'reqs', 'plan', 'review', 'run', 'report', 'impact', 'status', 'help', 'clear', 'exit']);
+  expect(sessionSlashCommands.map((command) => command.name)).toEqual(['init', 'profile', 'reqs', 'plan', 'review', 'run', 'report', 'impact', 'status', 'usage', 'help', 'clear', 'exit']);
   expect(sessionSlashCommands.find((command) => command.name === 'init')?.description).toContain('笔记');
   expect(sessionSlashCommands.find((command) => command.name === 'profile')?.description).toContain('画像');
   expect(sessionSlashCommands.find((command) => command.name === 'review')?.description).toContain('笔记');

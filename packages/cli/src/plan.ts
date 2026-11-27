@@ -4,10 +4,12 @@ import {
   type Profile,
 } from '@crosscheck/core';
 import { generateCases } from '@crosscheck/planner';
+import { createUsageObservationScope } from '@crosscheck/models';
 import type { CliArgs } from './args';
-import { loadModelContext, resolveModels, withInterrupt, type CommandDependencies } from './context';
+import { createCommandUsageObserver, loadModelContext, resolveModels, withInterrupt, type CommandDependencies } from './context';
 
 export async function planCommand(args: CliArgs, log: (s: string) => void, deps: CommandDependencies = {}, signal?: AbortSignal): Promise<number> {
+  const usageObservationScope = deps.usageObservationScope ?? createUsageObservationScope();
   return withInterrupt(signal, async (sig) => {
     const module = args.modules![0]!;
     const artifacts = new ArtifactStore(args.project);
@@ -40,6 +42,7 @@ export async function planCommand(args: CliArgs, log: (s: string) => void, deps:
       module, clauses: ready, approvals, profile, knownCases: approved, models,
       budget: new BudgetTracker(config.budget.perCase),
       signal: sig, resilience: deps.resilience,
+      usageObserver: createCommandUsageObserver(args.project, 'plan', 'planner', config.pricing, deps, log), usageObservationScope,
     }).catch((error: unknown) => { throw new Error(redactor.text(error instanceof Error ? error.message : '模型调用失败')); });
     sig.throwIfAborted();
     if (result.status !== 'done') { log(redactor.text(`用例生成未完成（${result.reason}）：${result.detail}；未修改用例文件`)); return 2; }
@@ -53,5 +56,5 @@ export async function planCommand(args: CliArgs, log: (s: string) => void, deps:
     if (cov.uncovered.length) log(redactor.text(`未覆盖条款：${cov.uncovered.join(', ')}`));
     log(`请运行 crosscheck review cases --module ${module} 审核`);
     return 0;
-  });
+  }, deps.usageObservationScope ? undefined : () => usageObservationScope.flush());
 }

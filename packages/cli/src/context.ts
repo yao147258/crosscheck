@@ -1,22 +1,36 @@
 import { loadUserModelConfig, publicModelConfig, type ArtifactStore, type Config, type ProfileFile, type Role } from '@crosscheck/core';
 import { createEvidenceRedactor } from '@crosscheck/tools';
-import { hasProgressListener, resolveRole, withProgress, type ModelCandidate } from '@crosscheck/models';
+import { createUsageObserver, hasProgressListener, resolveRole, withProgress, type ModelCandidate, type UsageContext, type UsageEvent, type UsageObserver } from '@crosscheck/models';
 import type { RunSuiteOptions } from '@crosscheck/runner';
 
 import type { ReviewDependencies } from './review';
 
-export type CommandDependencies = Pick<RunSuiteOptions, 'modelOptions' | 'resilience' | 'env' | 'userConfigHome'> & {
+export type CommandDependencies = Pick<RunSuiteOptions, 'modelOptions' | 'resilience' | 'env' | 'userConfigHome' | 'usageContext' | 'usageObservationScope'> & {
   review?: ReviewDependencies;
   session?: { isTTY?: boolean };
   /** 会话内 /init 使用：提供后 init 不自己打开审核，而是把待确认画像交给会话。 */
   init?: { deferReview?: (only: ProfileFile[]) => void };
 };
 
+export function createCommandUsageObserver(
+  project: string, command: UsageEvent['command'], role: UsageEvent['role'], pricing: Config['pricing'],
+  deps: Pick<CommandDependencies, 'userConfigHome' | 'usageContext'>, log: UsageContext['warn'],
+): UsageObserver {
+  return createUsageObserver({ project, home: deps.userConfigHome, sessionId: deps.usageContext?.sessionId ?? null,
+    command, role, pricing, warn: deps.usageContext?.warn ?? log });
+}
+
+export function withSessionUsageContext(deps: CommandDependencies, sessionId: string, warn: UsageContext['warn']): CommandDependencies {
+  return { ...deps, usageContext: { sessionId, warn } };
+}
+
 export class InterruptedError extends Error {
   override name = 'InterruptedError';
 }
 
-export async function withInterrupt<T>(signal: AbortSignal | undefined, fn: (signal: AbortSignal) => Promise<T>): Promise<T> {
+export async function withInterrupt<T>(
+  signal: AbortSignal | undefined, fn: (signal: AbortSignal) => Promise<T>, settle?: () => Promise<void>,
+): Promise<T> {
   const controller = new AbortController();
   const abort = () => controller.abort();
   process.on('SIGINT', abort);
@@ -32,9 +46,14 @@ export async function withInterrupt<T>(signal: AbortSignal | undefined, fn: (sig
     }
     throw error;
   } finally {
-    process.removeListener('SIGINT', abort);
-    process.removeListener('SIGTERM', abort);
-    signal?.removeEventListener('abort', abort);
+    try {
+      // 业务结果和异常分类已确定；收尾期间仍接管信号，但不重新判定取消。
+      if (settle) await settle();
+    } finally {
+      process.removeListener('SIGINT', abort);
+      process.removeListener('SIGTERM', abort);
+      signal?.removeEventListener('abort', abort);
+    }
   }
 }
 

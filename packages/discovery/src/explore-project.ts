@@ -35,6 +35,8 @@ export interface ExploreProjectOptions {
   budget: () => BudgetTracker;
   signal?: AbortSignal;
   resilience?: RunAgentOptions<unknown>['resilience'];
+  usageObserver?: RunAgentOptions<unknown>['usageObserver'];
+  usageObservationScope?: RunAgentOptions<unknown>['usageObservationScope'];
 }
 
 export type ExploreProjectResult =
@@ -60,6 +62,7 @@ export async function exploreProject(options: ExploreProjectOptions): Promise<Ex
   const knownFacts = options.facts.slice(0, KNOWN_FACTS).map((fact) => clean(sanitize(`${describeFact(fact)} (${fact.source.file}:${fact.source.line})`)));
   const result = await runAgent({
     stage: 'extract', models: options.models, budget, signal: options.signal, resilience: options.resilience,
+    usageObserver: options.usageObserver, usageObservationScope: options.usageObservationScope,
     tools: createProjectTools({ projectRoot: options.projectRoot, files: options.files, budget, clean }),
     system: EXPLORE_SYSTEM,
     messages: [{ role: 'user', content: JSON.stringify({

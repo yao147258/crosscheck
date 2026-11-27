@@ -9,6 +9,7 @@ import { promisify } from 'node:util';
 import { beforeAll, afterEach, expect, it } from 'vitest';
 import { Approvals, ArtifactStore, ClauseSchema, TestCaseSchema, loadProfile } from '@crosscheck/core';
 import { chromium } from 'playwright';
+import { projectUsageLocation, readUsage, type UsageEvent } from '@crosscheck/models';
 const exec = promisify(execFile);
 const repo = fileURLToPath(new URL('../../../', import.meta.url));
 const harness = path.join(repo, 'packages/cli/dist/test-harness.js');
@@ -87,6 +88,47 @@ it('screenshot/dom需求不能被只有HTTP的模型假充完整，未确认仍�
   expect((await result(s)).data.cases[0].status).toBe('BLOCKED');
   const unapproved = await setup({ approved: false }); expect((await launch(unapproved)).code).toBe(2); expect(unapproved.counts().actions).toBe(0);
 });
+it('直接 run 逐次入账，读取和恢复旧运行均不回填或重复记账', async () => {
+  const s = await setup(); expect((await launch(s)).code).toBe(0);
+  const saved = await result(s);
+  const options = { project: s.root, home: path.join(s.root, 'user') };
+  const before = await readUsage(options);
+  const { directory } = await projectUsageLocation(options.project, options.home);
+  const files = await readdir(directory);
+  const contents = await Promise.all(files.map(file => readFile(path.join(directory, file), 'utf8')));
+  const events: UsageEvent[] = contents.map(text => JSON.parse(text));
+  // 脚本固定为执行器两次工具调用加一次提交，随后复核器一次提交。
+  expect(events.filter(event => event.command === 'run' && event.sessionId === null)).toHaveLength(4);
+  expect(events).toHaveLength(saved.data.cases[0].reliability.attempts);
+  expect(new Set(events.map(event => event.id)).size).toBe(events.length);
+  for (const privateText of [secret, 'fixture-key', attack]) expect(contents.join('\n')).not.toContain(privateText);
+  expect(before.byCommand.run?.calls).toBe(events.length);
+  expect(before.total.calls).toBeGreaterThan(0);
+  expect((await launch(s, 'pass', ['--resume', saved.id])).code).toBe(0);
+  expect(await readUsage(options)).toEqual(before);
+
+  // 保留 run 结果和严格审计，仅移走账本，模拟启用账本前已完成的运行。
+  await rm(directory, { recursive: true });
+  const rebuilt = await exec(runtime, [production, 'report', saved.id, '--project', s.root], {
+    env: { PATH: process.env.PATH, SYSTEMROOT: process.env.SYSTEMROOT, USERPROFILE: options.home, HOME: options.home },
+  });
+  expect(rebuilt.stdout).toContain('报告');
+  expect((await readUsage(options)).total.calls).toBe(0);
+  expect((await launch(s, 'pass', ['--resume', saved.id])).code).toBe(0);
+  expect(await readUsage(options)).toMatchObject({ total: { calls: 0 }, incomplete: false });
+  expect(s.counts().actions).toBe(1);
+}, 15000);
+it('run 账本路径冲突时用 CLI 日志告警且保持成功退出', async () => {
+  const s = await setup();
+  await writeFile(path.join(s.root, 'user', '.crosscheck', 'projects'), '占用目录');
+  const out = await launch(s);
+  expect(out.code, out.stdout).toBe(0);
+  expect((await result(s)).data.status).toBe('PASS');
+  expect(out.stdout).toContain('用量记录写入失败，本次统计不完整');
+  expect(out.stdout.split(/\r?\n/).filter(line => line.includes('用量记录写入失败'))).toEqual(
+    Array(4).fill('用量记录写入失败，本次统计不完整'),
+  );
+}, 15000);
 it('报告写入宿主故障优先退出3，不能用已完成PASS掩盖', async () => {
   const s = await setup(); expect((await launch(s)).code).toBe(0); const saved = await result(s);
   await rm(s.artifacts.resolve(`runs/${saved.id}/report`), { recursive: true });

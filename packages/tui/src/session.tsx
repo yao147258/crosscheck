@@ -11,16 +11,21 @@ export type SlashCommandResult =
   | { kind: 'exit' }
   | { kind: 'clear' }
   | { kind: 'review'; args: { project: string; view?: ReviewView; modules?: string[]; runId?: string; only?: ProfileFile[] }; lines?: string[] }
-  | { kind: 'log'; code: number; lines: string[] };
+  | { kind: 'log'; code: number; lines: string[]; truncateLineIndices?: readonly number[] };
 export interface SlashCommandMeta { name: string; description: string }
+export type SessionProgress = (text: string, kind?: 'warning') => void;
+/** 登记业务结果确定后必须等待的收尾；收尾不受本次业务取消控制。 */
+export type RegisterSessionSettle = (settle: () => Promise<void>) => void;
 export interface RunSessionOptions {
   info?: SessionInfo;
   slashCommands?: SlashCommandMeta[];
   tokenize: (text: string) => string[];
-  /** onProgress 接收执行过程中的实时提示（模型请求、工具调用、命令日志），执行期间显示在会话底部。 */
-  runSlashCommand: (tokens: string[], signal: AbortSignal, onProgress?: (text: string) => void) => Promise<SlashCommandResult>;
+  /** 普通进度仅在执行中展示；warning 同时保留在界面历史，不进入模型上下文。 */
+  runSlashCommand: (tokens: string[], signal: AbortSignal, onProgress?: SessionProgress, registerSettle?: RegisterSessionSettle) => Promise<SlashCommandResult>;
   resolveReview: (args: Extract<SlashCommandResult, { kind: 'review' }>['args'], signal: AbortSignal) => Promise<ReviewEnv>;
-  chatReply: (history: ChatMessage[], text: string, signal: AbortSignal, onProgress?: (text: string) => void) => Promise<string>;
+  chatReply: (history: ChatMessage[], text: string, signal: AbortSignal, onProgress?: SessionProgress, registerSettle?: RegisterSessionSettle) => Promise<string>;
+  resetSession: () => void;
+  loadSessionUsage: () => Promise<string>;
   /** 开关终端鼠标上报；聊天界面启用以响应滚轮，进入审核界面时关闭。 */
   mouseTracking?: (enabled: boolean) => void;
   signal?: AbortSignal;
@@ -29,6 +34,8 @@ export interface RunSessionOptions {
 const SPINNER = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 // 执行提示只显示最近若干行，避免刷屏。
 const ACTIVITY_LINES = 6;
+const MODEL_COMMANDS = new Set(['init', 'profile', 'reqs', 'plan', 'run']);
+const USAGE_UNAVAILABLE = '会话用量：统计不完整（无法读取）';
 // SGR 鼠标上报序列（ink 已去掉开头的 ESC），按钮码 64/65 为滚轮上/下，4/8/16 位为修饰键。
 const MOUSE = /^\[<(\d+);\d+;\d+[Mm]$/;
 const WHEEL_STEP = 3;
@@ -42,7 +49,7 @@ export function SessionApp({ options }: { options: RunSessionOptions }) {
   const { height } = useBoxMetrics(content);
   const inputHeight = Math.min(3, Math.max(1, rows));
   const launchedAt = useMemo(() => formatTime(new Date()), []);
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [messages, setMessages] = useState<Array<ChatMessage & { reportLines?: Array<{ text: string; truncate: boolean }> }>>([]);
   const history = useRef<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const inputRef = useRef('');
@@ -57,7 +64,20 @@ export function SessionApp({ options }: { options: RunSessionOptions }) {
     return (options.slashCommands ?? []).filter((command) => command.name.startsWith(prefix));
   };
   const [busy, setBusy] = useState(false);
+  const [sessionUsage, setSessionUsage] = useState<string>();
   const operation = useRef<AbortController | undefined>(undefined);
+  const usageRevision = useRef(0);
+  const refreshUsage = useCallback(async () => {
+    const revision = ++usageRevision.current;
+    let usage: string;
+    try { usage = await options.loadSessionUsage(); }
+    catch { usage = USAGE_UNAVAILABLE; }
+    if (revision === usageRevision.current) setSessionUsage(usage);
+  }, [options.loadSessionUsage]);
+  useEffect(() => {
+    void refreshUsage();
+    return () => { usageRevision.current++; };
+  }, [refreshUsage]);
   const [review, setReview] = useState<{ env: ReviewEnv; args: Extract<SlashCommandResult, { kind: 'review' }>['args'] }>();
   const reviewActive = useRef(false);
   const externalAbort = useRef(false);
@@ -109,33 +129,49 @@ export function SessionApp({ options }: { options: RunSessionOptions }) {
     setStartedAt(Date.now());
     append('user', text);
     // 只接收本次操作的提示，操作结束后迟到的提示直接丢弃。
-    const progress = (line: string) => {
+    const warnings = new Set<string>();
+    const progress: SessionProgress = (line, kind) => {
       if (operation.current !== controller) return;
+      if (kind === 'warning') warnings.add(line);
       const lines = line.split('\n').filter((item) => item.trim());
       if (lines.length) setActivity((items) => [...items, ...lines].slice(-ACTIVITY_LINES));
     };
+    const settleTasks: Array<() => Promise<void>> = [];
+    const registerSettle: RegisterSessionSettle = settle => { settleTasks.push(settle); };
     let failure: Error | undefined;
+    let nextReview: typeof review;
+    let refresh = !text.startsWith('/');
     try {
       if (text.startsWith('/')) {
-        const result = await options.runSlashCommand(options.tokenize(text.slice(1)), controller.signal, progress);
+        const tokens = options.tokenize(text.slice(1));
+        refresh = MODEL_COMMANDS.has(tokens[0] ?? '');
+        const result = await options.runSlashCommand(tokens, controller.signal, progress, registerSettle);
         controller.signal.throwIfAborted();
         if (result.kind === 'exit') { exit(0); return; }
         if (result.kind === 'clear') {
+          options.resetSession();
+          refresh = true;
           setMessages([{ role: 'assistant', content: '已清空对话历史' }]);
           history.current = [];
           return;
         }
-        if (result.kind === 'log') append('assistant', `退出码 ${result.code}\n${result.lines.join('\n')}`);
+        if (result.kind === 'log') {
+          const lines = [`退出码 ${result.code}`, ...result.lines];
+          if (result.truncateLineIndices) {
+            const truncate = new Set(result.truncateLineIndices);
+            const reportLines = lines.map((text, index) => ({ text, truncate: truncate.has(index - 1) }));
+            setMessages(items => [...items, { role: 'assistant', content: '', reportLines }]);
+          } else append('assistant', lines.join('\n'));
+        }
         if (result.kind === 'review') {
           if (result.lines?.length) append('assistant', result.lines.join('\n'));
           const env = await options.resolveReview(result.args, controller.signal);
           controller.signal.throwIfAborted();
-          reviewActive.current = true;
-          setReview({ env: { ...env, signal: controller.signal }, args: result.args });
+          nextReview = { env, args: result.args };
           return;
         }
       } else {
-        const reply = await options.chatReply(history.current, text, controller.signal, progress);
+        const reply = await options.chatReply(history.current, text, controller.signal, progress, registerSettle);
         controller.signal.throwIfAborted();
         history.current = [...history.current, { role: 'user' as const, content: text }, { role: 'assistant' as const, content: reply }].slice(-20);
         append('assistant', reply);
@@ -145,10 +181,25 @@ export function SessionApp({ options }: { options: RunSessionOptions }) {
       if (!cancelled) failure = error instanceof Error ? error : new Error(String(error));
       append('assistant', controller.signal.aborted ? `操作已中断${failure ? `：${failure.message}` : ''}` : `错误：${failure?.message}`);
     } finally {
-      if (!reviewActive.current) operation.current = undefined;
+      try {
+        for (const settle of settleTasks) await settle();
+        if (refresh) await refreshUsage();
+      } catch {
+        setSessionUsage(USAGE_UNAVAILABLE);
+        warnings.add('用量收尾失败，本次统计不完整');
+      }
+      for (const warning of warnings) append('assistant', warning);
+      // 收尾前不让审核界面接管输入，避免提前返回时释放本次操作。
+      operation.current = undefined;
+      if (nextReview && !externalAbort.current) {
+        const reviewController = new AbortController();
+        operation.current = reviewController;
+        reviewActive.current = true;
+        setReview({ ...nextReview, env: { ...nextReview.env, signal: reviewController.signal } });
+      }
       setBusy(false);
       setActivity([]);
-      if (externalAbort.current && !reviewActive.current) exit(failure ?? 2);
+      if (externalAbort.current) exit(failure ?? 2);
     }
   };
   // 把终端真实光标定位进输入框：空闲时显示在输入文本末尾，busy 或进入审核时隐藏。
@@ -225,10 +276,12 @@ export function SessionApp({ options }: { options: RunSessionOptions }) {
   return <Box flexDirection="column" height={Math.max(1, rows)} width={fullWidth}>
     <Box height={viewport} overflow="hidden" flexShrink={0}>
       <Box ref={content} position="absolute" top={-(maxScroll - offset)} width={Math.max(1, fullWidth - 2)} flexDirection="column">
-        <SessionHeader info={options.info} width={Math.max(1, fullWidth - 2)} busy={busy} launchedAt={launchedAt} />
+        <SessionHeader info={options.info} width={Math.max(1, fullWidth - 2)} busy={busy} launchedAt={launchedAt} usage={sessionUsage} />
         {messages.map((m, i) => m.role === 'user'
           ? <Box key={i} backgroundColor="#b8b8b8"><Text color="black">{safeText(m.content)}</Text></Box>
-          : <Text key={i}>{safeText(m.content)}</Text>)}
+          : m.reportLines ? <Box key={i} flexDirection="column">
+            {m.reportLines.map(({ text, truncate }, index) => <Text key={index} wrap={truncate ? 'truncate-end' : 'wrap'}>{safeText(text).replace(/\n/g, '\\n')}</Text>)}
+          </Box> : <Text key={i}>{safeText(m.content)}</Text>)}
         {busy && activity.map((line, i) => <Text key={`activity-${i}`} color="gray" wrap="truncate-end">  {safeText(line)}</Text>)}
       </Box>
       {thumb > 0 && <Box position="absolute" left={fullWidth - 1} top={thumbStart} flexDirection="column">

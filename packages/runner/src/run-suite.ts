@@ -1,5 +1,5 @@
 import { ArtifactError, GateError, exitCodeFor, loadUserModelConfig, loadVerifiedRunInputs, type ArtifactStore, type RunResult, type RunInputOptions, type UserModelConfig } from '@crosscheck/core';
-import { ModelConfigError, resolveRole, type ResolveOptions, type ResilienceOptions } from '@crosscheck/models';
+import { createUsageObservationScope, ModelConfigError, resolveRole, type ResolveOptions, type ResilienceOptions, type UsageContext, type UsageObservationScope } from '@crosscheck/models';
 import { type BrowserHostOptions, type HttpTransport, type PgConnection } from '@crosscheck/tools';
 import { RunStore } from './store/run-store';
 import { executeCase } from './run-case';
@@ -18,6 +18,11 @@ export interface RunSuiteOptions extends RunInputOptions {
   env?: Record<string, string | undefined>;
   createConnection?: (url: string) => PgConnection;
   userConfigHome?: string;
+  /** 显式项目根目录；旧调用方省略时跳过用量账本。 */
+  usageProject?: string;
+  usageContext?: UsageContext;
+  /** 调用方提供时，由调用方定案后排空。 */
+  usageObservationScope?: UsageObservationScope;
 }
 export interface SuiteOutcome { exitCode: 0 | 1 | 2 | 3; interrupted: boolean; result?: RunResult; error?: string }
 
@@ -63,6 +68,8 @@ export async function runSuite(options: RunSuiteOptions): Promise<SuiteOutcome> 
       run = await RunStore.create(options.artifacts, { fingerprint, environment: input.environment, selectedCaseIds: input.cases.map(tc => tc.id) }, snapshot(input, fingerprint, display));
     }
   } catch { return { exitCode: options.resume ? 2 : 3, interrupted: !!options.signal?.aborted, error: options.resume ? '没有兼容运行或恢复指纹不一致' : '创建运行存储失败' }; }
+  const usageObservationScope = options.usageObservationScope ?? createUsageObservationScope();
+  const usageContext = options.usageContext ?? { sessionId: null, warn: (message: string) => process.emitWarning(message) };
   try {
     return await run.withLock(async () => {
       // 持锁后读取最新清单，不能用锁外旧快照覆盖另一进程已提交状态。
@@ -75,7 +82,7 @@ export async function runSuite(options: RunSuiteOptions): Promise<SuiteOutcome> 
       for (const tc of input.cases) {
         if (completed.has(tc.id)) continue;
         const deferred = !!options.signal?.aborted || !!hostError;
-        const executed = await executeCase(options.artifacts, run, input, tc, { ...options, modelOptions, env }, deferred);
+        const executed = await executeCase(options.artifacts, run, input, tc, { ...options, modelOptions, env, usageContext, usageObservationScope }, deferred);
         hostError ??= executed.hostError;
       }
       const interrupted = !!options.signal?.aborted;
@@ -85,6 +92,12 @@ export async function runSuite(options: RunSuiteOptions): Promise<SuiteOutcome> 
     });
   } catch (error) {
     return { exitCode: error instanceof ArtifactError && error.message.includes('指纹') ? 2 : 3, interrupted: !!options.signal?.aborted, error: error instanceof ArtifactError && error.message.includes('指纹') ? error.message : '宿主运行存储、锁或资源清理失败' };
+  } finally {
+    // 定案和提交、用例预算计时器以及运行锁均先于账本收尾结束。
+    if (!options.usageObservationScope) await usageObservationScope.flush();
+    if (!options.usageProject) {
+      try { usageContext.warn('未提供 usageProject，已跳过运行用量账本'); } catch { /* 警告不能改变运行结果 */ }
+    }
   }
 }
 

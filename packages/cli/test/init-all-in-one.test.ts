@@ -4,6 +4,7 @@ import path from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
 import { AUTO_REVIEWER, Approvals, ArtifactError, ArtifactStore, readProfileFile, readProfileFiles } from '@crosscheck/core';
 import * as discovery from '@crosscheck/discovery';
+import { createUsageObservationScope, readUsage } from '@crosscheck/models';
 import { scriptedModel, type ScriptStep } from '../../agent/src/testing/scripted-model';
 import type { CommandDependencies } from '../src/context';
 import { cliMain } from '../src/main';
@@ -199,6 +200,38 @@ it('登记来源无法读取时保留整份画像原稿且不确认', async () =
   expect(lines.join('\n')).toMatch(/无法.*重试.*人工/);
 });
 
+it('核验扫描有诊断时，即使可以剔除失效来源也保留整份画像原字节', async () => {
+  const { artifacts, init, lines } = await project(script(catalog({ users: operation(), fake: operation(fake) })));
+  const walk = discovery.walkProject;
+  let before: Buffer | undefined;
+  vi.spyOn(discovery, 'walkProject').mockImplementation(async (projectRoot, options) => {
+    const result = await walk(projectRoot, options);
+    before = await artifacts.readBytes(apiPath);
+    if (before) return { ...result, diagnostics: ['测试：扫描未完成'] };
+    return result;
+  });
+  expect(await init()).toBe(2);
+  expect(before).toBeDefined();
+  expect(await artifacts.readBytes(apiPath)).toEqual(before);
+  expect(await payload(artifacts, apiName)).toMatchObject({ operations: { users: operation(), fake: operation(fake) } });
+  const approvals = await Approvals.load(artifacts);
+  expect(approvals.record('profile', apiName)).toBeUndefined();
+  expect(approvals.record('profile', 'pages.yaml')).toBeUndefined();
+  expect(lines.join('\n')).toMatch(/扫描不完整.*人工/);
+});
+
+it('核验不把扫描展示列表中的未登记路径当作来源授权', async () => {
+  const { artifacts, init } = await project();
+  const walk = discovery.walkProject;
+  vi.spyOn(discovery, 'walkProject').mockImplementation(async (root, options) => {
+    if (!await artifacts.readBytes(apiPath)) return walk(root, options);
+    return walk(root, { ...options, onRegisteredPath: file => { if (file !== source.file) options?.onRegisteredPath?.(file); } });
+  });
+  expect(await init()).toBe(2);
+  expect(await payload(artifacts, apiName)).toMatchObject({ operations: { users: operation() } });
+  expect((await Approvals.load(artifacts)).record('profile', apiName)).toBeUndefined();
+});
+
 it('仅剔除来源不通过的条目，并确认 schema 解析后的落盘载荷；编辑后失效', async () => {
   const { artifacts, lines, init } = await project(script(catalog({ users: operation(), fake: operation(fake) })));
   await init();
@@ -229,6 +262,22 @@ it.each([0, 2])('TTY 仅打开待审画像并保留审核退出码 %s', async (e
   } } })).toBe(exitCode);
   expect(received).toEqual([{ view: 'profile', only: manual }]);
   expect(lines.join('\n')).toContain('仍有 5 份画像未确认');
+});
+
+it.each([false, true])('TTY 审核开始前只写入 init 自己拥有的用量 scope，最终不重复（外部 scope：%s）', async external => {
+  const { root, deps, init, model } = await project();
+  const scope = external ? createUsageObservationScope() : undefined;
+  const usage = () => readUsage({ project: root, home: deps.userConfigHome });
+  const counts: number[] = [];
+  expect(await init({ usageObservationScope: scope, review: { isTTY: true, userInfo: () => ({ username: '测试人' }), runReview: async () => {
+    counts.push((await usage()).total.calls);
+    return 0;
+  } } })).toBe(0);
+  expect(model.doGenerateCalls).toHaveLength(7);
+  expect(counts).toEqual([external ? 0 : 7]);
+  expect((await usage()).total.calls).toBe(external ? 0 : 7);
+  await scope?.flush();
+  expect((await usage()).total.calls).toBe(7);
 });
 
 it('会话 /init 交接显式项目、仅待审项和实时日志，不打开独立审核', async () => {
@@ -329,6 +378,31 @@ it('刷新返回孤立 UTF-16 码元时保留原笔记字节和确认', async ()
   expect(await artifacts.readBytes('approvals.json')).toEqual(before);
   expect(lines.join('\n')).toMatch(/UTF-8.*未写入/);
   expect(lines.join('\n')).not.toContain('笔记已写入');
+});
+
+it('结束复查期间已参与交叉校验的画像被修改时不报告成功', async () => {
+  const { artifacts, init, lines } = await project();
+  let notesReads = 0;
+  const read = ArtifactStore.prototype.readBytes;
+  vi.spyOn(ArtifactStore.prototype, 'readBytes').mockImplementation(async function (this: ArtifactStore, rel) {
+    const bytes = await read.call(this, rel);
+    if (rel === 'notes.md' && notesReads > 0 && --notesReads === 0) {
+      await artifacts.writeYaml('system/fixtures.yaml', { version: 1, fixtures: { bad: { kind: 'http', operation: 'missing' } } });
+    }
+    return bytes;
+  });
+  expect(await init({ review: { isTTY: true, userInfo: () => ({ username: '测试人' }), runReview: async ({ only }) => {
+    const approvals = await Approvals.load(artifacts);
+    for (const file of await readProfileFiles(artifacts)) {
+      if (file.present && file.ok && only?.includes(file.name)) approvals.approve('profile', file.name, file.value, '人工');
+    }
+    await approvals.save(artifacts);
+    // 第二次读笔记发生在画像交叉校验之后。
+    notesReads = 2;
+    return 0;
+  } } })).toBe(2);
+  expect(lines.join('\n')).toMatch(/发生变化：fixtures\.yaml/);
+  expect(lines).not.toContain('笔记与七份画像均已确认');
 });
 
 it('最终画像交叉校验的真实宿主读取故障仍退出 3', async () => {

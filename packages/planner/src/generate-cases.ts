@@ -16,6 +16,8 @@ export interface GenerateCasesOptions {
   budget: RunAgentOptions<TestCase[]>['budget'];
   signal?: RunAgentOptions<TestCase[]>['signal'];
   resilience?: RunAgentOptions<TestCase[]>['resilience'];
+  usageObserver?: RunAgentOptions<TestCase[]>['usageObserver'];
+  usageObservationScope?: RunAgentOptions<TestCase[]>['usageObservationScope'];
 }
 
 export const PLAN_SYSTEM = [
@@ -74,6 +76,7 @@ export async function generateCases(options: GenerateCasesOptions): Promise<Agen
     budget: options.budget,
     signal: options.signal,
     resilience: options.resilience,
+    usageObserver: options.usageObserver, usageObservationScope: options.usageObservationScope,
     tools: [...createProfileTools(profile), ...createRequirementsTools(clauses, approvals)],
     system: PLAN_SYSTEM,
     messages: [{

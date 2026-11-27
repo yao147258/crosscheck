@@ -1,4 +1,5 @@
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { projectUsageLocation, readUsage } from '@crosscheck/models';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
@@ -49,6 +50,39 @@ it('没有 config.yaml 时写入默认配置并一次完成笔记生成', async 
   expect(ProjectConfigSchema.safeParse(CONFIG_TEMPLATE).success).toBe(true);
   expect(out.join('\n')).toContain('默认配置');
   expect((await artifacts.readBytes(NOTES_FILE))?.toString()).toBe('# 项目笔记\n\n扫描结果');
+});
+
+it('直接运行 init 为笔记和嵌套画像的每次实际请求各记一次且不归会话', async () => {
+  const { root } = await project(true);
+  const home = path.join(root, 'user');
+  const model = scriptedModel([
+    { toolCalls: [{ name: 'list_dir', input: {} }] },
+    { toolCalls: [{ name: 'finish', input: { markdown: '# 项目笔记' } }] },
+    ...PROFILE_STEPS,
+  ]);
+  const logs: string[] = [];
+  expect(await cliMain(['init', '--project', root], { log: line => logs.push(line), dependencies: deps(model) })).toBe(2);
+  expect(logs.join('\n')).toContain('当前不是交互式终端');
+  expect(model.doGenerateCalls).toHaveLength(8);
+  const report = await readUsage({ project: root, home });
+  expect(report.total.calls).toBe(8);
+  expect(report.byCommand.init?.calls).toBe(2);
+  expect(report.byCommand.profile?.calls).toBe(6);
+  expect(report.byRole.extractor?.calls).toBe(8);
+  const { directory } = await projectUsageLocation(root, home);
+  for (const file of await readdir(directory)) expect(JSON.parse(await readFile(path.join(directory, file), 'utf8')).sessionId).toBeNull();
+});
+
+it('init 账本路径冲突不影响笔记生成，优先通过会话警告且不泄露路径', async () => {
+  const { root, artifacts } = await project(true);
+  await writeFile(path.join(root, 'user', '.crosscheck', 'projects'), '占用目录');
+  const model = scriptedModel([{ toolCalls: [{ name: 'finish', input: { markdown: '# 项目笔记' } }] }, ...PROFILE_STEPS]);
+  const warnings: string[] = [], logs: string[] = [];
+  expect(await cliMain(['init', '--project', root], { log: line => logs.push(line), dependencies: { ...deps(model), init: { deferReview: () => {} }, usageContext: { sessionId: 's1', warn: line => warnings.push(line) } } })).toBe(0);
+  expect((await artifacts.readBytes(NOTES_FILE))?.toString()).toBe('# 项目笔记');
+  expect(model.doGenerateCalls).toHaveLength(7);
+  expect(warnings).toEqual(Array(7).fill('用量记录写入失败，本次统计不完整'));
+  expect(logs.join('\n')).not.toContain('用量记录写入失败');
 });
 
 it('预先取消时不写默认配置', async () => {

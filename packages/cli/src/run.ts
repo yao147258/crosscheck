@@ -3,7 +3,7 @@ import { runSuite, type RunSuiteOptions } from '@crosscheck/runner';
 import type { CliArgs } from './args';
 import { writeReport } from './report';
 
-export async function runCommand(args: CliArgs, log: (s: string) => void, dependencies: Pick<RunSuiteOptions, 'modelOptions' | 'resilience' | 'env' | 'userConfigHome'> = {}, signal?: AbortSignal): Promise<number> {
+export async function runCommand(args: CliArgs, log: (s: string) => void, dependencies: Pick<RunSuiteOptions, 'modelOptions' | 'resilience' | 'env' | 'userConfigHome' | 'usageContext' | 'usageObservationScope'> = {}, signal?: AbortSignal): Promise<number> {
   const controller = new AbortController();
   const abort = () => controller.abort();
   process.on('SIGINT', abort); process.on('SIGTERM', abort);
@@ -11,7 +11,9 @@ export async function runCommand(args: CliArgs, log: (s: string) => void, depend
   if (signal?.aborted) abort();
   try {
     const artifacts = new ArtifactStore(args.project);
-    const outcome = await runSuite({ ...dependencies, artifacts, modules: args.modules, caseIds: args.caseIds, environment: args.environment, resume: args.resume, signal: controller.signal });
+    const outcome = await runSuite({ ...dependencies, artifacts, usageProject: args.project,
+      usageContext: dependencies.usageContext ?? { sessionId: null, warn: log },
+      modules: args.modules, caseIds: args.caseIds, environment: args.environment, resume: args.resume, signal: controller.signal });
     if (outcome.error) log(outcome.error);
     if (outcome.result) {
       log(`运行 ${outcome.result.manifest.runId} ${outcome.result.status}${outcome.result.status === 'FAIL' ? ' 疑似 bug，待人工复核' : ''}`);

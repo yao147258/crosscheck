@@ -9,7 +9,7 @@ export interface DroppedEntry { name: string; reason: string }
 /** 重读登记文件并核验脱敏后的来源行，任一来源通过即保留条目。 */
 export async function verifyEntrySources<T extends { sources: readonly EntrySource[] }>(options: {
   projectRoot: string;
-  files: readonly FileEntry[];
+  files: readonly Pick<FileEntry, 'path'>[];
   entries: Record<string, T>;
   clean?: TextCleaner;
   normalize?: TextCleaner;

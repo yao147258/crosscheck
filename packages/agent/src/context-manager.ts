@@ -1,5 +1,5 @@
 import type { ModelMessage } from 'ai';
-import { estimateTokens, type ModelCandidate } from '@crosscheck/models';
+import { estimateTokens, type ModelCandidate, type UsageObservationScope, type UsageObserver } from '@crosscheck/models';
 import type { Stage } from './grants';
 import {
   collectHistoryEvidenceIds, compressContext, demoteAttachments, materializeEvidence, stripToolResults, summaryMessage,
@@ -28,7 +28,12 @@ export interface ContextReport {
   compacted: boolean;
 }
 
-export type Summarizer = (older: ModelMessage[], ctx: { candidate: ModelCandidate; signal: AbortSignal; maxChars: number }) => Promise<string | undefined>;
+interface SummaryUsageOptions {
+  usageObserver?: UsageObserver;
+  usageObservationScope?: UsageObservationScope;
+}
+
+export type Summarizer = (older: ModelMessage[], ctx: SummaryUsageOptions & { candidate: ModelCandidate; signal: AbortSignal; maxChars: number }) => Promise<string | undefined>;
 
 export interface ContextManagerOptions {
   stage: Stage;
@@ -39,7 +44,7 @@ export interface ContextManagerOptions {
   summarize?: Summarizer;
 }
 
-export interface PrepareInput {
+export interface PrepareInput extends SummaryUsageOptions {
   candidate: ModelCandidate;
   system: string;
   toolSchemas: readonly unknown[];
@@ -177,7 +182,11 @@ export class ContextManager {
     const tail = lastRoundStart(next);
     if (tail <= head) return next;
     const older = next.slice(head, tail);
-    const summary = await this.options.summarize!(older, { candidate: input.candidate, signal: input.signal, maxChars: Math.max(1_000, Math.floor(target || policy.maxToolChars)) });
+    const summary = await this.options.summarize!(older, {
+      candidate: input.candidate, signal: input.signal, maxChars: Math.max(1_000, Math.floor(target || policy.maxToolChars)),
+      ...(input.usageObserver ? { usageObserver: input.usageObserver } : {}),
+      ...(input.usageObservationScope ? { usageObservationScope: input.usageObservationScope } : {}),
+    });
     if (summary === undefined) return next;
     layers.push('L3');
     return [...next.slice(0, head), summaryMessage(summary, collectHistoryEvidenceIds(older)), ...next.slice(tail)];

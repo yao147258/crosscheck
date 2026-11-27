@@ -3,7 +3,8 @@ import { discover, exploreProject, openApiPlugin, staticScanPlugin, synthesizePr
 import { sanitizeContext } from '@crosscheck/discovery/sanitize';
 import { NOTES_FILE } from './notes-path';
 import type { CliArgs } from './args';
-import { loadModelContext, resolveModels, withCliProgress, withInterrupt, type CommandDependencies } from './context';
+import { createUsageObservationScope } from '@crosscheck/models';
+import { createCommandUsageObserver, loadModelContext, resolveModels, withCliProgress, withInterrupt, type CommandDependencies } from './context';
 
 export const DEFAULT_OPENAPI_FILES = [
   'openapi.yaml', 'openapi.yml', 'openapi.json', 'swagger.yaml', 'swagger.yml', 'swagger.json',
@@ -11,6 +12,7 @@ export const DEFAULT_OPENAPI_FILES = [
 ];
 
 export async function profileCommand(args: CliArgs, log: (s: string) => void, deps: CommandDependencies = {}, signal?: AbortSignal): Promise<number> {
+  const usageObservationScope = deps.usageObservationScope ?? createUsageObservationScope();
   return withInterrupt(signal, async (sig) => {
     const artifacts = new ArtifactStore(args.project);
     const projectConfig = await artifacts.readYaml('config.yaml', ProjectConfigSchema);
@@ -31,6 +33,7 @@ export async function profileCommand(args: CliArgs, log: (s: string) => void, de
     }
     const context = await loadModelContext(artifacts, deps);
     const { config, redactor } = context;
+    const usage = { usageObserver: createCommandUsageObserver(args.project, 'profile', 'extractor', config.pricing, deps, log), usageObservationScope };
     const scan = await discover({ projectRoot: args.project, plugins: [staticScanPlugin, openApiPlugin(args.openapi ?? DEFAULT_OPENAPI_FILES)], signal: sig });
     log(`发现事实 ${scan.facts.length} 条`);
     for (const d of scan.diagnostics) log(redactor.text(`诊断 [${d.plugin}]${d.file ? ` ${d.file}` : ''}：${d.message}`));
@@ -52,7 +55,7 @@ export async function profileCommand(args: CliArgs, log: (s: string) => void, de
       const outcome = await withCliProgress((line) => log(redactor.text(line)), () => exploreProject({
         projectRoot: args.project, files: walk.files, facts: redactor.value(scan.facts), notes: redactor.text(notes),
         clean: (text) => redactor.text(text), models, budget: () => new BudgetTracker(config.budget.discovery),
-        signal: sig, resilience: deps.resilience,
+        signal: sig, resilience: deps.resilience, ...usage,
       })).catch((error: unknown) => {
         if (sig.aborted) throw error;
         return { status: 'failed' as const, reason: 'model-error', detail: error instanceof Error ? error.message : '探索失败', interrupted: false };
@@ -75,6 +78,7 @@ export async function profileCommand(args: CliArgs, log: (s: string) => void, de
       budget: () => new BudgetTracker(config.budget.perCase),
       signal: sig,
       resilience: deps.resilience,
+      ...usage,
     }).catch((error: unknown) => { throw new Error(redactor.text(error instanceof Error ? error.message : '模型调用失败')); });
     sig.throwIfAborted();
     let invalid = false;
@@ -124,5 +128,5 @@ export async function profileCommand(args: CliArgs, log: (s: string) => void, de
     if (written.size) log(`已写入 ${written.size} 份画像草稿到 .crosscheck/system/，请运行 crosscheck review profile 审核`);
     else log('本次未写入画像草稿');
     return invalid || result.interrupted || result.steps.some((s) => s.status === 'failed') ? 2 : 0;
-  });
+  }, deps.usageObservationScope ? undefined : () => usageObservationScope.flush());
 }

@@ -30,7 +30,8 @@ export const HELP = `Crosscheck 本地验收 CLI（Node >=22.12）
   crosscheck report <runId> [--project <目录>] [--open]
   crosscheck impact [--since <commit>] [--json] [--project <目录>]
   crosscheck --help
-会话支持 /init /profile /reqs /plan /review /run /report /impact /status /help /clear /exit；输入以 / 开头时显示命令提示，Tab 在匹配命令间循环补全；命令失败显示退出码但不结束会话。
+会话支持 /init /profile /reqs /plan /review /run /report /impact /status /usage /help /clear /exit；输入以 / 开头时显示命令提示，Tab 在匹配命令间循环补全；命令失败显示退出码但不结束会话。
+/usage 查看启动项目累计；/usage --session [UUID] 查询当前或指定会话。/clear 清空对话并更换会话 ID，不删除用量记录。
 普通文本使用 planner 模型和当前项目只读摘要，模型无工具；审核仍须人工确认。
 init 生成并自动确认笔记，生成七份画像，自动确认来源核验通过的 api-catalog 与 pages，其余画像进入 review 由人确认；profile 可单独重跑画像；reqs/plan 只写草稿，条款与用例只能在 review 中由人确认。
 review 需要交互式终端；编辑使用 VISUAL 或 EDITOR 指定的编辑器，确认人取 CROSSCHECK_REVIEWER 或系统用户名。

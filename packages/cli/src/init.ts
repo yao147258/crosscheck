@@ -1,9 +1,10 @@
 import { AUTO_REVIEWER, Approvals, ArtifactError, ArtifactStore, BudgetTracker, contentHash, decodeNotesUtf8, loadProfile, NotesTextSchema, parseNotesRequirementDocs, PROFILE_FILES, PROFILE_SCHEMAS, ProjectConfigSchema, readProfileFiles, type Profile, type ProfileFile } from '@crosscheck/core';
 import { normalizeSafeProjectPath, synthesizeNotes, verifyEntrySources, walkProject } from '@crosscheck/discovery';
 import { sanitizeMultiline } from '@crosscheck/discovery/sanitize';
+import { createUsageObservationScope, type UsageObservationScope } from '@crosscheck/models';
 import YAML from 'yaml';
 import type { CliArgs } from './args';
-import { loadModelContext, resolveModels, withCliProgress, withInterrupt, type CommandDependencies } from './context';
+import { createCommandUsageObserver, loadModelContext, resolveModels, withCliProgress, withInterrupt, type CommandDependencies } from './context';
 import { autoNotesDocsGuidance, expandAutoNotesDocs, NOTES_DISCOVERY_FILE } from './documents';
 import { NOTES_FILE } from './notes-path';
 import { profileCommand } from './profile';
@@ -18,6 +19,8 @@ export const CONFIG_TEMPLATE = {
 type Logger = (s: string) => void;
 
 export async function initCommand(args: CliArgs, log: Logger, deps: CommandDependencies = {}, signal?: AbortSignal): Promise<number> {
+  const usageObservationScope = deps.usageObservationScope ?? createUsageObservationScope();
+  const flushUsage = deps.usageObservationScope ? undefined : () => usageObservationScope.flush();
   return withInterrupt(signal, async (sig) => {
     const artifacts = new ArtifactStore(args.project);
     const projectConfig = await artifacts.readYaml('config.yaml', ProjectConfigSchema);
@@ -27,16 +30,16 @@ export async function initCommand(args: CliArgs, log: Logger, deps: CommandDepen
       sig.throwIfAborted();
       log('已写入 .crosscheck/config.yaml 默认配置（可按需修改），继续扫描项目');
     }
-    const notesCode = await generateNotes(args, log, deps, sig, artifacts);
+    const notesCode = await generateNotes(args, log, deps, sig, artifacts, usageObservationScope);
     if (notesCode !== 0) return notesCode;
     sig.throwIfAborted();
     if (!args.refresh && !(await pendingProfiles(artifacts, sig)).length) return finishConfirmed(artifacts, sig, log);
-    const profileCode = await profileCommand(args, log, deps, sig);
+    const profileCode = await profileCommand(args, log, { ...deps, usageObservationScope }, sig);
     if (profileCode !== 0) return profileCode;
     sig.throwIfAborted();
     await autoApproveVerified(args, log, deps, sig, artifacts);
-    return handOffReview(args, log, deps, sig, artifacts);
-  });
+    return handOffReview(args, log, deps, sig, artifacts, flushUsage);
+  }, flushUsage);
 }
 
 function sameBytes(expected: Buffer | undefined, current: Buffer | undefined): boolean {
@@ -62,7 +65,7 @@ async function unchangedApprovals(
   return latest;
 }
 
-async function generateNotes(args: CliArgs, log: Logger, deps: CommandDependencies, sig: AbortSignal, artifacts: ArtifactStore): Promise<number> {
+async function generateNotes(args: CliArgs, log: Logger, deps: CommandDependencies, sig: AbortSignal, artifacts: ArtifactStore, usageObservationScope: UsageObservationScope): Promise<number> {
   const approvals = await Approvals.load(artifacts);
   sig.throwIfAborted();
   const original = await artifacts.readBytes(NOTES_FILE);
@@ -91,6 +94,7 @@ async function generateNotes(args: CliArgs, log: Logger, deps: CommandDependenci
     previous: args.refresh && existing !== undefined ? redactor.text(existing) : undefined,
     clean: (text) => redactor.text(text),
     models, budget: () => new BudgetTracker(config.budget.discovery), signal: sig, resilience: deps.resilience,
+    usageObserver: createCommandUsageObserver(args.project, 'init', 'extractor', config.pricing, deps, log), usageObservationScope,
   })).catch((error: unknown) => {
     if (sig.aborted && (error === sig.reason || error instanceof Error && error.name === 'AbortError')) throw error;
     throw new Error(redactor.text(error instanceof Error ? error.message : '模型调用失败'));
@@ -152,9 +156,10 @@ async function autoApproveVerified(args: CliArgs, log: Logger, deps: CommandDepe
   async function loadVerificationContext() {
     const { redactor } = await loadModelContext(artifacts, deps);
     sig.throwIfAborted();
-    const { files } = await walkProject(args.project, { signal: sig });
+    const registered = new Set<string>();
+    const { diagnostics } = await walkProject(args.project, { signal: sig, onRegisteredPath: file => registered.add(file) });
     sig.throwIfAborted();
-    return { redactor, files };
+    return { redactor, registered, diagnostics };
   }
   let context: Awaited<ReturnType<typeof loadVerificationContext>> | undefined;
   for (const name of ['api-catalog.yaml', 'pages.yaml'] as const) {
@@ -168,10 +173,14 @@ async function autoApproveVerified(args: CliArgs, log: Logger, deps: CommandDepe
     sig.throwIfAborted();
     if (baseline.state('profile', name, value) === 'approved') continue;
     context ??= await loadVerificationContext();
-    const { files, redactor } = context;
+    const { registered, redactor, diagnostics } = context;
+    if (diagnostics.length) {
+      log(`${name} 的来源扫描不完整，保留原稿并交由人工审核`);
+      continue;
+    }
     const entries = 'operations' in value ? value.operations : value.pages;
     const unlistedExplicit = new Set((args.openapi ?? []).map(normalizeSafeProjectPath)
-      .filter((file): file is string => !!file && !files.some((entry) => entry.path === file)));
+      .filter((file): file is string => !!file && !registered.has(file)));
     if (Object.values(entries).some((entry) => entry.sources.some(({ file }) => {
       const normalized = normalizeSafeProjectPath(file);
       return normalized !== undefined && unlistedExplicit.has(normalized);
@@ -180,7 +189,7 @@ async function autoApproveVerified(args: CliArgs, log: Logger, deps: CommandDepe
       continue;
     }
     const { kept, dropped, unreadable } = await verifyEntrySources({
-      projectRoot: args.project, files, entries, clean: (text) => redactor.text(text),
+      projectRoot: args.project, files: Array.from(registered, path => ({ path })), entries, clean: (text) => redactor.text(text),
       normalize: (line) => redactor.value(line), signal: sig,
     });
     sig.throwIfAborted();
@@ -258,13 +267,20 @@ async function finishConfirmed(artifacts: ArtifactStore, sig: AbortSignal, log: 
     log('项目笔记尚未确认或确认已失效，或在结束检查期间发生变化；请重新确认后继续');
     return 2;
   }
+  const current = await readProfileFiles(artifacts);
+  sig.throwIfAborted();
+  const changed = current.filter(file => !file.present || !file.ok || contentHash(file.value) !== contentHash(profile[file.name]));
+  if (changed.length) {
+    log(`以下系统画像在结束检查期间发生变化：${changed.map(file => file.name).join('、')}；请重新确认后继续`);
+    return 2;
+  }
   const unapproved = PROFILE_FILES.filter((name) => latest.state('profile', name, profile[name]) !== 'approved');
   if (unapproved.length) { log(`系统画像尚未确认或确认已失效：${unapproved.join('、')}`); return 2; }
   log('笔记与七份画像均已确认');
   return 0;
 }
 
-async function handOffReview(args: CliArgs, log: Logger, deps: CommandDependencies, sig: AbortSignal, artifacts: ArtifactStore): Promise<number> {
+async function handOffReview(args: CliArgs, log: Logger, deps: CommandDependencies, sig: AbortSignal, artifacts: ArtifactStore, flushUsage?: () => Promise<void>): Promise<number> {
   const pending = await pendingProfiles(artifacts, sig);
   if (!pending.length) return finishConfirmed(artifacts, sig, log);
   log(`以下画像需要人工确认：${pending.join('、')}`);
@@ -274,6 +290,8 @@ async function handOffReview(args: CliArgs, log: Logger, deps: CommandDependenci
     log('当前不是交互式终端，请在交互式终端运行 crosscheck review profile 完成确认');
     return 2;
   }
+  await flushUsage?.();
+  sig.throwIfAborted();
   const code = await reviewCommand({ ...args, command: 'review', view: 'profile', only: pending }, log, deps, sig);
   const left = await pendingProfiles(artifacts, sig);
   if (left.length) log(`仍有 ${left.length} 份画像未确认：${left.join('、')}；可运行 crosscheck review profile 继续`);
