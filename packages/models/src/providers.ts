@@ -42,6 +42,25 @@ function builtinFactory(type: ProviderType, create: (settings: ProviderSettings)
   };
 }
 
+/** 为本次初始化关闭 Responses 服务端存储，保留原模型的请求边界与用量观察。 */
+export function withoutOpenAIResponseStorage(model: LanguageModel): LanguageModel {
+  if (typeof model === 'string') return model;
+  const wrapped = new Proxy(model, {
+    get(target, property) {
+      if (property === 'doGenerate' || property === 'doStream') {
+        const method = Reflect.get(target, property, target);
+        return (options: { providerOptions?: Record<string, Record<string, unknown>> }) => Reflect.apply(method, target, [{
+          ...options, providerOptions: { ...options.providerOptions, openai: { ...options.providerOptions?.openai, store: false } },
+        }]);
+      }
+      return Reflect.get(target, property, target);
+    },
+  });
+  const boundary = builtinRequests.get(model);
+  if (boundary) builtinRequests.set(wrapped, boundary);
+  return wrapped;
+}
+
 export const builtinFactories: Record<ProviderType, ProviderFactory> = {
   anthropic: builtinFactory('anthropic', s => createAnthropic({ apiKey: s.apiKey, baseURL: s.baseURL, fetch: s.fetch })(s.modelId)),
   openai: builtinFactory('openai', s => createOpenAI({ apiKey: s.apiKey, baseURL: s.baseURL, fetch: s.fetch })(s.modelId)),

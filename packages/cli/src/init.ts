@@ -3,11 +3,16 @@ import { normalizeSafeProjectPath, synthesizeNotes, verifyEntrySources, walkProj
 import { sanitizeMultiline } from '@crosscheck/discovery/sanitize';
 import { createUsageObservationScope, type UsageObservationScope } from '@crosscheck/models';
 import YAML from 'yaml';
+import { APICallError } from 'ai';
+import { appendFile, mkdir } from 'node:fs/promises';
+import { homedir } from 'node:os';
+import path from 'node:path';
 import type { CliArgs } from './args';
 import { createCommandUsageObserver, loadModelContext, resolveModels, withCliProgress, withInterrupt, type CommandDependencies } from './context';
 import { autoNotesDocsGuidance, expandAutoNotesDocs, NOTES_DISCOVERY_FILE } from './documents';
 import { NOTES_FILE } from './notes-path';
 import { profileCommand } from './profile';
+import { initDiagnosticDependencies } from './init-diagnostic';
 import { reviewCommand } from './review';
 
 export { NOTES_FILE } from './notes-path';
@@ -19,6 +24,7 @@ export const CONFIG_TEMPLATE = {
 type Logger = (s: string) => void;
 
 export async function initCommand(args: CliArgs, log: Logger, deps: CommandDependencies = {}, signal?: AbortSignal): Promise<number> {
+  deps = { ...deps, init: { ...deps.init, disableResponseStorage: true } };
   const usageObservationScope = deps.usageObservationScope ?? createUsageObservationScope();
   const flushUsage = deps.usageObservationScope ? undefined : () => usageObservationScope.flush();
   return withInterrupt(signal, async (sig) => {
@@ -29,6 +35,11 @@ export async function initCommand(args: CliArgs, log: Logger, deps: CommandDepen
       await artifacts.writeYaml('config.yaml', CONFIG_TEMPLATE);
       sig.throwIfAborted();
       log('已写入 .crosscheck/config.yaml 默认配置（可按需修改），继续扫描项目');
+    }
+    if (args.diagnostic) {
+      const { redactor } = await loadModelContext(artifacts, deps);
+      deps = initDiagnosticDependencies(deps, (text, contentType) => redactor.body(text, contentType), log);
+      log('已开启本次 init 正文诊断；日志可能包含敏感项目内容，请妥善保管');
     }
     const notesCode = await generateNotes(args, log, deps, sig, artifacts, usageObservationScope);
     if (notesCode !== 0) return notesCode;
@@ -89,16 +100,34 @@ async function generateNotes(args: CliArgs, log: Logger, deps: CommandDependenci
   log(`登记文件 ${walk.files.length} 个，由模型按需读取`);
   sig.throwIfAborted();
   const models = resolveModels(config, 'extractor', context.deps, (line) => log(redactor.text(line)));
+  const errors: string[] = [];
+  const resilience = { ...deps.resilience, onAttemptError: (event: { ref: string; attempt: number; error: unknown; retryable: boolean }) => {
+    try { deps.resilience?.onAttemptError?.(event); } catch { /* 外部观察者不得干扰记录。 */ }
+    const apiError = APICallError.isInstance(event.error) ? event.error : undefined;
+    const requestId = apiError?.responseHeaders?.['x-request-id'] ?? apiError?.responseHeaders?.['request-id'];
+    const safeId = typeof requestId === 'string' && /^[\w.-]{1,128}$/.test(requestId) ? redactor.text(requestId) : undefined;
+    errors.push(JSON.stringify({ time: new Date().toISOString(), command: 'init', sessionId: deps.usageContext?.sessionId ?? null,
+      model: redactor.text(event.ref), attempt: event.attempt, retryable: event.retryable,
+      statusCode: apiError?.statusCode, requestId: safeId }));
+  } };
+  const writeDiagnostics = async () => {
+    if (!errors.length) return;
+    try {
+      const dir = path.join(deps.userConfigHome ?? homedir(), '.crosscheck');
+      await mkdir(dir, { recursive: true, mode: 0o700 });
+      await appendFile(path.join(dir, 'init-errors.jsonl'), `${errors.join('\n')}\n`, { mode: 0o600 });
+    } catch { try { (deps.usageContext?.warn ?? log)('init 诊断日志写入失败'); } catch { /* 日志不得影响业务结果。 */ } }
+  };
   const result = await withCliProgress((line) => log(redactor.text(line)), () => synthesizeNotes({
     projectRoot: args.project, files: walk.files, diagnostics: walk.diagnostics.map((line) => redactor.text(line)),
     previous: args.refresh && existing !== undefined ? redactor.text(existing) : undefined,
     clean: (text) => redactor.text(text),
-    models, budget: () => new BudgetTracker(config.budget.discovery), signal: sig, resilience: deps.resilience,
+    models, budget: () => new BudgetTracker(config.budget.discovery), signal: sig, resilience,
     usageObserver: createCommandUsageObserver(args.project, 'init', 'extractor', config.pricing, deps, log), usageObservationScope,
   })).catch((error: unknown) => {
     if (sig.aborted && (error === sig.reason || error instanceof Error && error.name === 'AbortError')) throw error;
     throw new Error(redactor.text(error instanceof Error ? error.message : '模型调用失败'));
-  });
+  }).finally(writeDiagnostics);
   sig.throwIfAborted();
   if (result.status !== 'done') {
     log(redactor.text(`笔记生成失败：${result.detail}`));

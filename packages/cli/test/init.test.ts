@@ -3,6 +3,7 @@ import { projectUsageLocation, readUsage } from '@crosscheck/models';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
+import { APICallError } from 'ai';
 import { Approvals, ArtifactError, ArtifactStore, ConfigSchema, ProjectConfigSchema, readProfileFile } from '@crosscheck/core';
 import { scriptedModel, type ScriptStep } from '../../agent/src/testing/scripted-model';
 import * as discovery from '@crosscheck/discovery';
@@ -13,6 +14,11 @@ const cliMain: typeof realCliMain = (argv, options = {}) => {
 };
 import { CONFIG_TEMPLATE, NOTES_FILE } from '../src/init';
 import { InterruptedError, resolveModels, withInterrupt } from '../src/context';
+
+it('init 支持单次诊断参数，其他命令不支持', () => {
+  expect(parseArgs(['init', '--diagnostic']).diagnostic).toBe(true);
+  expect(() => parseArgs(['profile', '--diagnostic'])).toThrow();
+});
 
 it('init 接受可重复的 --openapi 并去重', () => {
   expect(parseArgs(['init', '--openapi', 'a.yaml', '--openapi', 'b.yaml', '--openapi', 'a.yaml']).openapi).toEqual(['a.yaml', 'b.yaml']);
@@ -83,6 +89,116 @@ it('init 账本路径冲突不影响笔记生成，优先通过会话警告且�
   expect(model.doGenerateCalls).toHaveLength(7);
   expect(warnings).toEqual(Array(7).fill('用量记录写入失败，本次统计不完整'));
   expect(logs.join('\n')).not.toContain('用量记录写入失败');
+});
+
+it('init 的 OpenAI 请求禁用存储，工具续轮不含项目引用', async () => {
+  const { root, artifacts } = await project(true);
+  await writeFile(path.join(root, 'README.md'), '# 测试项目');
+  const requests: Array<Record<string, any>> = [];
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+    const req = new Request(input, init);
+    requests.push(JSON.parse(await req.text()));
+    const first = requests.length === 1;
+    const call = first ? { type: 'function_call', id: 'fc_1', call_id: 'call_1', name: 'list_dir', arguments: '{}' }
+      : { type: 'function_call', id: 'fc_2', call_id: 'call_2', name: 'finish', arguments: JSON.stringify({ markdown: '# 测试笔记' }) };
+    return new Response(JSON.stringify({ id: 'resp_1', object: 'response', created_at: 123, model: 'x', status: 'completed', output: [{ type: 'message', id: 'msg_1', role: 'assistant', status: 'completed', content: [{ type: 'output_text', text: '读取目录', annotations: [] }] }, call], usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 } }), { headers: { 'content-type': 'application/json' } });
+  });
+  await cliMain(['init', '--project', root], { log: () => {}, dependencies: { resilience: { retries: 0 }, review: { isTTY: false } } });
+  expect((await artifacts.readBytes('notes.md'))?.toString()).toBe('# 测试笔记');
+  expect(requests.length).toBeGreaterThanOrEqual(2);
+  expect(requests.every(request => request.store === false)).toBe(true);
+  expect(requests[1]!.input.some((item: { type?: string }) => item.type === 'item_reference')).toBe(false);
+  expect(requests[1]!.input.some((item: { type?: string }) => item.type === 'function_call_output')).toBe(true);
+});
+
+it('仅启用诊断的 init 记录脱敏请求和错误响应', async () => {
+  const { root } = await project(true);
+  const fetch = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(JSON.stringify({ error: { message: '服务故障 fixture-key', code: 'upstream' } }), { status: 502, headers: { 'content-type': 'application/json' } }));
+  const logs: string[] = [];
+  try {
+    expect(await cliMain(['init', '--diagnostic', '--project', root], { log: line => logs.push(line), dependencies: { resilience: { retries: 0 }, usageContext: { sessionId: 'session-1', warn: line => logs.push(line) } } })).toBe(2);
+    const dir = path.join(root, 'user', '.crosscheck', 'init-diagnostics');
+    const files = await readdir(dir);
+    expect(files).toHaveLength(1);
+    const text = await readFile(path.join(dir, files[0]!), 'utf8');
+    const records = text.trim().split('\n').map(line => JSON.parse(line));
+    expect(records[0]).toMatchObject({ sessionId: 'session-1', statusCode: 502 });
+    expect(JSON.stringify(records[0].request)).toContain('"input"'.replaceAll('"', '\\"'));
+    expect(JSON.stringify(records[0].response)).toContain('服务故障');
+    expect(text).not.toContain('fixture-key');
+    expect(text.toLowerCase()).not.toContain('authorization');
+  } finally { fetch.mockRestore(); }
+});
+
+it('成功响应过大时标记截断，不改变初始化结果', async () => {
+  const { root } = await project(true);
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(JSON.stringify({ id: 'resp_1', object: 'response', created_at: 123, model: 'x', status: 'completed', output: [{ type: 'function_call', id: 'fc_1', call_id: 'call_1', name: 'finish', arguments: JSON.stringify({ markdown: '# 测试' }) }], usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 }, padding: 'a'.repeat(300000) }), { status: 200, headers: { 'content-type': 'application/json' } }));
+  const logs: string[] = [];
+  await cliMain(['init', '--diagnostic', '--project', root], { log: line => logs.push(line), dependencies: { resilience: { retries: 0 }, review: { isTTY: false } } });
+  const dir = path.join(root, 'user', '.crosscheck', 'init-diagnostics');
+  const records = (await readFile(path.join(dir, (await readdir(dir))[0]!), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+  expect(records[0]).toMatchObject({ statusCode: 200, responseTruncated: true });
+  expect(records[0].response).toBeUndefined();
+  expect((await new ArtifactStore(root).readBytes('notes.md'))?.toString()).toContain('# 测试');
+});
+
+it('不启用正文诊断时不写入请求响应', async () => {
+  const { root } = await project(true);
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(JSON.stringify({ error: { message: '服务故障' } }), { status: 502, headers: { 'content-type': 'application/json' } }));
+  expect(await cliMain(['init', '--project', root], { log: () => {}, dependencies: { resilience: { retries: 0 } } })).toBe(2);
+  expect(await readdir(path.join(root, 'user', '.crosscheck'))).not.toContain('init-diagnostics');
+});
+
+it('正文诊断写入失败不改变原始模型错误', async () => {
+  const { root } = await project(true);
+  await writeFile(path.join(root, 'user', '.crosscheck', 'init-diagnostics'), '占用');
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(JSON.stringify({ error: { message: '上游故障' } }), { status: 502, headers: { 'content-type': 'application/json' } }));
+  const lines: string[] = [];
+  expect(await cliMain(['init', '--diagnostic', '--project', root], { log: line => lines.push(line), dependencies: { resilience: { retries: 0 } } })).toBe(2);
+  expect(lines.join('\n')).toContain('正文诊断记录失败');
+  expect(lines.join('\n')).toContain('上游故障');
+});
+
+it('init 模型请求失败时记录每次安全诊断且保留重试行为', async () => {
+  const { root } = await project(true);
+  const model = scriptedModel([]);
+  vi.spyOn(model, 'doGenerate').mockImplementation(async () => { throw new APICallError({
+    message: 'fixture-key 私密正文', url: 'https://example.invalid/?key=fixture-key', requestBodyValues: { secret: 'fixture-key' },
+    statusCode: 503, isRetryable: true, responseHeaders: { 'x-request-id': 'req-123' }, responseBody: 'fixture-key',
+  }); });
+  const logs: string[] = [];
+  expect(await cliMain(['init', '--project', root], { log: line => logs.push(line), dependencies: {
+    ...deps(model), resilience: { retries: 1, sleep: async () => {} }, usageContext: { sessionId: 'session-1', warn: line => logs.push(line) },
+  } })).toBe(2);
+  const text = await readFile(path.join(root, 'user', '.crosscheck', 'init-errors.jsonl'), 'utf8');
+  const records = text.trim().split('\n').map(line => JSON.parse(line));
+  expect(records).toHaveLength(2);
+  expect(records.map(record => record.attempt)).toEqual([1, 2]);
+  expect(records[0]).toMatchObject({ command: 'init', sessionId: 'session-1', model: 'mock:x', statusCode: 503, requestId: 'req-123', retryable: true });
+  expect(text).not.toContain('fixture-key');
+  expect(text).not.toContain('私密正文');
+});
+
+it('不可重试错误仅记录一次且缺失字段不影响执行', async () => {
+  const { root } = await project(true);
+  const model = scriptedModel([]);
+  vi.spyOn(model, 'doGenerate').mockImplementation(async () => { throw new APICallError({ message: '拒绝', url: 'https://example.invalid', requestBodyValues: {}, statusCode: 401, isRetryable: false }); });
+  expect(await cliMain(['init', '--project', root], { log: () => {}, dependencies: { ...deps(model), resilience: { retries: 3, sleep: async () => {} } } })).toBe(2);
+  const rows = (await readFile(path.join(root, 'user', '.crosscheck', 'init-errors.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+  expect(rows).toHaveLength(1);
+  expect(rows[0]).toMatchObject({ attempt: 1, statusCode: 401, retryable: false, sessionId: null });
+  expect(rows[0].requestId).toBeUndefined();
+});
+
+it('诊断文件写入失败时不改变 init 错误结果', async () => {
+  const { root } = await project(true);
+  await mkdir(path.join(root, 'user', '.crosscheck', 'init-errors.jsonl'));
+  const model = scriptedModel([]);
+  vi.spyOn(model, 'doGenerate').mockImplementation(async () => { throw new Error('模型故障'); });
+  const lines: string[] = [];
+  expect(await cliMain(['init', '--project', root], { log: line => lines.push(line), dependencies: deps(model) })).toBe(2);
+  expect(lines.join('\n')).toContain('诊断日志写入失败');
+  expect(lines.join('\n')).toContain('模型故障');
 });
 
 it('预先取消时不写默认配置', async () => {

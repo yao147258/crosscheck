@@ -14,6 +14,7 @@ export interface CliArgs {
   view?: ReviewView;
   openapi?: string[];
   refresh?: boolean;
+  diagnostic?: boolean;
   since?: string;
   json?: boolean;
   only?: ProfileFile[];
@@ -21,7 +22,7 @@ export interface CliArgs {
 
 export const HELP = `Crosscheck 本地验收 CLI（Node >=22.12）
   crosscheck（无参数：进入交互会话，stdin/stdout 均须为 TTY）
-  crosscheck init [--refresh] [--openapi <文件>]... [--project <目录>]
+  crosscheck init [--refresh] [--diagnostic] [--openapi <文件>]... [--project <目录>]
   crosscheck profile [--openapi <文件>]... [--project <目录>]
   crosscheck reqs --module <id> [--project <目录>]
   crosscheck plan --module <id> [--project <目录>]
@@ -46,7 +47,7 @@ AI 可按需使用 Playwright Chromium 操作测试页面（需安装 Chromium�
 
 const COMMANDS: readonly Command[] = ['init', 'profile', 'reqs', 'plan', 'review', 'run', 'report', 'impact'];
 const FLAGS: Record<Command, readonly string[]> = {
-  init: ['--refresh', '--openapi', '--project'],
+  init: ['--refresh', '--diagnostic', '--openapi', '--project'],
   profile: ['--openapi', '--project'],
   reqs: ['--module', '--project'],
   plan: ['--module', '--project'],
@@ -84,6 +85,7 @@ export function parseArgs(args: string[]): CliArgs {
     seen.add(flag);
     if (flag === '--json') { result.json = true; continue; }
     if (flag === '--refresh') { result.refresh = true; continue; }
+    if (flag === '--diagnostic') { result.diagnostic = true; continue; }
     if (flag === '--open') { result.open = true; continue; }
     if (flag === '--resume' && (!args[index] || args[index]!.startsWith('--'))) { result.resume = true; continue; }
     const value = args[index++];

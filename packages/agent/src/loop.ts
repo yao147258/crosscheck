@@ -218,6 +218,7 @@ async function runAgentLoop<O>(opts: RunAgentOptions<O>, scope: UsageObservation
     let ref: string;
     const genSignal = boundedSignal();
     let roundAttempts = 0;
+    let modelRequestFailed = false;
     let incompleteEvidenceIds: readonly string[] = [];
     // 原为每轮新建的局部状态，提升后按轮重置以保持语义。
     hostError = undefined;
@@ -226,6 +227,7 @@ async function runAgentLoop<O>(opts: RunAgentOptions<O>, scope: UsageObservation
       const r = await callWithFallback(
         models,
         async (model, ref, candidate) => {
+          modelRequestFailed = false;
           // 宿主读取失败不是厂商错误，不得重试/备用后吞掉继续 PASS。
           if (hostFailed) throw hostError;
           const stopped = stop(genSignal);
@@ -267,6 +269,7 @@ async function runAgentLoop<O>(opts: RunAgentOptions<O>, scope: UsageObservation
             const trackedModel = atGenerateBoundary(model, () => { started = true; }, usage => { receipt = usage; });
             value = await generateText({ model: trackedModel, system: request.system, messages: request.messages, tools: sdkTools, maxOutputTokens, maxRetries: 0, abortSignal: genSignal });
           } catch (error) {
+            modelRequestFailed = started;
             if (started && opts.usageObserver) scope.enqueue(opts.usageObserver, { ref, purpose: 'request', status: genSignal.aborted ? 'cancelled' : 'error', usage: receipt });
             await record({ ref, status: 'error', usage: null });
             throw error;
@@ -277,7 +280,7 @@ async function runAgentLoop<O>(opts: RunAgentOptions<O>, scope: UsageObservation
           await record({ ref, status: 'success', usage: usageOf(value.usage) });
           return value;
         },
-        { ...resilience, signal: genSignal },
+        { ...resilience, signal: genSignal, onAttemptError: event => { if (modelRequestFailed) resilience?.onAttemptError?.(event); } },
       );
       res = r.value;
       ref = r.ref;

@@ -11,6 +11,8 @@ export interface ResilienceOptions {
   /** 中止信号：已中止或在退避等待期间中止，都会立即结束重试并抛出 */
   signal?: AbortSignal;
   onFallback?: (from: string, to: string, err: unknown) => void;
+  /** 模型请求失败观察；回调异常不影响容错流程。 */
+  onAttemptError?: (event: { ref: string; attempt: number; error: unknown; retryable: boolean }) => void;
 }
 
 /** 默认退避等待：响应 signal，中止时立即结束等待（不等到超时） */
@@ -64,6 +66,7 @@ export async function callWithFallback<T>(
         return { value: await fn(model, ref, candidate), ref, attempts };
       } catch (err) {
         const cls = classify(err, signal);
+        try { opts.onAttemptError?.({ ref, attempt: i + 1, error: err, retryable: cls === 'retryable' }); } catch { /* 诊断不能改变模型容错行为。 */ }
         if (cls === 'abort') throw err;
         lastErr = err;
         if (cls === 'non-retryable') break; // 跳过本模型剩余重试，直接切下一个候选

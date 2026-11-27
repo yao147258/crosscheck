@@ -1,6 +1,6 @@
 import { loadUserModelConfig, publicModelConfig, type ArtifactStore, type Config, type ProfileFile, type Role } from '@crosscheck/core';
 import { createEvidenceRedactor } from '@crosscheck/tools';
-import { createUsageObserver, hasProgressListener, resolveRole, withProgress, type ModelCandidate, type UsageContext, type UsageEvent, type UsageObserver } from '@crosscheck/models';
+import { createUsageObserver, hasProgressListener, resolveRole, withProgress, withoutOpenAIResponseStorage, type ModelCandidate, type UsageContext, type UsageEvent, type UsageObserver } from '@crosscheck/models';
 import type { RunSuiteOptions } from '@crosscheck/runner';
 
 import type { ReviewDependencies } from './review';
@@ -9,7 +9,7 @@ export type CommandDependencies = Pick<RunSuiteOptions, 'modelOptions' | 'resili
   review?: ReviewDependencies;
   session?: { isTTY?: boolean };
   /** 会话内 /init 使用：提供后 init 不自己打开审核，而是把待确认画像交给会话。 */
-  init?: { deferReview?: (only: ProfileFile[]) => void };
+  init?: { deferReview?: (only: ProfileFile[]) => void; disableResponseStorage?: boolean };
 };
 
 export function createCommandUsageObserver(
@@ -80,6 +80,10 @@ export function withCliProgress<T>(log: (line: string) => void, fn: () => T): T 
 export function resolveModels(config: Config, role: Role, deps: CommandDependencies, log: (s: string) => void): ModelCandidate[] {
   const env = deps.env ?? deps.modelOptions?.env ?? process.env;
   const redactor = createEvidenceRedactor([], Object.values(deps.modelOptions?.apiKeys ?? {}).filter((key): key is string => !!key));
-  try { return resolveRole(config, role, { ...deps.modelOptions, env, onWarning: (warning) => log(redactor.text(warning)) }); }
+  try {
+    const models = resolveRole(config, role, { ...deps.modelOptions, env, onWarning: (warning) => log(redactor.text(warning)) });
+    return deps.init?.disableResponseStorage ? models.map(candidate => candidate.providerType === 'openai'
+      ? { ...candidate, model: withoutOpenAIResponseStorage(candidate.model) } : candidate) : models;
+  }
   catch (error) { throw new Error(redactor.text(error instanceof Error ? error.message : '模型配置失败')); }
 }
