@@ -22,9 +22,21 @@ import { scriptedModel } from '../../agent/src/testing/scripted-model';
 import { cleanupProjects, createProject } from '../../tui/test/fixture';
 import { chatReply as realChatReply, createSlashDispatcher, loadSessionInfo, sessionSlashCommands, tokenizeCommand } from '../src/session';
 import cliPackage from '../package.json';
+import { SessionStore } from '../src/session-store';
 const chatReply: typeof realChatReply = (root, history, text, deps, signal) => realChatReply(root, history, text, { ...deps, userConfigHome: path.join(root, 'user') }, signal);
 
 afterEach(async () => { vi.restoreAllMocks(); vi.unstubAllGlobals(); await cleanupProjects(); });
+
+it.each(['impact', 'run'])('/%s 的退出码 2 仅在命令报告中断时携带取消结局', async command => {
+  const { root } = await createProject();
+  const dispatch = createSlashDispatcher({ userConfigHome: path.join(root, 'user') }, { currentId: randomUUID(), project: root });
+  const args = command === 'impact' ? ['impact', '--since', '不存在的基线'] : ['run'];
+  const normal = await dispatch(args, new AbortController().signal);
+  expect(normal).toMatchObject({ kind: 'log', code: 2 });
+  expect(normal).not.toHaveProperty('cancelled');
+  const interrupted = await dispatch(args, AbortSignal.abort());
+  expect(interrupted).toMatchObject({ kind: 'log', code: 2, cancelled: true });
+});
 
 it('聊天无需确认人或审核会话，读取已有确认且不写入确认记录', async () => {
   const { root, artifacts, session } = await createProject();
@@ -38,6 +50,14 @@ it('聊天无需确认人或审核会话，读取已有确认且不写入确认�
   expect(open).not.toHaveBeenCalled();
   expect(model.doGenerateCalls[0]!.prompt[0]).toMatchObject({ role: 'system', content: expect.stringContaining('"clausesPending":1') });
   expect(await artifacts.readBytes('approvals.json')).toEqual(before);
+});
+
+it('直接调用聊天帮助函数也不会把 JSON 鉴权值发送给模型', async () => {
+  const { root } = await createProject();
+  const model = scriptedModel([{ text: '{"Set-Cookie":"private-reply-cookie"}' }]);
+  const reply = await chatReply(root, [{ role: 'user', content: '{"Cookie":"private-history-cookie"}' }], '{"Authorization":"private-input-auth"}', { modelOptions: { factories: { openai: () => model } } }, new AbortController().signal);
+  expect(JSON.stringify(model.doGenerateCalls[0]?.prompt)).not.toMatch(/private-history-cookie|private-input-auth/);
+  expect(reply).toBe('{"Set-Cookie":"[REDACTED]"}');
 });
 
 it('可重试模型错误只由 fallback 控制重试次数', async () => {
@@ -68,7 +88,7 @@ it('聊天仅为实际主备请求逐次入账，成功回执保留四项用量'
   expect(events.find(event => event.status === 'success')).toMatchObject({ configuredRef: 'mock:backup', usage: { inputTokens: 19, outputTokens: 7, cacheReadTokens: 4, cacheWriteTokens: 2 } });
 });
 
-it('聊天仅将进入模型后取消的请求记为 cancelled，预取消不记账', async () => {
+it('提前取消不记账，进入模型后与取消重叠的普通异常仍记为 error', async () => {
   const { root } = await createProject();
   const controller = new AbortController();
   const model = scriptedModel([{ hangWithGenericError: true }]);
@@ -87,7 +107,7 @@ it('聊天仅将进入模型后取消的请求记为 cancelled，预取消不记
   expect(await usageEvents(root)).toEqual([]);
   expect(model.doGenerateCalls).toHaveLength(0);
   await expect(chatReply(root, [], '取消请求', deps, controller.signal)).rejects.toThrow('连接中断');
-  expect(await usageEvents(root)).toEqual([expect.objectContaining({ status: 'cancelled', sessionId: null, usage: { inputTokens: null, outputTokens: null, cacheReadTokens: null, cacheWriteTokens: null } })]);
+  expect(await usageEvents(root)).toEqual([expect.objectContaining({ status: 'error', sessionId: null, usage: { inputTokens: null, outputTokens: null, cacheReadTokens: null, cacheWriteTokens: null } })]);
 });
 
 it.each([
@@ -238,6 +258,27 @@ it('默认记录实际模型请求并隐藏凭据', async () => {
   expect(await usageEvents(root)).toEqual([expect.objectContaining({ status: 'error', usage: { inputTokens: null, outputTokens: null, cacheReadTokens: null, cacheWriteTokens: null } })]);
 });
 
+it.each([
+  ['MiXeD-Host-Fixture', 'mixed-host-fixture.example.invalid'],
+  ['Café', 'prefix-CAFÉ-suffix.example.invalid'],
+])('聊天请求与错误日志省略含 %s 密钥的主机，不修改实际请求', async (secret, host) => {
+  const { root } = await createProject();
+  const home = path.join(root, 'user', '.crosscheck');
+  const hostname = new URL(`https://${host}`).hostname;
+  await writeFile(path.join(home, 'config.yaml'), JSON.stringify({ models: { extractor: 'mock:x', planner: 'mock:p', executor: 'mock:e', reviewer: 'mock:r' }, providers: { mock: { type: 'anthropic', baseURL: `https://${host}/v1`, apiKey: secret } } }));
+  const sent: Request[] = [];
+  vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+    sent.push(new Request(input, init));
+    return Response.json({ error: { type: 'invalid_request_error', message: '仅本地模拟' } }, { status: 405 });
+  });
+  await expect(chatReply(root, [], '测试问题', { env: {}, resilience: { retries: 0 } }, new AbortController().signal)).rejects.toThrow();
+  expect(sent).toHaveLength(1);
+  expect(new URL(sent[0]!.url).hostname).toBe(hostname);
+  expect(sent[0]!.headers.get('x-api-key')).toBe(secret);
+  const records = await Promise.all(['chat-requests', 'chat-errors'].map(name => readFile(path.join(home, `${name}.jsonl`), 'utf8').then(text => JSON.parse(text))));
+  expect(records.map(record => record.url ?? record.endpoint)).toEqual(Array(2).fill('[omitted: sensitive url host]'));
+});
+
 it('日志不可写时仍保留原始模型错误', async () => {
   const { root } = await createProject();
   await mkdir(path.join(root, 'user', '.crosscheck', 'chat-errors.jsonl'));
@@ -358,8 +399,30 @@ it('跨项目 /init 仅写目标项目账本，启动项目 /usage 不混入该�
   expect(await dispatch(['usage', '--session'], signal)).toMatchObject({ kind: 'log', code: 0, lines: expect.arrayContaining([expect.stringContaining('调用 0')]) });
 });
 
+it('列出历史与无参恢复只读，指定恢复不提前更改当前 ID', async () => {
+  const { root } = await createProject();
+  const home = path.join(root, 'user');
+  const id = randomUUID();
+  const current = { currentId: randomUUID(), project: root };
+  const store = new SessionStore(root, home);
+  await store.append(id, 0, { kind: 'begin', operation: 'chat', input: '此前的问题' });
+  const dispatch = createSlashDispatcher({ userConfigHome: home }, current);
+  const signal = new AbortController().signal;
+  for (const command of ['sessions', 'resume']) {
+    const result = await dispatch([command], signal);
+    expect(result).toMatchObject({ kind: 'log', code: 0, lines: expect.arrayContaining([expect.stringContaining(id), expect.stringContaining('此前的问题')]) });
+  }
+  expect(await dispatch(['resume'], signal)).toMatchObject({ lines: expect.arrayContaining([expect.stringContaining('/resume <UUID>')]) });
+  expect(await dispatch(['resume', 'bad'], signal)).toMatchObject({ kind: 'log', code: 2 });
+  expect(await dispatch(['resume', randomUUID()], signal)).toMatchObject({ kind: 'log', code: 3 });
+  expect(await dispatch(['resume', id.toUpperCase()], signal)).toMatchObject({ kind: 'resume' });
+  expect(await dispatch(['help'], signal)).toMatchObject({ lines: expect.arrayContaining([expect.stringContaining('/resume <UUID>')]) });
+  expect(current.currentId).not.toBe(id);
+  expect((await store.load(id))?.revision).toBe(1);
+});
+
 it('会话命令清单覆盖全部斜杠命令且带描述', () => {
-  expect(sessionSlashCommands.map((command) => command.name)).toEqual(['init', 'profile', 'reqs', 'plan', 'review', 'run', 'report', 'impact', 'status', 'usage', 'help', 'clear', 'exit']);
+  expect(sessionSlashCommands.map((command) => command.name)).toEqual(['init', 'profile', 'reqs', 'plan', 'review', 'run', 'report', 'impact', 'status', 'usage', 'sessions', 'resume', 'help', 'clear', 'exit']);
   expect(sessionSlashCommands.find((command) => command.name === 'init')?.description).toContain('笔记');
   expect(sessionSlashCommands.find((command) => command.name === 'profile')?.description).toContain('画像');
   expect(sessionSlashCommands.find((command) => command.name === 'review')?.description).toContain('笔记');
@@ -371,6 +434,17 @@ it('profile 斜杠命令交给 CLI 并执行笔记确认门禁', async () => {
   const dispatch = createSlashDispatcher({});
   const result = await dispatch(['profile', '--project', root], new AbortController().signal);
   expect(result).toMatchObject({ kind: 'log', code: 2, lines: expect.arrayContaining([expect.stringContaining('笔记尚未确认')]) });
+});
+
+it('/review 默认使用启动项目而非 cwd，仍接受显式项目', async () => {
+  const { root } = await createProject();
+  const { root: cwd } = await createProject();
+  vi.spyOn(process, 'cwd').mockReturnValue(cwd);
+  const dispatch = createSlashDispatcher({}, { currentId: randomUUID(), project: root });
+  const signal = new AbortController().signal;
+  expect(await dispatch(['review', 'profile'], signal)).toMatchObject({ kind: 'review', args: { project: root, view: 'profile' } });
+  expect(await dispatch(['review', 'cases', '--project', cwd], signal)).toMatchObject({ kind: 'review', args: { project: cwd, view: 'cases' } });
+  expect(await dispatch(['review', '--project'], signal)).toMatchObject({ kind: 'log', code: 2 });
 });
 
 it('审核参数保留项目路径并校验错误参数', async () => {

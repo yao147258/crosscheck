@@ -20,7 +20,7 @@ function normalizeKey(key: string): string {
 }
 
 /** 证据落盘前统一脱敏；extraFields 来自 guardrails.yaml 的 redactFields */
-export function createRedactor(extraFields: string[] = []): Redactor {
+export function createRedactor(extraFields: string[] = [], redactValueField?: (key: string, value: unknown) => boolean): Redactor {
   const fields = new Set([...DEFAULT_FIELDS, ...extraFields].map(normalizeKey));
   const isSensitive = (key: string): boolean => {
     const k = normalizeKey(key);
@@ -31,7 +31,7 @@ export function createRedactor(extraFields: string[] = []): Redactor {
     if (Array.isArray(v)) return v.map((x) => value(x)) as T;
     if (v !== null && typeof v === 'object') {
       const out: Record<string, unknown> = {};
-      for (const [k, x] of Object.entries(v)) out[k] = isSensitive(k) ? REDACTED : value(x);
+      for (const [k, x] of Object.entries(v)) out[k] = isSensitive(k) || redactValueField?.(normalizeKey(k), x) ? REDACTED : value(x);
       return out as T;
     }
     // 处理字符串化的 JSON

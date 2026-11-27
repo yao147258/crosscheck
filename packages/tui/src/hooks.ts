@@ -6,11 +6,11 @@ import { ActionContext, ReviewContext } from './context';
 
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
 
-export function useLoader<T>(load: () => Promise<T>, deps: unknown[]): { data?: T; error?: string; reload(): void } {
+export function useLoader<T>(load: () => Promise<T>, deps: unknown[], validationError?: (data: T) => Error | undefined): { data?: T; error?: string; reload(): void } {
   const [state, setState] = useState<{ data?: T; error?: string }>({});
   const [version, setVersion] = useState(0);
   const shared = useContext(ActionContext);
-  const signal = useContext(ReviewContext)?.signal;
+  const { signal, normalizeError } = useContext(ReviewContext) ?? {};
   useEffect(() => {
     if (signal?.aborted) return;
     let alive = true;
@@ -18,10 +18,14 @@ export function useLoader<T>(load: () => Promise<T>, deps: unknown[]): { data?: 
     shared?.loadStarted?.();
     setState({});
     Promise.resolve().then(() => { signal?.throwIfAborted(); return load(); }).then(
-      (data) => { if (alive) setState({ data }); },
-      (error) => { failure = error; if (alive) setState({ error: message(error) }); },
+      (data) => {
+        // 数据仍用于展示和修复；校验失败与读取异常共用页面归档状态。
+        failure = validationError?.(data);
+        if (alive) setState({ data });
+      },
+      (error) => { failure = error; if (alive) { const text = message(error); setState({ error: normalizeError?.(text) ?? text }); } },
     ).finally(() => {
-      shared?.loadFinished?.(failure === signal?.reason ? undefined : failure);
+      shared?.loadFinished?.(failure === signal?.reason ? undefined : failure, alive);
     });
     return () => { alive = false; };
   }, [...deps, version]);
@@ -33,7 +37,7 @@ export function useAction(after?: () => void) {
   const [status, setStatus] = useState<Status>();
   const localBusy = useRef(false);
   const shared = useContext(ActionContext);
-  const signal = useContext(ReviewContext)?.signal;
+  const { signal, normalizeError } = useContext(ReviewContext) ?? {};
   const busy = shared?.busy ?? localBusy;
   const alive = useRef(true);
   useEffect(() => {
@@ -55,13 +59,17 @@ export function useAction(after?: () => void) {
       if (alive.current) setStatus({ kind: 'info', text });
     } catch (error) {
       failure = error;
-      if (alive.current) setStatus({ kind: 'error', text: message(error) });
+      if (alive.current) {
+        const text = message(error);
+        setStatus({ kind: 'error', text: normalizeError?.(text) ?? text });
+      }
     } finally {
       busy.current = false;
-      shared?.changed(failure);
+      if (shared?.actionFinished) shared.actionFinished(failure);
+      else shared?.changed();
       if (alive.current && !signal?.aborted) after?.();
     }
-  }, [after, busy, shared, signal]);
+  }, [after, busy, shared, signal, normalizeError]);
   return { status, setStatus, run };
 }
 

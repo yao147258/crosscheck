@@ -4,7 +4,7 @@ import { InterruptedError, withInterrupt } from './context';
 import { ImpactInputError, loadImpactSnapshots } from './impact/snapshot';
 import { formatImpactText, projectImpactReport } from './impact/report';
 
-export async function impactCommand(args: CliArgs, log: (s: string) => void, signal?: AbortSignal): Promise<number> {
+export async function impactCommand(args: CliArgs, log: (s: string) => void, signal?: AbortSignal, onCancelled?: () => void): Promise<number> {
   let report: ImpactReport;
   let current: ImpactSnapshot | undefined;
   let code: number;
@@ -21,6 +21,7 @@ export async function impactCommand(args: CliArgs, log: (s: string) => void, sig
   } catch (error) {
     // 不信任异常正文或用户输入的 ref；失败只输出固定诊断，无法解析的基线留空。
     const cancelled = signal?.aborted || operation?.aborted || error instanceof InterruptedError;
+    if (cancelled) onCancelled?.();
     code = cancelled || error instanceof ImpactInputError ? 2 : 3;
     report = {
       version: 1, baseline: '', complete: false, changes: [], impacts: [],

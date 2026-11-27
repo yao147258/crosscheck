@@ -6,16 +6,35 @@ import { formatTime, safeText, SessionHeader, type SessionInfo } from './header'
 import { initialRoute, type ReviewView } from './routes';
 
 export interface ChatMessage { role: 'user' | 'assistant'; content: string }
+
+/** 信号中止可以阻止重试，但独立失败不能仅因时间重叠而归类为取消。 */
+export function isSessionCancellation(signal: AbortSignal, error: unknown): boolean {
+  return signal.aborted && (error === signal.reason || (error instanceof Error && error.name === 'AbortError'));
+}
 export type SlashCommandResult =
+  | { kind: 'resume'; messages: ChatMessage[]; history: ChatMessage[]; activate: () => void }
   | { kind: 'exit' }
   | { kind: 'clear' }
   | { kind: 'review'; args: { project: string; view?: ReviewView; modules?: string[]; runId?: string } }
-  | { kind: 'log'; code: number; lines: string[]; truncateLineIndices?: readonly number[] };
+  | { kind: 'log'; code: number; lines: string[]; cancelled?: boolean;
+      /** 宿主保证这些递增索引指向固定诊断，且未混入用户或服务返回的文本。 */
+      fixedDiagnosticLineIndices?: readonly number[]; truncateLineIndices?: readonly number[] };
 export interface SlashCommandMeta { name: string; description: string }
 export type SessionProgress = (text: string, kind?: 'warning') => void;
 /** 登记业务结果确定后必须等待的收尾；收尾不受本次业务取消控制。 */
 export type RegisterSessionSettle = (settle: () => Promise<void>) => void;
+export interface SessionPersistence {
+  readonly isReadonly?: boolean;
+  begin: (operation: 'chat' | 'slash', input: string, signal: AbortSignal, warn?: (message: string) => void) => Promise<{
+    input: string;
+    normalize: (text: string) => string;
+    normalizeError?: (error: unknown) => string;
+    normalizeStoreError?: (error: unknown) => string;
+    finish: (result: { status: 'success' | 'error' | 'cancelled'; output: string; reply?: string }) => Promise<void>;
+  }>;
+}
 export interface RunSessionOptions {
+  persistence?: SessionPersistence;
   info?: SessionInfo;
   slashCommands?: SlashCommandMeta[];
   tokenize: (text: string) => string[];
@@ -34,6 +53,8 @@ const SPINNER = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', 
 // 执行提示只显示最近若干行，避免刷屏。
 const ACTIVITY_LINES = 6;
 const MODEL_COMMANDS = new Set(['init', 'profile', 'reqs', 'plan', 'run']);
+const SESSION_CONTROLS = new Set(['clear', 'exit', 'sessions', 'resume']);
+const errorMessage = (error: unknown) => error instanceof Error ? error.message : String(error);
 const USAGE_UNAVAILABLE = '会话用量：统计不完整（无法读取）';
 // SGR 鼠标上报序列（ink 已去掉开头的 ESC），按钮码 64/65 为滚轮上/下，4/8/16 位为修饰键。
 const MOUSE = /^\[<(\d+);\d+;\d+[Mm]$/;
@@ -77,7 +98,11 @@ export function SessionApp({ options }: { options: RunSessionOptions }) {
     void refreshUsage();
     return () => { usageRevision.current++; };
   }, [refreshUsage]);
-  const [review, setReview] = useState<{ env: ReviewEnv; args: Extract<SlashCommandResult, { kind: 'review' }>['args'] }>();
+  const [review, setReview] = useState<{
+    env: ReviewEnv;
+    args: Extract<SlashCommandResult, { kind: 'review' }>['args'];
+    close: (error?: Error, cancelled?: boolean) => void;
+  }>();
   const reviewActive = useRef(false);
   const externalAbort = useRef(false);
   // 提示列表占据输入框下方的行数，相应压缩消息视口。
@@ -126,7 +151,6 @@ export function SessionApp({ options }: { options: RunSessionOptions }) {
     setScrollUp(0);
     setActivity([]);
     setStartedAt(Date.now());
-    append('user', text);
     // 只接收本次操作的提示，操作结束后迟到的提示直接丢弃。
     const warnings = new Set<string>();
     const progress: SessionProgress = (line, kind) => {
@@ -137,60 +161,142 @@ export function SessionApp({ options }: { options: RunSessionOptions }) {
     };
     const settleTasks: Array<() => Promise<void>> = [];
     const registerSettle: RegisterSessionSettle = settle => { settleTasks.push(settle); };
+    type SavedOperation = Awaited<ReturnType<SessionPersistence['begin']>>;
+    type Outcome = Parameters<SavedOperation['finish']>[0];
+    let saved: SavedOperation | undefined;
+    let outcome: Outcome | undefined;
     let failure: Error | undefined;
-    let refresh = !text.startsWith('/');
+    const safeError = (error: unknown) => saved?.normalizeError?.(error) ?? saved?.normalize(errorMessage(error)) ?? errorMessage(error);
+    const slash = text.startsWith('/');
+    let refresh = !slash;
+    let quitting = false;
+    const finalize = async () => {
+      // 先提交已确定的业务结果，再等待账本；收尾不接受业务取消信号。
+      let committed = !saved;
+      if (saved && outcome) {
+        try { await saved.finish(outcome); committed = true; }
+        catch (error) { append('assistant', `会话结果保存失败，未加入模型历史：${saved.normalizeStoreError?.(error) ?? safeError(error)}`); }
+      }
+      if (committed && outcome?.reply !== undefined) {
+        history.current = [...history.current, { role: 'user' as const, content: saved?.input ?? text }, { role: 'assistant' as const, content: outcome.reply }].slice(-20);
+      }
+      let usageFailed = false;
+      for (const settle of settleTasks) {
+        try { await settle(); }
+        catch { usageFailed = true; }
+      }
+      if (refresh) await refreshUsage();
+      if (usageFailed) {
+        setSessionUsage(USAGE_UNAVAILABLE);
+        warnings.add('用量收尾失败，本次统计不完整');
+      }
+      for (const warning of warnings) append('assistant', warning);
+      reviewActive.current = false;
+      operation.current = undefined;
+      setBusy(false);
+      setActivity([]);
+      // Ink 只接收新建的安全异常；不传递原始堆栈、cause 或其他字段。
+      if (externalAbort.current) exit(failure ? new Error(saved ? safeError(failure) : '会话中断时发生错误') : 2);
+      else if (quitting) exit(0);
+    };
     try {
-      if (text.startsWith('/')) {
-        const tokens = options.tokenize(text.slice(1));
-        refresh = MODEL_COMMANDS.has(tokens[0] ?? '');
+      let tokens: string[] = [];
+      let tokenizeError: unknown;
+      if (slash) {
+        try { tokens = options.tokenize(text.slice(1)); }
+        catch (error) { tokenizeError = error; }
+      }
+      const command = tokens[0] ?? (tokenizeError ? text.slice(1).trim().split(/\s+/, 1)[0] : undefined);
+      // 用量账本本身只读；仅损坏会话跳过归档，可写会话仍按普通命令记录。
+      const readOnlyUsage = command === 'usage' && options.persistence?.isReadonly;
+      if (options.persistence && !readOnlyUsage && (!slash || !SESSION_CONTROLS.has(command ?? ''))) {
+        try { saved = await options.persistence.begin(slash ? 'slash' : 'chat', text, controller.signal, line => progress(line, 'warning')); }
+        catch (error) {
+          append('assistant', `会话开始保存失败，未执行操作：${errorMessage(error)}`);
+          return;
+        }
+      }
+      append('user', slash ? text : saved?.input ?? text);
+      controller.signal.throwIfAborted();
+      if (tokenizeError) throw tokenizeError;
+      if (slash) {
+        refresh = MODEL_COMMANDS.has(command ?? '');
         const result = await options.runSlashCommand(tokens, controller.signal, progress, registerSettle);
-        controller.signal.throwIfAborted();
-        if (result.kind === 'exit') { exit(0); return; }
-        if (result.kind === 'clear') {
-          options.resetSession();
+        // 已返回的日志代表确定的业务结果；取消不得覆盖结果，但仍能阻止界面切换。
+        if (result.kind !== 'log') controller.signal.throwIfAborted();
+        if (result.kind === 'exit') { quitting = true; return; }
+        if (result.kind === 'clear' || result.kind === 'resume') {
+          // 恢复读取不改变宿主状态；通过取消检查后同步切换 ID、修订和两类历史。
+          if (result.kind === 'resume') {
+            result.activate();
+            history.current = result.history.slice(-20);
+            setMessages(result.messages);
+          } else {
+            options.resetSession();
+            history.current = [];
+            setMessages([{ role: 'assistant', content: '已清空对话历史' }]);
+          }
+          setSessionUsage(undefined);
           refresh = true;
-          setMessages([{ role: 'assistant', content: '已清空对话历史' }]);
-          history.current = [];
           return;
         }
         if (result.kind === 'log') {
           const lines = [`退出码 ${result.code}`, ...result.lines];
+          const output = lines.join('\n');
+          const archiveLines = [lines[0]!];
+          if (saved) {
+            // 连续的自由文本一起脱敏，避免把跨行 JSON 或密钥拆开。
+            let start = 0;
+            for (const index of result.fixedDiagnosticLineIndices ?? []) {
+              if (start < index) archiveLines.push(saved.normalize(result.lines.slice(start, index).join('\n')));
+              archiveLines.push(result.lines[index]!);
+              start = index + 1;
+            }
+            if (start < result.lines.length) archiveLines.push(saved.normalize(result.lines.slice(start).join('\n')));
+          }
+          outcome = { status: result.cancelled ? 'cancelled' : result.code === 0 ? 'success' : 'error', output: saved ? archiveLines.join('\n') : output };
           if (result.truncateLineIndices) {
             const truncate = new Set(result.truncateLineIndices);
             const reportLines = lines.map((text, index) => ({ text, truncate: truncate.has(index - 1) }));
             setMessages(items => [...items, { role: 'assistant', content: '', reportLines }]);
-          } else append('assistant', lines.join('\n'));
+          } else append('assistant', output);
         }
         if (result.kind === 'review') {
           const env = await options.resolveReview(result.args, controller.signal);
           controller.signal.throwIfAborted();
           reviewActive.current = true;
-          setReview({ env: { ...env, signal: controller.signal }, args: result.args });
+          let closing = false;
+          setReview({ env: { ...env, signal: controller.signal, normalizeError: saved?.normalize ?? env.normalizeError }, args: result.args, close: (error, cancelled) => {
+            if (closing) return;
+            closing = true;
+            const interrupted = cancelled || controller.signal.aborted;
+            failure = error;
+            const message = error ? `审核错误：${safeError(error)}` : interrupted ? '审核已取消' : '审核已结束';
+            outcome = { status: error ? 'error' : interrupted ? 'cancelled' : 'success', output: message };
+            setBusy(true);
+            setReview(undefined);
+            if (saved || error) append('assistant', error ? outcome.output : message);
+            void finalize();
+          } });
+          setBusy(false);
+          setActivity([]);
           return;
         }
       } else {
-        const reply = await options.chatReply(history.current, text, controller.signal, progress, registerSettle);
+        const raw = await options.chatReply(history.current, saved?.input ?? text, controller.signal, progress, registerSettle);
         controller.signal.throwIfAborted();
-        history.current = [...history.current, { role: 'user' as const, content: text }, { role: 'assistant' as const, content: reply }].slice(-20);
+        const reply = saved ? saved.normalize(raw) : raw;
+        outcome = { status: 'success', output: reply, reply };
         append('assistant', reply);
       }
     } catch (error) {
-      const cancelled = controller.signal.aborted && (error === controller.signal.reason || (error instanceof Error && error.name === 'AbortError'));
+      const cancelled = isSessionCancellation(controller.signal, error);
       if (!cancelled) failure = error instanceof Error ? error : new Error(String(error));
-      append('assistant', controller.signal.aborted ? `操作已中断${failure ? `：${failure.message}` : ''}` : `错误：${failure?.message}`);
+      const output = cancelled ? '操作已中断' : `错误：${safeError(error)}`;
+      outcome = { status: cancelled ? 'cancelled' : 'error', output };
+      append('assistant', output);
     } finally {
-      try {
-        for (const settle of settleTasks) await settle();
-        if (refresh) await refreshUsage();
-      } catch {
-        setSessionUsage(USAGE_UNAVAILABLE);
-        warnings.add('用量收尾失败，本次统计不完整');
-      }
-      for (const warning of warnings) append('assistant', warning);
-      if (!reviewActive.current) operation.current = undefined;
-      setBusy(false);
-      setActivity([]);
-      if (externalAbort.current && !reviewActive.current) exit(failure ?? 2);
+      if (!reviewActive.current) await finalize();
     }
   };
   // 把终端真实光标定位进输入框：空闲时显示在输入文本末尾，busy 或进入审核时隐藏。
@@ -254,13 +360,7 @@ export function SessionApp({ options }: { options: RunSessionOptions }) {
       updateInput(inputRef.current + value);
     }
   });
-  if (review) return <App env={review.env} initial={initialRoute(review.args.view, review.args.modules?.[0], review.args.runId)} onExitToParent={(error) => {
-    reviewActive.current = false;
-    operation.current = undefined;
-    setReview(undefined);
-    if (error) append('assistant', `审核错误：${error.message}`);
-    if (externalAbort.current) exit(error ?? 2);
-  }} />;
+  if (review) return <App env={review.env} initial={initialRoute(review.args.view, review.args.modules?.[0], review.args.runId)} onExitToParent={review.close} />;
   // 滚动条：按可视比例计算滑块长度，按已翻看位置计算滑块起点。
   const thumb = maxScroll > 0 ? Math.max(1, Math.round(viewport * viewport / height)) : 0;
   const thumbStart = maxScroll > 0 ? Math.round((maxScroll - offset) / maxScroll * (viewport - thumb)) : 0;

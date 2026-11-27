@@ -3,7 +3,7 @@ import { runSuite, type RunSuiteOptions } from '@crosscheck/runner';
 import type { CliArgs } from './args';
 import { writeReport } from './report';
 
-export async function runCommand(args: CliArgs, log: (s: string) => void, dependencies: Pick<RunSuiteOptions, 'modelOptions' | 'resilience' | 'env' | 'userConfigHome' | 'usageContext' | 'usageObservationScope'> = {}, signal?: AbortSignal): Promise<number> {
+export async function runCommand(args: CliArgs, log: (s: string) => void, dependencies: Pick<RunSuiteOptions, 'modelOptions' | 'resilience' | 'env' | 'userConfigHome' | 'usageContext' | 'usageObservationScope'> = {}, signal?: AbortSignal, onCancelled?: () => void): Promise<number> {
   const controller = new AbortController();
   const abort = () => controller.abort();
   process.on('SIGINT', abort); process.on('SIGTERM', abort);
@@ -20,6 +20,7 @@ export async function runCommand(args: CliArgs, log: (s: string) => void, depend
       try { await writeReport(artifacts, outcome.result.manifest.runId, args.open, log); }
       catch { log('离线报告校验或写入失败；未修补历史结果'); return 3; }
     }
+    if (outcome.exitCode === 2 && outcome.interrupted) onCancelled?.();
     return outcome.exitCode;
   } finally {
     process.removeListener('SIGINT', abort); process.removeListener('SIGTERM', abort);

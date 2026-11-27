@@ -122,25 +122,26 @@ describe('runReview 真实 Ink 退出码（组件模拟流，不代表真实 TTY
 
   it('真实 CLI 确认写盘失败并发外部取消保留宿主错误退出3', async () => {
     const { cliMain } = await import('../../cli/src/main');
-    const { artifacts, root } = await createProject();
+    const { artifacts, root, userHome } = await createProject();
     const gate = deferred<void>(); const entered = deferred<void>();
     const controller = new AbortController(); const logs: string[] = [];
     const write = ArtifactStore.prototype.writeJson;
     vi.spyOn(ArtifactStore.prototype, 'writeJson').mockImplementation(async function (this: ArtifactStore, ...args) {
-      if (args[0] === 'approvals.json') { entered.resolve(); await gate.promise; throw new Error('确认记录磁盘故障'); }
+      if (args[0] === 'approvals.json') { entered.resolve(); await gate.promise; throw new Error('确认记录磁盘故障 fixture-key', { cause: new Error('fixture-key') }); }
       return write.apply(this, args);
     });
     const io = createTerminal();
     const before = [process.listenerCount('SIGINT'), process.listenerCount('SIGTERM')];
     const result = cliMain(['review', 'profile', '--project', root], {
       signal: controller.signal, log: (s) => logs.push(s),
-      dependencies: { env: { CROSSCHECK_REVIEWER: '故障测试' }, review: { isTTY: true } },
+      dependencies: { userConfigHome: userHome, env: { CROSSCHECK_REVIEWER: '故障测试' }, review: { isTTY: true } },
     });
     await waitFor(() => io.output().includes('environments.yaml'));
     io.stdin.write('a'); await entered.promise;
     controller.abort(); gate.resolve();
     await expect(result).resolves.toBe(3);
-    expect(logs.join('')).toContain('确认记录磁盘故障');
+    expect(logs.join('')).toContain('确认记录磁盘故障 [REDACTED]');
+    expect(logs.join('')).not.toContain('fixture-key');
     expect(await artifacts.readBytes('approvals.json')).toBeUndefined();
     expect([process.listenerCount('SIGINT'), process.listenerCount('SIGTERM')]).toEqual(before);
   });

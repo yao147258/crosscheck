@@ -19,6 +19,12 @@ export function withSessionUsageContext(deps: CommandDependencies, sessionId: st
   return { ...deps, usageContext: { sessionId, warn } };
 }
 
+export function createSessionTextNormalizer(apiKeys: string[] | null): (text: string) => string {
+  return apiKeys === null
+    ? () => '[无法确认配置密钥，已省略文本]'
+    : createEvidenceRedactor([], apiKeys).displayText;
+}
+
 export class InterruptedError extends Error {
   override name = 'InterruptedError';
 }
@@ -52,9 +58,9 @@ export async function withInterrupt<T>(
   }
 }
 
-export async function loadModelContext(artifacts: ArtifactStore, deps: CommandDependencies) {
+export async function loadModelContext(artifacts: ArtifactStore, deps: CommandDependencies, userSnapshot?: Awaited<ReturnType<typeof loadUserModelConfig>>) {
   const project = await artifacts.loadProjectConfig();
-  const user = await loadUserModelConfig(deps.userConfigHome);
+  const user = userSnapshot ?? await loadUserModelConfig(deps.userConfigHome);
   const apiKeys = Object.fromEntries(Object.entries(user.providers).map(([name, provider]) => [name, provider.apiKey]));
   const config: Config = { ...project, ...publicModelConfig(user) };
   const redactor = createEvidenceRedactor([], Object.values(apiKeys).filter((key): key is string => !!key));

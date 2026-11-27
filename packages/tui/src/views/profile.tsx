@@ -11,7 +11,12 @@ export function ProfileView({ nav }: { nav: Nav }) {
   const actions = useContext(ActionContext);
   const { rows: terminalRows, columns } = useWindowSize();
   const compact = columns < 70 || terminalRows < 24;
-  const { data, error, reload } = useLoader(() => loadProfileOverview(session), [session]);
+  const { data, error, reload } = useLoader(() => loadProfileOverview(session), [session], overview => {
+    const invalid = overview.rows.find(row => row.status === 'invalid');
+    if (invalid) return new Error(`${invalid.name} 不合法：${invalid.error}`);
+    if (overview.crossCheck) return new Error(`交叉校验未通过：${overview.crossCheck}`);
+    return undefined;
+  });
   const { status, setStatus, run } = useAction(reload);
   const pause = useEditorPause();
   const [index, setIndex] = useState(0);

@@ -1,7 +1,7 @@
-import { ArtifactStore, resolveReviewer } from '@crosscheck/core';
+import { ArtifactStore, loadUserModelConfigSnapshot, resolveReviewer } from '@crosscheck/core';
 import { createEditorHost, createOpener, runReview, type RunReviewOptions } from '@crosscheck/tui';
 import type { CliArgs } from './args';
-import { withInterrupt, type CommandDependencies } from './context';
+import { createSessionTextNormalizer, withInterrupt, type CommandDependencies } from './context';
 
 export interface ReviewDependencies {
   isTTY?: boolean;
@@ -20,8 +20,11 @@ export async function reviewCommand(args: CliArgs, log: (s: string) => void, dep
     try { reviewer = resolveReviewer(env, deps.review?.userInfo); }
     catch (error) { log(error instanceof Error ? error.message : String(error)); return 2; }
     const artifacts = new ArtifactStore(args.project);
+    const { apiKeys } = await loadUserModelConfigSnapshot(deps.userConfigHome);
+    sig.throwIfAborted();
     const code = await (deps.review?.runReview ?? runReview)({
       artifacts, reviewer, editor: createEditorHost(artifacts, env), open: createOpener(),
+      normalizeError: createSessionTextNormalizer(apiKeys),
       view: args.view, module: args.modules?.[0], runId: args.runId, signal: sig,
     });
     sig.throwIfAborted();

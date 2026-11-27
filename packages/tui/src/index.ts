@@ -31,6 +31,7 @@ export interface RunReviewOptions {
   module?: string;
   runId?: string;
   signal?: AbortSignal;
+  normalizeError?: (text: string) => string;
 }
 
 export async function runReview(options: RunReviewOptions): Promise<number> {
@@ -38,7 +39,7 @@ export async function runReview(options: RunReviewOptions): Promise<number> {
   const session = await ReviewSession.open(options.artifacts, options.reviewer);
   if (options.signal?.aborted) return 2;
   const instance = render(createElement(App, {
-    env: { session, editor: options.editor, open: options.open, signal: options.signal },
+    env: { session, editor: options.editor, open: options.open, signal: options.signal, normalizeError: options.normalizeError },
     initial: initialRoute(options.view, options.module, options.runId),
   }), { exitOnCtrlC: false });
   try {

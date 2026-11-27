@@ -14,7 +14,7 @@ export interface ResilienceOptions {
 }
 
 /** 默认退避等待：响应 signal，中止时立即结束等待（不等到超时） */
-const defaultSleep = (ms: number, signal?: AbortSignal): Promise<void> =>
+export const waitForRetry = (ms: number, signal?: AbortSignal): Promise<void> =>
   new Promise<void>((resolve) => {
     if (signal?.aborted) {
       resolve();
@@ -50,7 +50,7 @@ export async function callWithFallback<T>(
   fn: (model: LanguageModel, ref: string, candidate: ModelCandidate) => Promise<T>,
   opts: ResilienceOptions = {},
 ): Promise<{ value: T; ref: string; attempts: number }> {
-  const { retries = 3, baseDelayMs = 500, sleep = defaultSleep, signal, onFallback } = opts;
+  const { retries = 3, baseDelayMs = 500, sleep = waitForRetry, signal, onFallback } = opts;
   if (chain.length === 0) throw new Error('没有可用的模型');
   let attempts = 0;
   let lastErr: unknown;
