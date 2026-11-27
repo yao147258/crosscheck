@@ -1,6 +1,6 @@
-import { Approvals, ArtifactStore, loadUserModelConfig, resolveReviewer } from '@crosscheck/core';
+import { Approvals, ArtifactStore, loadUserModelConfig, resolveReviewer, type ProfileFile } from '@crosscheck/core';
 import { builtinFactories, callWithFallback, reportProgress, withProgress } from '@crosscheck/models';
-import { createEditorHost, createOpener, loadHomeSummary, loadStatus, ReviewSession, runSession, type ChatMessage, type SlashCommandResult } from '@crosscheck/tui';
+import { createEditorHost, createOpener, escapeTerminalLine, loadHomeSummary, loadStatus, ReviewSession, runSession, type ChatMessage, type SlashCommandResult } from '@crosscheck/tui';
 import { APICallError, generateText } from 'ai';
 import { appendFile, mkdir } from 'node:fs/promises';
 import os from 'node:os';
@@ -35,8 +35,8 @@ export function tokenizeCommand(text: string): string[] {
 
 // 会话斜杠命令清单，供输入框 Tab 补全提示使用；顺序即补全列表顺序。
 export const sessionSlashCommands = [
-  { name: 'init', description: '扫描项目并生成项目笔记草稿' },
-  { name: 'profile', description: '根据已确认笔记生成画像草稿' },
+  { name: 'init', description: '扫描项目，自动确认笔记并生成画像，仅把需人工确认的画像交给审核' },
+  { name: 'profile', description: '单独重新生成画像草稿（需已确认笔记）' },
   { name: 'reqs', description: '提取需求条款草稿' },
   { name: 'plan', description: '生成用例草稿' },
   { name: 'review', description: '交互审核笔记、画像、条款、用例与结果' },
@@ -82,6 +82,10 @@ export function createSlashDispatcher(deps: CommandDependencies) {
           const label = run.state === 'missing' ? '缺失' : run.state === 'incomplete' ? '未完成' : '损坏';
           lines.push(`上一次测试：${label}${run.runId ? `（${run.runId}）` : ''}${run.start ? `，开始时间 ${run.start}` : ''}${run.status ? `，运行状态 ${run.status}` : ''}${run.error ? `：${run.error}` : ''}`);
         }
+        if (status.approvedProfiles.length) {
+          lines.push('已确认画像：');
+          for (const { name, by } of status.approvedProfiles) lines.push(`  ${name} · 确认人：${escapeTerminalLine(by)}`);
+        }
         return { kind: 'log', code: 0, lines };
       } catch (error) {
         if (signal.aborted) throw error;
@@ -92,8 +96,15 @@ export function createSlashDispatcher(deps: CommandDependencies) {
       try { return { kind: 'review', args: parseArgs(tokens) }; }
       catch (error) { return { kind: 'log', code: 2, lines: [error instanceof Error ? error.message : String(error)] }; }
     }
+    let pending: ProfileFile[] | undefined;
+    const dependencies = tokens[0] === 'init'
+      ? { ...deps, init: { deferReview: (only: ProfileFile[]) => { pending = only; } } }
+      : deps;
     const lines: string[] = [];
-    const code = await cliMain(tokens, { dependencies: deps, signal, log: (line) => { lines.push(line); onProgress?.(line); } });
+    const code = await cliMain(tokens, { dependencies, signal, log: (line) => { lines.push(line); onProgress?.(line); } });
+    if (code === 0 && pending?.length) {
+      return { kind: 'review', args: { project: parseArgs(tokens).project, view: 'profile', only: pending }, lines };
+    }
     return { kind: 'log', code, lines };
   }
 }

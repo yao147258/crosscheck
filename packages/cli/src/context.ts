@@ -1,11 +1,16 @@
-import { loadUserModelConfig, publicModelConfig, type ArtifactStore, type Config, type Role } from '@crosscheck/core';
+import { loadUserModelConfig, publicModelConfig, type ArtifactStore, type Config, type ProfileFile, type Role } from '@crosscheck/core';
 import { createEvidenceRedactor } from '@crosscheck/tools';
 import { hasProgressListener, resolveRole, withProgress, type ModelCandidate } from '@crosscheck/models';
 import type { RunSuiteOptions } from '@crosscheck/runner';
 
 import type { ReviewDependencies } from './review';
 
-export type CommandDependencies = Pick<RunSuiteOptions, 'modelOptions' | 'resilience' | 'env' | 'userConfigHome'> & { review?: ReviewDependencies; session?: { isTTY?: boolean } };
+export type CommandDependencies = Pick<RunSuiteOptions, 'modelOptions' | 'resilience' | 'env' | 'userConfigHome'> & {
+  review?: ReviewDependencies;
+  session?: { isTTY?: boolean };
+  /** 会话内 /init 使用：提供后 init 不自己打开审核，而是把待确认画像交给会话。 */
+  init?: { deferReview?: (only: ProfileFile[]) => void };
+};
 
 export class InterruptedError extends Error {
   override name = 'InterruptedError';

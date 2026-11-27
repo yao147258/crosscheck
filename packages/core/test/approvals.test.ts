@@ -2,7 +2,7 @@ import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { Approvals, ArtifactStore, canonicalize, contentHash } from '../src/index';
+import { Approvals, ArtifactStore, AUTO_REVIEWER, canonicalize, contentHash } from '../src/index';
 
 describe('contentHash', () => {
   it('与键顺序无关', () => {
@@ -20,6 +20,13 @@ describe('contentHash', () => {
   it('格式为 sha256:hex', () => {
     expect(contentHash('x')).toMatch(/^sha256:[0-9a-f]{64}$/);
   });
+});
+
+it('自动确认人常量固定为 auto，确认记录可区分', () => {
+  expect(AUTO_REVIEWER).toBe('auto');
+  const approvals = Approvals.empty();
+  approvals.approve('notes', 'project', '# 笔记', AUTO_REVIEWER);
+  expect(approvals.record('notes', 'project')?.by).toBe('auto');
 });
 
 describe('Approvals', () => {

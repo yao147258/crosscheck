@@ -4,6 +4,7 @@ import { useContext, useRef, useState } from 'react';
 import { Footer, List, ReviewDetails, clampIndex, moveIndex } from '../components';
 import { ActionContext, useReview } from '../context';
 import { useAction, useLoader } from '../hooks';
+import { escapeTerminalLine } from '../io/terminal';
 import { navKey, type Nav } from '../routes';
 import { DECISION_LABELS, exportEvidence, loadResultRows, recordDisposition, type ResultRow } from '../state/results';
 
@@ -39,7 +40,7 @@ function resultDetails(row: ResultRow): string[] {
     ]) : ['无证据']),
     ...(row.disposition ? [
       `人工裁决：${DECISION_LABELS[row.disposition.decision]}`, `条款：${row.disposition.clauseId ?? '无'}`,
-      `确认人：${row.disposition.by} · 时间：${row.disposition.at}`, `备注：${row.disposition.note || '无'}`,
+      `确认人：${escapeTerminalLine(row.disposition.by)} · 时间：${row.disposition.at}`, `备注：${row.disposition.note || '无'}`,
     ] : ['人工裁决：未记录']),
   ];
 }

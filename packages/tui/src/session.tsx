@@ -1,3 +1,4 @@
+import type { ProfileFile } from '@crosscheck/core';
 import { Box, Text, render, useApp, useBoxMetrics, useCursor, useInput, useWindowSize, type DOMElement } from 'ink';
 import { createElement, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { App } from './app';
@@ -9,7 +10,7 @@ export interface ChatMessage { role: 'user' | 'assistant'; content: string }
 export type SlashCommandResult =
   | { kind: 'exit' }
   | { kind: 'clear' }
-  | { kind: 'review'; args: { project: string; view?: ReviewView; modules?: string[]; runId?: string } }
+  | { kind: 'review'; args: { project: string; view?: ReviewView; modules?: string[]; runId?: string; only?: ProfileFile[] }; lines?: string[] }
   | { kind: 'log'; code: number; lines: string[] };
 export interface SlashCommandMeta { name: string; description: string }
 export interface RunSessionOptions {
@@ -126,6 +127,7 @@ export function SessionApp({ options }: { options: RunSessionOptions }) {
         }
         if (result.kind === 'log') append('assistant', `退出码 ${result.code}\n${result.lines.join('\n')}`);
         if (result.kind === 'review') {
+          if (result.lines?.length) append('assistant', result.lines.join('\n'));
           const env = await options.resolveReview(result.args, controller.signal);
           controller.signal.throwIfAborted();
           reviewActive.current = true;
@@ -210,7 +212,7 @@ export function SessionApp({ options }: { options: RunSessionOptions }) {
       updateInput(inputRef.current + value);
     }
   });
-  if (review) return <App env={review.env} initial={initialRoute(review.args.view, review.args.modules?.[0], review.args.runId)} onExitToParent={(error) => {
+  if (review) return <App env={review.env} initial={initialRoute(review.args.view, review.args.modules?.[0], review.args.runId, review.args.only)} onExitToParent={(error) => {
     reviewActive.current = false;
     operation.current = undefined;
     setReview(undefined);

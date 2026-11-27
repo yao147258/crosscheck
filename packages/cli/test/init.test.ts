@@ -5,13 +5,18 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { Approvals, ArtifactError, ArtifactStore, ConfigSchema, ProjectConfigSchema, readProfileFile } from '@crosscheck/core';
 import { scriptedModel, type ScriptStep } from '../../agent/src/testing/scripted-model';
 import * as discovery from '@crosscheck/discovery';
-import { cliMain as realCliMain } from '../src/main';
+import { cliMain as realCliMain, parseArgs } from '../src/main';
 const cliMain: typeof realCliMain = (argv, options = {}) => {
   const index = argv.indexOf('--project');
   return realCliMain(argv, { ...options, dependencies: { ...options.dependencies, userConfigHome: index >= 0 ? path.join(argv[index + 1]!, 'user') : undefined } });
 };
 import { CONFIG_TEMPLATE, NOTES_FILE } from '../src/init';
 import { InterruptedError, resolveModels, withInterrupt } from '../src/context';
+
+it('init 接受可重复的 --openapi 并去重', () => {
+  expect(parseArgs(['init', '--openapi', 'a.yaml', '--openapi', 'b.yaml', '--openapi', 'a.yaml']).openapi).toEqual(['a.yaml', 'b.yaml']);
+  expect(() => parseArgs(['init', '--module', 'M'])).toThrow();
+});
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -26,12 +31,20 @@ async function project(withConfig: boolean) {
   if (withConfig) await artifacts.writeYaml('config.yaml', {});
   return { root, artifacts };
 }
-const deps = (model: ReturnType<typeof scriptedModel>) => ({ modelOptions: { env: {}, factories: { openai: () => model } }, resilience: { retries: 0, baseDelayMs: 0 } });
+const deps = (model: ReturnType<typeof scriptedModel>) => ({ modelOptions: { env: {}, factories: { openai: () => model } }, resilience: { retries: 0, baseDelayMs: 0 }, review: { isTTY: false } });
+const PROFILE_STEPS: ScriptStep[] = [
+  { toolCalls: [{ name: 'finish', input: { findings: [] } }] },
+  { toolCalls: [{ name: 'finish', input: { 'environments.yaml': { version: 1, environments: { local: { baseURL: 'http://localhost:3000', healthcheck: 'http://localhost:3000/health', reset: null } } } } }] },
+  { toolCalls: [{ name: 'finish', input: { 'auth.yaml': { version: 1, actors: { guest: { kind: 'anonymous' } } } } }] },
+  { toolCalls: [{ name: 'finish', input: { 'api-catalog.yaml': { version: 1, operations: {} }, 'pages.yaml': { version: 1, pages: {} } } }] },
+  { toolCalls: [{ name: 'finish', input: { 'data-model.yaml': { version: 1, queries: {} }, 'fixtures.yaml': { version: 1, fixtures: {} } } }] },
+  { toolCalls: [{ name: 'finish', input: { 'guardrails.yaml': { allowedHosts: ['localhost:3000'] } } }] },
+];
 
 it('没有 config.yaml 时写入默认配置并一次完成笔记生成', async () => {
   const { root, artifacts } = await project(false);
-  const model = scriptedModel([{ toolCalls: [{ name: 'finish', input: { markdown: '# 项目笔记\n\n扫描结果' } }] }]); const out: string[] = [];
-  expect(await cliMain(['init', '--project', root], { log: (s) => out.push(s), dependencies: deps(model) })).toBe(0);
+  const model = scriptedModel([{ toolCalls: [{ name: 'finish', input: { markdown: '# 项目笔记\n\n扫描结果' } }] }, ...PROFILE_STEPS]); const out: string[] = [];
+  expect(await cliMain(['init', '--project', root], { log: (s) => out.push(s), dependencies: deps(model) })).toBe(2);
   expect(ProjectConfigSchema.safeParse(await artifacts.readYaml('config.yaml', ProjectConfigSchema)).success).toBe(true);
   expect(ProjectConfigSchema.safeParse(CONFIG_TEMPLATE).success).toBe(true);
   expect(out.join('\n')).toContain('默认配置');
@@ -44,24 +57,29 @@ it('预先取消时不写默认配置', async () => {
   expect(await artifacts.readBytes('config.yaml')).toBeUndefined();
 });
 
-it('生成笔记草稿且不创建确认记录', async () => {
+it('生成笔记并自动确认', async () => {
   const { root, artifacts } = await project(true);
   const model = scriptedModel([{ toolCalls: [{ name: 'finish', input: { markdown: `# 项目笔记
 
-扫描结果` } }] }]);
-  expect(await cliMain(['init', '--project', root], { log: () => {}, dependencies: deps(model) })).toBe(0);
+扫描结果` } }] }, ...PROFILE_STEPS]);
+  expect(await cliMain(['init', '--project', root], { log: () => {}, dependencies: deps(model) })).toBe(2);
   expect((await artifacts.readBytes(NOTES_FILE))?.toString()).toBe(`# 项目笔记
 
 扫描结果`);
-  expect(await artifacts.readBytes('approvals.json')).toBeUndefined();
+  expect((await Approvals.load(artifacts)).record('notes', 'project')?.by).toBe('auto');
 });
 
-it('已确认笔记跳过时无需全局模型配置', async () => {
+it('已确认笔记跳过生成并保留人工身份，缺少画像时继续调用模型', async () => {
   const { root, artifacts } = await project(true); const text = '# 已确认';
   await artifacts.writeBytes('notes.md', Buffer.from(text));
   const approvals = Approvals.empty(); approvals.approve('notes', 'project', text, '人工'); await approvals.save(artifacts);
-  await rm(path.join(root, 'user', '.crosscheck', 'config.yaml'));
-  expect(await cliMain(['init', '--project', root], { log: () => {} })).toBe(0);
+  const model = scriptedModel(PROFILE_STEPS);
+  const lines: string[] = [];
+  expect(await cliMain(['init', '--project', root], { log: (line) => lines.push(line), dependencies: deps(model) })).toBe(2);
+  expect(lines.join('\n')).toContain('跳过生成');
+  expect(model.doGenerateCalls).toHaveLength(PROFILE_STEPS.length);
+  expect(await artifacts.list('system')).toHaveLength(7);
+  expect((await Approvals.load(artifacts)).record('notes', 'project')).toEqual(approvals.record('notes', 'project'));
 });
 
 it.each(['无标题内容', '# 标题\n' + 'a'.repeat(65536)])('刷新时拒绝非法旧笔记且不调用模型', async (text) => {
@@ -91,25 +109,25 @@ it('画像缺少确认笔记时即使模型配置缺失也返回门禁', async (
   expect(await artifacts.list('system')).toEqual([]);
 });
 
-it('刷新已确认笔记时脱敏旧内容并保留原确认记录', async () => {
+it('刷新已确认笔记时脱敏旧内容并以 auto 重新确认', async () => {
   const { root, artifacts } = await project(true); const text = '# 笔记\n\nfixture-key';
   await artifacts.writeBytes('notes.md', Buffer.from(text));
   const approvals = Approvals.empty(); approvals.approve('notes', 'project', text, '人工'); await approvals.save(artifacts);
-  const before = await artifacts.readBytes('approvals.json');
-  const model = scriptedModel([{ toolCalls: [{ name: 'finish', input: { markdown: '# 新笔记\n\nfixture-key' } }] }]);
-  expect(await cliMain(['init', '--refresh', '--project', root], { log: () => {}, dependencies: deps(model) })).toBe(0);
+  const model = scriptedModel([{ toolCalls: [{ name: 'finish', input: { markdown: '# 新笔记\n\nfixture-key' } }] }, ...PROFILE_STEPS]);
+  expect(await cliMain(['init', '--refresh', '--project', root], { log: () => {}, dependencies: deps(model) })).toBe(2);
   expect(JSON.stringify(model.doGenerateCalls[0]!.prompt)).not.toContain('fixture-key');
   const updated = (await artifacts.readBytes('notes.md'))!.toString();
   expect(updated).not.toContain('fixture-key');
-  expect((await Approvals.load(artifacts)).state('notes', 'project', updated)).toBe('stale');
-  expect(await artifacts.readBytes('approvals.json')).toEqual(before);
+  const latest = await Approvals.load(artifacts);
+  expect(latest.state('notes', 'project', updated)).toBe('approved');
+  expect(latest.record('notes', 'project')?.by).toBe('auto');
 });
 
 it('模型笔记里的未知密码、认证头、URL 和多行秘密不落盘', async () => {
   const { root, artifacts } = await project(true);
   const markdown = '# 项目笔记\n\nPASSWORD=unknownpassword\nAuthorization: Bearer unknownbearer\nhttp://unknownuser:unknownpass@localhost:3000/?x=unknownquery\nsecret: |\n  unknownmultiline\n  unknownsecondline\n\n正常说明';
-  const model = scriptedModel([{ toolCalls: [{ name: 'finish', input: { markdown } }] }]);
-  expect(await cliMain(['init', '--project', root], { log: () => {}, dependencies: deps(model) })).toBe(0);
+  const model = scriptedModel([{ toolCalls: [{ name: 'finish', input: { markdown } }] }, ...PROFILE_STEPS]);
+  expect(await cliMain(['init', '--project', root], { log: () => {}, dependencies: deps(model) })).toBe(2);
   const text = (await artifacts.readBytes('notes.md'))!.toString();
   for (const secret of ['unknownpassword', 'unknownbearer', 'unknownuser', 'unknownpass', 'unknownquery', 'unknownmultiline', 'unknownsecondline']) expect(text).not.toContain(secret);
   expect(text).toContain('正常说明');
@@ -215,9 +233,9 @@ it('公共模型解析使用独立密钥集合，并记录备用模型缺密钥�
 it('模型按需读取项目文件，CLI 输出读取进度且不再报告摘录省略', async () => {
   const { root, artifacts } = await project(true);
   await writeFile(path.join(root, 'package.json'), '{ "scripts": { "dev": "vite" } }');
-  const model = scriptedModel([{ toolCalls: [{ name: 'read_file', input: { path: 'package.json' } }] }, { toolCalls: [{ name: 'finish', input: { markdown: '# 项目笔记' } }] }]);
+  const model = scriptedModel([{ toolCalls: [{ name: 'read_file', input: { path: 'package.json' } }] }, { toolCalls: [{ name: 'finish', input: { markdown: '# 项目笔记' } }] }, ...PROFILE_STEPS]);
   const out: string[] = [];
-  expect(await cliMain(['init', '--project', root], { log: (s) => out.push(s), dependencies: deps(model) })).toBe(0);
+  expect(await cliMain(['init', '--project', root], { log: (s) => out.push(s), dependencies: deps(model) })).toBe(2);
   expect(out).toContain('读取 package.json');
   expect(out.join('\n')).not.toContain('摘录');
   expect((await artifacts.readBytes(NOTES_FILE))?.toString()).toBe('# 项目笔记');

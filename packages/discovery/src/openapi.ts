@@ -8,7 +8,7 @@ const name = (value: unknown): value is string => typeof value === 'string' && v
 const methods = new Set(['get', 'put', 'post', 'delete', 'options', 'head', 'patch', 'trace']);
 // 先把 "/" 的转义写法还原成字面字符，再做基于字面 "//" 的识别；否则像
 // "/api\/\/user:secret@…" 这类原始文本会绕过下面的正则（见 sanitize.ts 的说明）。
-const clean = (text: string) => sanitize(unescapeSlashes(text).replace(/(?<!:)\/\/[^\s"'<>\\]+/g, value => {
+export const cleanOpenApiText = (text: string) => sanitize(unescapeSlashes(text).replace(/(?<!:)\/\/[^\s"'<>\\]+/g, value => {
   // 不规范化普通路径的内部双斜杠；仅在含用户信息、查询或片段时清理。
   // 先去掉全部连续的前导斜杠再判断用户信息：一个额外的前导斜杠就会让
   // 只认两条斜杠的正则漏判，使凭证原样保留在来源摘录里（见该行上游 path
@@ -31,6 +31,7 @@ type Parameter = Extract<DiscoveryFact, { kind: 'api' }>['parameters'][number];
 
 export function openApiPlugin(files: string[]): DiscoveryPlugin {
   return { id, async scan({ files: reader, signal }) {
+    const clean = cleanOpenApiText;
     const result: DiscoveryResult = { facts: [], diagnostics: [] };
     for (const file of new Set(files)) {
       signal?.throwIfAborted();

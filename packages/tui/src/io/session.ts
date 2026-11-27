@@ -1,4 +1,4 @@
-import { Approvals, type ArtifactStore } from '@crosscheck/core';
+import { Approvals, type ApprovalChange, type ArtifactStore } from '@crosscheck/core';
 
 export interface ReadonlyReviewContext {
   readonly artifacts: ArtifactStore;
@@ -25,13 +25,12 @@ export class ReviewSession {
   }
 
   /** 同会话不并发修改；失败只重载确认记录，不回滚已经写入的工件。 */
-  async mutate(change: (approvals: Approvals) => void | Promise<void>): Promise<void> {
+  async mutate(change: ApprovalChange): Promise<void> {
     if (this.busy) throw new Error('审核会话忙碌，请等待当前操作完成');
     const approvals = this.approvals;
     this.busy = true;
     try {
-      await change(approvals);
-      await approvals.save(this.artifacts);
+      this.current = await approvals.applyChange(this.artifacts, change);
     } catch (error) {
       this.current = undefined;
       try {

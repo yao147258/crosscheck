@@ -5,6 +5,9 @@ import type { ProjectEntry, ProjectLister } from './types';
 
 const MAX_BYTES = 1024 * 1024;
 
+/** 路径被安全规则拒绝，不等同于宿主读取故障。 */
+export class UnsafeProjectPathError extends Error {}
+
 export function isCredential(name: string): boolean {
   const lower = name.toLowerCase();
   return (lower.startsWith('.env') && lower !== '.env.example') ||
@@ -17,6 +20,12 @@ export function isSafeProjectPath(file: string): boolean {
   return !!normalized && !path.posix.isAbsolute(normalized) && !path.win32.isAbsolute(file) && !/^[a-z]:/i.test(normalized) && !/[\x00-\x1f\x7f]/.test(normalized) && !normalized.split('/').some((part) => part === '..' || (part !== '.' && /[. ]$/.test(part)) || isCredential(part) || part.includes(':') || /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?$/i.test(part));
 }
 
+/** 先检查原始路径，再统一分隔符和点段；绝不折叠父目录。 */
+export function normalizeSafeProjectPath(file: string): string | undefined {
+  if (!isSafeProjectPath(file)) return undefined;
+  return file.replaceAll('\\', '/').split('/').filter((part) => part && part !== '.').join('/') || undefined;
+}
+
 export function createProjectReader(projectRoot: string): ProjectLister {
   return {
     async list(dir, signal, options) {
@@ -24,7 +33,7 @@ export function createProjectReader(projectRoot: string): ProjectLister {
       const normalized = (dir || '.').replaceAll('\\', '/');
       const parts = normalized.split('/');
       if (!isSafeProjectPath(dir || '.')) {
-        throw new Error('不允许读取该路径');
+        throw new UnsafeProjectPathError('不允许读取该路径');
       }
       let root: string;
       try { root = await realpath(projectRoot); }
@@ -37,12 +46,12 @@ export function createProjectReader(projectRoot: string): ProjectLister {
           current = path.join(current, part);
           const stat = await lstat(current);
           signal?.throwIfAborted();
-          if (stat.isSymbolicLink()) throw new Error('不允许读取符号链接');
+          if (stat.isSymbolicLink()) throw new UnsafeProjectPathError('不允许读取符号链接');
         }
         const resolved = await realpath(current);
         signal?.throwIfAborted();
         const relative = path.relative(root, resolved);
-        if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) throw new Error('不允许读取项目外文件');
+        if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) throw new UnsafeProjectPathError('不允许读取项目外文件');
         if (options?.maxEntries !== undefined && (!Number.isSafeInteger(options.maxEntries) || options.maxEntries < 0)) throw new Error('目录条目上限必须为非负整数');
         const directory = await opendir(current);
         const entries: ProjectEntry[] = [];
@@ -79,7 +88,7 @@ export function createProjectReader(projectRoot: string): ProjectLister {
       const normalized = file.replaceAll('\\', '/');
       const parts = normalized.split('/');
       if (!isSafeProjectPath(file)) {
-        throw new Error('不允许读取该路径');
+        throw new UnsafeProjectPathError('不允许读取该路径');
       }
       let root: string;
       try {
@@ -96,13 +105,13 @@ export function createProjectReader(projectRoot: string): ProjectLister {
           current = path.join(current, part);
           const stat = await lstat(current);
           signal?.throwIfAborted();
-          if (stat.isSymbolicLink()) throw new Error('不允许读取符号链接');
+          if (stat.isSymbolicLink()) throw new UnsafeProjectPathError('不允许读取符号链接');
         }
         const resolved = await realpath(current);
         signal?.throwIfAborted();
         const relative = path.relative(root, resolved);
         if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
-          throw new Error('不允许读取项目外文件');
+          throw new UnsafeProjectPathError('不允许读取项目外文件');
         }
         const flags = constants.O_RDONLY | (constants.O_NONBLOCK ?? 0) | (constants.O_NOFOLLOW ?? 0);
         const handle = await open(current, flags);

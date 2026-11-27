@@ -6,10 +6,10 @@ import type { EditorHost } from '../io/editor';
 import type { ReadonlyReviewContext, ReviewSession } from '../io/session';
 
 export type ProfileRowStatus = ApprovalState | 'missing' | 'invalid';
-export interface ProfileRow { name: ProfileFile; status: ProfileRowStatus; error?: string; details: string[] }
+export interface ProfileRow { name: ProfileFile; status: ProfileRowStatus; by?: string; error?: string; details: string[] }
 export interface ProfileOverview { rows: ProfileRow[]; crossCheck?: string }
 
-export async function loadProfileOverview(session: ReadonlyReviewContext): Promise<ProfileOverview> {
+export async function loadProfileOverview(session: ReadonlyReviewContext, only?: readonly ProfileFile[]): Promise<ProfileOverview> {
   // 详情随已有受跟踪加载一起完成，Enter 不再发起后台读盘。
   const rows: ProfileRow[] = [];
   for (const file of await readProfileFiles(session.artifacts)) {
@@ -21,14 +21,21 @@ export async function loadProfileOverview(session: ReadonlyReviewContext): Promi
       rows.push({ name: file.name, status: 'invalid', error: file.error, details: ['不合法，不能确认；以下为原文', file.error, ...safe.split(/\r?\n/)] });
       continue;
     }
-    rows.push({ name: file.name, status: session.approvals.state('profile', file.name, file.value), details: ['审批载荷（含 schema 默认值）', ...YAML.stringify(file.value, { lineWidth: 0 }).split('\n')] });
+    const status = session.approvals.state('profile', file.name, file.value);
+    const by = status === 'approved' ? session.approvals.record('profile', file.name)?.by : undefined;
+    rows.push({
+      name: file.name, status,
+      ...(by !== undefined ? { by } : {}),
+      details: ['审批载荷（含 schema 默认值）', ...YAML.stringify(file.value, { lineWidth: 0 }).split('\n')],
+    });
   }
   let crossCheck: string | undefined;
   if (rows.every((row) => row.status === 'approved')) {
     try { await loadProfile(session.artifacts); }
     catch (error) { crossCheck = error instanceof Error ? error.message : String(error); }
   }
-  return { rows, crossCheck };
+  // 筛选仅影响展示；是否执行跨文件校验始终由全部七份画像的确认状态决定。
+  return { rows: only ? rows.filter((row) => only.includes(row.name)) : rows, crossCheck };
 }
 
 export async function approveProfileFile(session: ReviewSession, name: ProfileFile): Promise<string> {
@@ -51,10 +58,10 @@ export async function editProfileFile(session: ReviewSession, editor: EditorHost
   const initial = await session.artifacts.readBytes(rel);
   const outcome = await editValidated(editor, initial?.toString('utf8') ?? '', (text) => parseYamlWith(text, PROFILE_SCHEMAS[name] as z.ZodType));
   if (outcome.status === 'cancelled') return '未修改';
-  await session.mutate(async () => {
+  await session.mutate(async (_approvals, stageWrite) => {
     const current = await session.artifacts.readBytes(rel);
     if (current?.toString('utf8') !== initial?.toString('utf8')) throw new Error(`${name} 在编辑期间已变化，请重新编辑`);
-    await session.artifacts.writeBytes(rel, Buffer.from(outcome.text));
+    stageWrite('profile', name, () => session.artifacts.writeBytes(rel, Buffer.from(outcome.text)));
   });
   return `已保存 ${name}`;
 }

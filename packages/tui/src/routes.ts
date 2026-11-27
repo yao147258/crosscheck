@@ -1,9 +1,10 @@
 import type { Key } from 'ink';
+import type { ProfileFile } from '@crosscheck/core';
 
 export type Route =
   | { name: 'home' }
   | { name: 'notes' }
-  | { name: 'profile' }
+  | { name: 'profile'; only?: ProfileFile[] }
   | { name: 'modules'; kind: 'clauses' | 'cases' }
   | { name: 'clauses'; module: string }
   | { name: 'cases'; module: string }
@@ -19,10 +20,10 @@ export function navKey(input: string, key: Key, nav: Nav): boolean {
   return false;
 }
 
-export function initialRoute(view?: ReviewView, module?: string, runId?: string): Route {
+export function initialRoute(view?: ReviewView, module?: string, runId?: string, only?: ProfileFile[]): Route {
   switch (view) {
     case 'notes': return { name: 'notes' };
-    case 'profile': return { name: 'profile' };
+    case 'profile': return only?.length ? { name: 'profile', only } : { name: 'profile' };
     case 'clauses': return module ? { name: 'clauses', module } : { name: 'modules', kind: 'clauses' };
     case 'cases': return module ? { name: 'cases', module } : { name: 'modules', kind: 'cases' };
     case 'results': return runId ? { name: 'results', runId } : { name: 'runs' };

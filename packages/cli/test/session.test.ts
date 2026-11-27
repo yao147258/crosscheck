@@ -4,6 +4,7 @@ import path from 'node:path';
 import { afterEach } from 'vitest';
 import { APICallError } from 'ai';
 import { ReviewSession, approveClause } from '@crosscheck/tui';
+import { AUTO_REVIEWER, readProfileFile } from '@crosscheck/core';
 import { clause } from '../../tui/test/fixture';
 import { scriptedModel } from '../../agent/src/testing/scripted-model';
 import { cleanupProjects, createProject } from '../../tui/test/fixture';
@@ -160,6 +161,31 @@ it('status 指令读取指定项目状态且拒绝无效参数', async () => {
   expect(result.lines.join('\n')).toContain('待审核');
   expect(result.lines.join('\n')).toContain('上一次测试');
   expect(await dispatch(['status', '--unknown'], signal)).toMatchObject({ kind: 'log', code: 2 });
+});
+
+it('status 保留摘要，只列当前已确认画像及可见转义后的确认人，不改写记录', async () => {
+  const { root, artifacts, session } = await createProject();
+  const reviewer = String.fromCodePoint(0x202e, 0x200d, 0xe0001) + '\\u000a人\n名\r\t\x1b\x7f\x9b\u2028末';
+  await session.mutate(async (approvals) => {
+    for (const [name, by] of [['pages.yaml', AUTO_REVIEWER], ['auth.yaml', reviewer], ['guardrails.yaml', '旧确认人']] as const) {
+      const file = await readProfileFile(artifacts, name);
+      if (!file.present || !file.ok) throw new Error(`画像无效：${name}`);
+      approvals.approve('profile', name, file.value, by);
+    }
+  });
+  await artifacts.writeYaml('system/guardrails.yaml', { allowedHosts: ['localhost:40000'] });
+  const before = await artifacts.readBytes('approvals.json');
+  const result = await createSlashDispatcher({ env: { CROSSCHECK_REVIEWER: 'auto' } })(['status', '--project', root], new AbortController().signal);
+  expect(result).toMatchObject({ kind: 'log', code: 0 });
+  if (result.kind !== 'log') throw new Error('状态命令应返回日志');
+  expect(result.lines).toEqual(expect.arrayContaining([
+    expect.stringContaining('当前阶段'), expect.stringContaining('画像：5 / 7'), expect.stringContaining('上一次测试'),
+    expect.stringMatching(/pages\.yaml.*auto/),
+    expect.stringContaining('\\u202e\\u200d\\u{e0001}\\\\u000a人\\u000a名\\u000d\\u0009\\u001b\\u007f\\u009b\\u2028末'),
+  ]));
+  expect(result.lines.find((line) => line.includes('auth.yaml'))).toContain('人\\u000a名');
+  expect(result.lines.join('\n')).not.toMatch(/guardrails\.yaml|fixtures\.yaml|旧确认人|[\r\t\x1b\x7f\x9b\u2028]/);
+  expect(await artifacts.readBytes('approvals.json')).toEqual(before);
 });
 
 it('会话命令清单覆盖全部斜杠命令且带描述', () => {

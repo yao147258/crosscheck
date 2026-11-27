@@ -2,8 +2,8 @@ import { Approvals, ArtifactStore, BudgetTracker, clauseDuplicateKey, mergeDraft
 import { extractRequirements } from '@crosscheck/requirements';
 import type { CliArgs } from './args';
 import { loadModelContext, resolveModels, withInterrupt, type CommandDependencies } from './context';
-import { createDiskDocLister, createProjectReader, expandRequirementDocs } from '@crosscheck/discovery';
-import { readRequirementDocuments, resolveRequirementEntries } from './documents';
+import { createDiskDocLister, createProjectReader, expandRequirementDocs, walkProject } from '@crosscheck/discovery';
+import { autoNotesDocsGuidance, expandAutoNotesDocs, readRequirementDocuments, resolveRequirementEntries } from './documents';
 
 export async function reqsCommand(args: CliArgs, log: (s: string) => void, deps: CommandDependencies = {}, signal?: AbortSignal): Promise<number> {
   return withInterrupt(signal, async (sig) => {
@@ -13,17 +13,35 @@ export async function reqsCommand(args: CliArgs, log: (s: string) => void, deps:
     const { config, redactor } = context;
     sig.throwIfAborted();
     const resolved = await resolveRequirementEntries(artifacts, config.requirementsDocs);
+    sig.throwIfAborted();
     if (!resolved.ok) { log(resolved.message); return 2; }
     let files: string[];
     try {
-      files = await expandRequirementDocs(resolved.entries, createDiskDocLister(createProjectReader(args.project), (line) => log(redactor.text(line))), sig);
+      if (resolved.from === 'auto-notes') {
+        const previous = new Set(resolved.allowed);
+        const registered = new Set<string>();
+        const walk = await walkProject(args.project, { signal: sig, onRegisteredPath: (file) => { if (previous.has(file)) registered.add(file); } });
+        if (walk.diagnostics.length) throw new Error('项目扫描不完整');
+        files = await expandAutoNotesDocs(args.project, resolved.entries, registered, sig);
+        if (files.length !== previous.size) throw new Error('需求文档目录内容已变化');
+      } else {
+        files = await expandRequirementDocs(resolved.entries, createDiskDocLister(createProjectReader(args.project), (line) => log(redactor.text(line))), sig);
+      }
     } catch (error) {
       sig.throwIfAborted();
-      log(redactor.text(error instanceof Error ? error.message : '需求文档展开失败'));
+      const message = error instanceof Error ? error.message : '需求文档展开失败';
+      log(redactor.text(resolved.from === 'auto-notes' ? autoNotesDocsGuidance(message) : message));
       return 2;
     }
     log(`需求文档来源：${resolved.from === 'config' ? 'config.yaml' : '已确认笔记'}，共 ${files.length} 个文件`);
-    const documents = await readRequirementDocuments(args.project, files, sig);
+    let documents: Awaited<ReturnType<typeof readRequirementDocuments>>;
+    try { documents = await readRequirementDocuments(args.project, files, sig); }
+    catch (error) {
+      if (resolved.from !== 'auto-notes') throw error;
+      sig.throwIfAborted();
+      log(redactor.text(autoNotesDocsGuidance(error instanceof Error ? error.message : '文档无法读取')));
+      return 2;
+    }
     const approvals = await Approvals.load(artifacts);
     const { approved } = partitionClauses(await artifacts.loadClauses(module), approvals);
     sig.throwIfAborted();

@@ -1,4 +1,4 @@
-import { DispositionsFileSchema, type ExpectationStatus, type RunManifest } from '@crosscheck/core';
+import { DispositionsFileSchema, type ExpectationStatus, type ProfileFile, type RunManifest } from '@crosscheck/core';
 import { loadReportData } from '@crosscheck/report';
 import { RunStore } from '@crosscheck/runner';
 import type { ReadonlyReviewContext } from '../io/session';
@@ -15,7 +15,14 @@ export type LatestRunStatus =
   | { state: 'incomplete'; runId: string; start: string; status: RunManifest['status']; error: string }
   | { state: 'corrupt'; runId: string; start?: string; status?: RunManifest['status']; error: string }
   | { state: 'ready'; runId: string; start: string; status: RunManifest['status']; resultStatus: ExpectationStatus; counts: Record<ExpectationStatus, number>; pendingDispositions: number };
-export interface ProjectStatus { stage: StatusStage; profile: StatusCount; clauses: StatusCount; cases: StatusCount; latestRun: LatestRunStatus }
+export interface ProjectStatus {
+  stage: StatusStage;
+  profile: StatusCount;
+  approvedProfiles: { name: ProfileFile; by: string }[];
+  clauses: StatusCount;
+  cases: StatusCount;
+  latestRun: LatestRunStatus;
+}
 
 const message = (error: unknown): string => error instanceof Error ? error.message : String(error);
 
@@ -77,12 +84,14 @@ async function loadLatestRun(session: ReadonlyReviewContext): Promise<LatestRunS
 /** 仅读取现有工件；统计不可用时使用 null，避免把损坏数据解释为零。 */
 export async function loadStatus(session: ReadonlyReviewContext): Promise<ProjectStatus> {
   let profile: StatusCount;
+  let approvedProfiles: ProjectStatus['approvedProfiles'] = [];
   try {
     const overview = await loadProfileOverview(session);
     const issues: StatusIssue[] = overview.rows.flatMap((row) => row.status === 'missing' || row.status === 'invalid'
       ? [{ state: row.status === 'missing' ? 'missing' as const : 'corrupt' as const, location: `system/${row.name}`, message: row.error ?? '画像文件缺失' }] : []);
     if (overview.crossCheck) issues.push({ state: 'incomplete', location: 'system', message: overview.crossCheck });
     profile = { total: overview.rows.length, pending: overview.rows.filter((row) => row.status !== 'approved').length, issues };
+    approvedProfiles = overview.rows.flatMap(({ name, status, by }) => status === 'approved' && by !== undefined ? [{ name, by }] : []);
   } catch (error) { profile = { total: null, pending: null, issues: [{ state: 'corrupt', location: 'system', message: message(error) }] }; }
   const clauses = await loadCounts(session, 'clauses');
   const cases = await loadCounts(session, 'cases');
@@ -109,5 +118,5 @@ export async function loadStatus(session: ReadonlyReviewContext): Promise<Projec
   const latestRun = await loadLatestRun(session);
   const incomplete = (count: StatusCount) => !count.total || count.pending !== 0 || count.issues.length > 0;
   const stage: StatusStage = incomplete(profile) ? 'profile' : incomplete(clauses) ? 'clauses' : incomplete(cases) ? 'cases' : latestRun.state === 'ready' ? 'results' : 'run';
-  return { stage, profile, clauses, cases, latestRun };
+  return { stage, profile, approvedProfiles, clauses, cases, latestRun };
 }

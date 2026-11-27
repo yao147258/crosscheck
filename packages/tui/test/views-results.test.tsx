@@ -59,6 +59,19 @@ describe('运行列表与结果审核', () => {
     await waitFor(() => frame(ui).includes('选择运行'));
   });
 
+  it('结果详情可见转义历史裁决确认人，不让换行切断确认人行', async () => {
+    const { project, runId } = await createFailedRun();
+    await project.artifacts.writeJson(`runs/${runId}/dispositions.json`, { version: 1, runId, items: [{
+      caseId: 'M-TC-1', expectationId: 'E1', decision: 'false_positive', note: '', by: '历史\n人\x1b', at: '2026-11-16T00:00:00.000Z',
+    }] });
+    const ui = render(<App env={{ session: project.session, editor, open }} initial={{ name: 'results', runId }} />);
+    resize(ui, 140, 60);
+    await ready(ui);
+    ui.stdin.write(KEYS.enter);
+    await waitFor(() => frame(ui).includes('完整详情 · M-TC-1/E1'));
+    expect(frame(ui)).toContain('确认人：历史\\u000a人\\u001b');
+  });
+
   it('运行列表倒序、窗口化、空态和加载错误可返回', async () => {
     const { session, artifacts } = await createProject();
     const ui = render(<App env={{ session, editor, open }} initial={{ name: 'runs' }} />);

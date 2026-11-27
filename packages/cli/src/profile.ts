@@ -1,7 +1,7 @@
 import { Approvals, ArtifactStore, BudgetTracker, decodeNotesUtf8, PROFILE_FILES, PROFILE_SCHEMAS, ProjectConfigSchema, readProfileFiles, type ProfileFile } from '@crosscheck/core';
 import { discover, exploreProject, openApiPlugin, staticScanPlugin, synthesizeProfile, walkProject, type DiscoveryFact } from '@crosscheck/discovery';
 import { sanitizeContext } from '@crosscheck/discovery/sanitize';
-import { NOTES_FILE } from './init';
+import { NOTES_FILE } from './notes-path';
 import type { CliArgs } from './args';
 import { loadModelContext, resolveModels, withCliProgress, withInterrupt, type CommandDependencies } from './context';
 
@@ -26,7 +26,7 @@ export async function profileCommand(args: CliArgs, log: (s: string) => void, de
     catch { log('notes.md 不是有效的 UTF-8，请修复后重新审核'); return 2; }
     sig.throwIfAborted();
     if (notes === undefined || approvals.state('notes', 'project', notes) !== 'approved') {
-      log('项目笔记尚未确认，请先运行 crosscheck init 和 crosscheck review notes');
+      log('项目笔记尚未确认；可运行 crosscheck init 自动确认，或在手工编辑后运行 crosscheck review notes 确认');
       return 2;
     }
     const context = await loadModelContext(artifacts, deps);

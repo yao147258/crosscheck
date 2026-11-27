@@ -1,4 +1,4 @@
-import type { ArtifactStore } from '@crosscheck/core';
+import type { ArtifactStore, ProfileFile } from '@crosscheck/core';
 import { render } from 'ink';
 import { createElement } from 'react';
 import { App } from './app';
@@ -14,6 +14,7 @@ export * from './io/session';
 export * from './io/editor';
 export * from './io/edit-loop';
 export * from './io/opener';
+export { escapeTerminalLine } from './io/terminal';
 export * from './state/profile';
 export * from './state/notes';
 export * from './state/clauses';
@@ -30,6 +31,7 @@ export interface RunReviewOptions {
   view?: ReviewView;
   module?: string;
   runId?: string;
+  only?: ProfileFile[];
   signal?: AbortSignal;
 }
 
@@ -39,7 +41,7 @@ export async function runReview(options: RunReviewOptions): Promise<number> {
   if (options.signal?.aborted) return 2;
   const instance = render(createElement(App, {
     env: { session, editor: options.editor, open: options.open, signal: options.signal },
-    initial: initialRoute(options.view, options.module, options.runId),
+    initial: initialRoute(options.view, options.module, options.runId, options.only),
   }), { exitOnCtrlC: false });
   try {
     const result = await instance.waitUntilExit();

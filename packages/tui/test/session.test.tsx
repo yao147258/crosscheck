@@ -1,6 +1,6 @@
 import { cleanup, render } from 'ink-testing-library';
 import { afterEach, expect, it, vi } from 'vitest';
-import { Approvals, loadProfile } from '@crosscheck/core';
+import { Approvals, loadProfile, readProfileFile } from '@crosscheck/core';
 import { sessionSlashCommands, tokenizeCommand } from '../../cli/src/session';
 import { ReviewSession } from '../src/io/session';
 import { SessionApp, type RunSessionOptions } from '../src/session';
@@ -214,6 +214,66 @@ it('审核退出返回聊天并重新解析会话', async () => {
   await waitFor(() => resolveReview.mock.calls.length === 2);
 });
 
+it('进入审核只显示筛选的画像，并在返回时保留进入前的命令日志', async () => {
+  const { session, root } = await createProject();
+  const options: RunSessionOptions = {
+    tokenize: text => [text],
+    runSlashCommand: async () => ({ kind: 'review', args: { project: root, view: 'profile', only: ['auth.yaml'] }, lines: ['画像准备完毕', '请确认剩余画像'] }),
+    resolveReview: async () => ({ session, editor, open }),
+    chatReply: async () => '',
+  };
+  const ui = render(<SessionApp options={options} />);
+  ui.stdin.write('/review'); ui.stdin.write(KEYS.enter);
+  await waitFor(() => frame(ui).includes('auth.yaml'));
+  expect(frame(ui)).not.toContain('environments.yaml');
+  ui.stdin.write('q');
+  await waitFor(() => frame(ui).includes('AI Agent Command Line Client'));
+  expect(frame(ui)).toContain('画像准备完毕\n请确认剩余画像');
+});
+
+it('会话筛选审核交叉校验失败后可直接打开完整画像审核', async () => {
+  const { session, root, artifacts } = await createProject();
+  await artifacts.writeYaml('system/fixtures.yaml', { version: 1, fixtures: { bad: { kind: 'http', operation: 'missing' } } });
+  await session.mutate(async (approvals) => {
+    for (const name of ['environments.yaml', 'auth.yaml', 'api-catalog.yaml', 'pages.yaml', 'data-model.yaml', 'fixtures.yaml', 'guardrails.yaml'] as const) {
+      const file = await readProfileFile(artifacts, name);
+      if (!file.present || !file.ok) throw new Error(`画像无效：${name}`);
+      approvals.approve('profile', name, file.value, name === 'api-catalog.yaml' ? 'auto' : '人工');
+    }
+  });
+  const ui = render(<SessionApp options={{
+    tokenize: text => [text],
+    runSlashCommand: async () => ({ kind: 'review', args: { project: root, view: 'profile', only: ['fixtures.yaml'] } }),
+    resolveReview: async () => ({ session, editor, open }),
+    chatReply: async () => '',
+  }} />);
+  ui.stdin.write('/init'); ui.stdin.write(KEYS.enter);
+  await waitFor(() => frame(ui).includes('交叉校验未通过'));
+  expect(frame(ui)).not.toContain('api-catalog.yaml');
+  ui.stdin.write('f');
+  await waitFor(() => /api-catalog\.yaml\s+已确认.*auto/.test(frame(ui)));
+  ui.stdin.write('q');
+  await waitFor(() => frame(ui).includes('AI Agent Command Line Client'));
+});
+
+it('画像审核列表与页首可见转义确认人的换行和控制字符', async () => {
+  const { root, artifacts } = await createProject();
+  const session = await ReviewSession.open(artifacts, '当前\n人\x1b');
+  const file = await readProfileFile(artifacts, 'auth.yaml');
+  if (!file.present || !file.ok) throw new Error('画像无效');
+  await session.mutate((approvals) => approvals.approve('profile', 'auth.yaml', file.value, '历史\n人\x1b'));
+  const ui = render(<SessionApp options={{
+    tokenize: text => [text],
+    runSlashCommand: async () => ({ kind: 'review', args: { project: root, view: 'profile' } }),
+    resolveReview: async () => ({ session, editor, open }),
+    chatReply: async () => '',
+  }} />);
+  ui.stdin.write('/review'); ui.stdin.write(KEYS.enter);
+  await waitFor(() => frame(ui).includes('auth.yaml'));
+  expect(frame(ui)).toContain('确认人 当前\\u000a人\\u001b');
+  expect(frame(ui)).toMatch(/auth\.yaml.*历史\\u000a人\\u001b/);
+});
+
 it('外部取消等待审核写盘完成后才退出', async () => {
   const { session, artifacts, root } = await createProject();
   const gate = deferred<void>(), entered = deferred<void>();
@@ -412,7 +472,7 @@ it('真实命令清单中 /profile 可提示、补全并提交', async () => {
   const ui = render(<SessionApp options={options} />);
   await mounted();
   ui.stdin.write('/pro');
-  await waitFor(() => frame(ui).includes('/profile 根据已确认笔记生成画像草稿'));
+  await waitFor(() => frame(ui).includes('/profile 单独重新生成画像草稿（需已确认笔记）'));
   ui.stdin.write(KEYS.tab);
   await waitFor(() => frame(ui).includes('> /profile'));
   ui.stdin.write(KEYS.enter);

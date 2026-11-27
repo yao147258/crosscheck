@@ -267,6 +267,53 @@ describe('失败与一致性边界', () => {
     expect((await loadClauseRows(await ReviewSession.open(artifacts, '测试人'), 'M'))[0]?.approval).toBe('stale');
   });
 
+  it.each(['删除条款', '标记条款', '删除用例'] as const)('%s 遇到跨会话确认冲突时不写工件', async (action) => {
+    const { session, artifacts } = await createProject();
+    await artifacts.saveClauses('M', [clause(1)]);
+    await artifacts.saveCases('M', [testCase(1, ['M-AC-1'])]);
+    const other = await ReviewSession.open(artifacts, '另一确认人');
+    await approveClause(other, 'M', 'M-AC-1');
+    if (action === '删除用例') await approveCase(other, 'M', 'M-TC-1');
+    const before = await artifacts.readBytes('approvals.json');
+    const target = action === '删除用例' ? 'cases/M.yaml' : 'requirements/M.yaml';
+    const original = await artifacts.readBytes(target);
+    const result = action === '删除条款' ? deleteClause(session, 'M', 'M-AC-1')
+      : action === '标记条款' ? markClauseUnclear(session, 'M', 'M-AC-1') : deleteCase(session, 'M', 'M-TC-1');
+    await expect(result).rejects.toThrow(/确认记录.*变化/);
+    expect(await artifacts.readBytes(target)).toEqual(original);
+    expect(await artifacts.readBytes('approvals.json')).toEqual(before);
+  });
+
+  it('读取用例期间的确认冲突也在删除写盘前拒绝', async () => {
+    const { session, artifacts } = await createProject();
+    await artifacts.saveClauses('M', [clause(1)]);
+    await artifacts.saveCases('M', [testCase(1, ['M-AC-1'])]);
+    await approveClause(session, 'M', 'M-AC-1');
+    const other = await ReviewSession.open(artifacts, '另一确认人');
+    const read = artifacts.loadCases.bind(artifacts);
+    vi.spyOn(artifacts, 'loadCases').mockImplementationOnce(async (module) => {
+      const original = await read(module);
+      await approveCase(other, module, 'M-TC-1');
+      return original;
+    });
+    await expect(deleteCase(session, 'M', 'M-TC-1')).rejects.toThrow(/确认记录.*变化/);
+    expect(await read('M')).toEqual([testCase(1, ['M-AC-1'])]);
+    expect((await Approvals.load(artifacts)).record('case', 'M-TC-1')?.by).toBe('另一确认人');
+  });
+
+  it('编辑画像期间若目标被确认，则保留文件和人工确认', async () => {
+    const { session, artifacts } = await createProject();
+    const other = await ReviewSession.open(artifacts, '另一确认人');
+    const before = await artifacts.readBytes('system/guardrails.yaml');
+    const editor: EditorHost = { async edit(text) {
+      await approveProfileFile(other, 'guardrails.yaml');
+      return text.replace('39999', '4000');
+    } };
+    await expect(editProfileFile(session, editor, 'guardrails.yaml')).rejects.toThrow(/确认记录.*变化/);
+    expect(await artifacts.readBytes('system/guardrails.yaml')).toEqual(before);
+    expect((await Approvals.load(artifacts)).record('profile', 'guardrails.yaml')?.by).toBe('另一确认人');
+  });
+
   it.each(['clause', 'case', 'profile'] as const)('%s 编辑失败不保存工件，也不改确认', async (kind) => {
     const { session, artifacts } = await createProject();
     await artifacts.saveClauses('M', [clause(1)]);

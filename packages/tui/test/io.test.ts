@@ -29,6 +29,34 @@ describe('ReviewSession', () => {
     await session.mutate((a) => a.approve('clause', 'M-AC-1', { x: 1 }, session.reviewer));
     expect((await ReviewSession.open(store, '张三')).approvals.state('clause', 'M-AC-1', { x: 1 })).toBe('approved');
   });
+  it('跨会话修改保留新确认和撤销的不同条目', async () => {
+    const store = await artifacts();
+    const first = await ReviewSession.open(store, '甲');
+    await first.mutate((a) => a.approve('profile', 'pages.yaml', {}, '甲'));
+    const second = await ReviewSession.open(store, '乙');
+    await second.mutate((a) => {
+      a.revoke('profile', 'pages.yaml');
+      a.approve('profile', 'api-catalog.yaml', {}, '乙');
+    });
+    await first.mutate((a) => a.approve('profile', 'auth.yaml', {}, '甲'));
+    const latest = (await ReviewSession.open(store, '甲')).approvals;
+    expect(latest.record('profile', 'pages.yaml')).toBeUndefined();
+    expect(latest.record('profile', 'api-catalog.yaml')?.by).toBe('乙');
+    expect(latest.record('profile', 'auth.yaml')?.by).toBe('甲');
+  });
+  it.each([false, true])('拒绝覆盖同条目人工更改（发生于动作中：%s）', async (during) => {
+    const store = await artifacts();
+    const first = await ReviewSession.open(store, '甲');
+    const second = await ReviewSession.open(store, '乙');
+    const otherApproval = () => second.mutate((a) => a.approve('profile', 'pages.yaml', {}, '乙'));
+    if (!during) await otherApproval();
+    await expect(first.mutate(async (a) => {
+      a.revoke('profile', 'pages.yaml');
+      if (during) await otherApproval();
+    })).rejects.toThrow(/确认记录.*变化/);
+    expect((await ReviewSession.open(store, '甲')).approvals.record('profile', 'pages.yaml')?.by).toBe('乙');
+    expect(first.approvals.record('profile', 'pages.yaml')?.by).toBe('乙');
+  });
   it('变更失败时丢弃内存中的半成品', async () => {
     const session = await ReviewSession.open(await artifacts(), '张三');
     await expect(session.mutate((a) => {
@@ -87,8 +115,8 @@ describe('ReviewSession', () => {
       if (rel === 'approvals.json') throw new Error('确认落盘失败');
       await writeJson(rel, data);
     });
-    await expect(session.mutate(async (a) => {
-      await store.writeJson('item.json', { x: 2 });
+    await expect(session.mutate((a, stageWrite) => {
+      stageWrite('clause', 'M-AC-1', () => store.writeJson('item.json', { x: 2 }));
       a.approve('clause', 'M-AC-1', { x: 2 }, '张三');
     })).rejects.toThrow('确认落盘失败');
     expect(JSON.parse((await store.readBytes('item.json'))!.toString())).toEqual({ x: 2 });

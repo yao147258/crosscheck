@@ -46,12 +46,12 @@ export async function editNotes(session: ReviewSession, editor: EditorHost): Pro
     return result.success ? { ok: true, value: result.data } : { ok: false, error: z.prettifyError(result.error) };
   });
   if (outcome.status === 'cancelled') return '未修改';
-  await session.mutate(async () => {
+  await session.mutate(async (_approvals, stageWrite) => {
     const current = await session.artifacts.readBytes(NOTES_FILE);
     if (initial === undefined ? current !== undefined : current === undefined || !current.equals(initial)) {
       throw new Error('notes.md 在编辑期间已变化，请重新编辑');
     }
-    await session.artifacts.writeBytes(NOTES_FILE, Buffer.from(outcome.text));
+    stageWrite('notes', NOTES_ID, () => session.artifacts.writeBytes(NOTES_FILE, Buffer.from(outcome.text)));
   });
   return '已保存 notes.md';
 }
