@@ -46,7 +46,7 @@ it('解析新命令的参数', () => {
   expect(parseArgs(['profile', '--openapi', 'a.yaml', '--openapi', 'b.yaml', '--openapi', 'a.yaml'])).toMatchObject({ command: 'profile', openapi: ['a.yaml', 'b.yaml'] });
   expect(parseArgs(['init', '--refresh'])).toMatchObject({ command: 'init', refresh: true });
   expect(parseArgs(['review', 'notes'])).toMatchObject({ view: 'notes' });
-  expect(() => parseArgs(['init', '--openapi', 'a.yaml'])).toThrow();
+  expect(parseArgs(['init', '--openapi', 'a.yaml'])).toMatchObject({ command: 'init', openapi: ['a.yaml'] });
   expect(parseArgs(['reqs', '--module', 'M09'])).toMatchObject({ command: 'reqs', modules: ['M09'] });
   expect(parseArgs(['plan', '--module', 'M09', '--project', 'p'])).toMatchObject({ command: 'plan', modules: ['M09'], project: 'p' });
   expect(parseArgs(['review'])).toMatchObject({ command: 'review' });

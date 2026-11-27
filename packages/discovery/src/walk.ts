@@ -1,4 +1,4 @@
-import { createProjectReader, isCredential } from './files';
+import { createProjectReader, isCredential, isSafeProjectPath } from './files';
 import { sanitize } from './sanitize';
 
 export const WALK_LIMITS = { maxFiles: 2000, maxDirectories: 2000, maxEntries: 10000, maxDepth: 32 } as const;
@@ -7,6 +7,16 @@ export const DEFAULT_IGNORES = ['node_modules', '.git', '.crosscheck', 'dist', '
 /** path 为已脱敏的相对路径；内容由模型通过只读工具按需读取。 */
 export interface FileEntry { path: string; bytes: number }
 export interface WalkResult { files: FileEntry[]; diagnostics: string[] }
+
+interface WalkOptions {
+  maxFiles?: number;
+  maxDirectories?: number;
+  maxEntries?: number;
+  maxDepth?: number;
+  signal?: AbortSignal;
+  /** 仅供宿主校验登记，不传给模型；没有经过展示路径脱敏。 */
+  onRegisteredPath?: (path: string) => void;
+}
 
 /** 仅实现名称、路径前缀、星号和根锚定的有限子集，并非完整 Git 语义；忽略取反规则。默认 Windows 不区分大小写，其他平台区分。 */
 export function parseGitignore(text: string, options: { caseSensitive?: boolean } = {}): (relative: string, isDirectory: boolean) => boolean {
@@ -25,7 +35,7 @@ export function parseGitignore(text: string, options: { caseSensitive?: boolean 
   };
 }
 
-export async function walkProject(projectRoot: string, options: { maxFiles?: number; maxDirectories?: number; maxEntries?: number; maxDepth?: number; signal?: AbortSignal } = {}): Promise<WalkResult> {
+export async function walkProject(projectRoot: string, options: WalkOptions = {}): Promise<WalkResult> {
   const limits = { ...WALK_LIMITS, ...options };
   for (const value of [limits.maxFiles, limits.maxDirectories, limits.maxEntries, limits.maxDepth]) {
     if (!Number.isSafeInteger(value) || value < 0) throw new Error('遍历上限必须为非负整数');
@@ -68,7 +78,10 @@ export async function walkProject(projectRoot: string, options: { maxFiles?: num
         continue;
       }
       if (result.files.length >= limits.maxFiles) { overflow = true; break; }
-      result.files.push({ path: sanitize(relative), bytes: entry.size });
+      const displayed = sanitize(relative);
+      result.files.push({ path: displayed, bytes: entry.size });
+      // 脱敏后变成其他文件名的路径既不可作为原文件访问，也不能为别名提供授权。
+      if (displayed === relative && isSafeProjectPath(relative)) options.onRegisteredPath?.(relative);
     }
     if (entriesTruncated) break;
   }

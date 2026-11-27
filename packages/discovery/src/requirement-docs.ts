@@ -1,5 +1,6 @@
 import path from 'node:path';
 import { isSafeProjectPath } from './files';
+import { WALK_LIMITS } from './walk';
 import type { ProjectLister } from './types';
 
 export const REQUIREMENT_DOC_LIMITS = { maxDepth: 8, maxFiles: 100 } as const;
@@ -21,18 +22,37 @@ function isAbsoluteEntry(entry: string): boolean {
 }
 
 /** 磁盘来源：递归列目录，跳过符号链接、不安全路径与忽略目录；深度到上限后不再下探。 */
-export function createDiskDocLister(reader: ProjectLister, onDiagnostic?: (message: string) => void): DocDirLister {
+export function createDiskDocLister(reader: ProjectLister, onDiagnostic?: (message: string) => void, options: { strict?: boolean } = {}): DocDirLister {
+  let seen = 0;
+  const diagnostic = (message: string) => {
+    if (options.strict) throw new Error(message);
+    onDiagnostic?.(message);
+  };
   return async (dir, signal) => {
     const files: string[] = [];
     const walk = async (current: string, depth: number): Promise<void> => {
       signal?.throwIfAborted();
-      const entries = await reader.list(current, signal, { maxEntries: DIR_ENTRY_LIMIT, onDiagnostic });
+      const entries = await reader.list(current, signal, {
+        maxEntries: options.strict ? Math.min(DIR_ENTRY_LIMIT, WALK_LIMITS.maxEntries - seen) : DIR_ENTRY_LIMIT,
+        onEntry: options.strict ? () => { seen++; } : undefined,
+        onDiagnostic: diagnostic,
+      });
       for (const entry of entries) {
         const child = `${current}/${entry.name}`;
-        if (entry.link) { onDiagnostic?.(`跳过符号链接：${child}`); continue; }
-        if (!isSafeProjectPath(child)) continue;
+        if (entry.link) { diagnostic(`跳过符号链接：${child}`); continue; }
+        if (!isSafeProjectPath(child)) {
+          if (options.strict) diagnostic('目录包含不安全路径，无法完整展开');
+          continue;
+        }
         if (entry.type === 'directory') {
-          if (SKIPPED_DIRS.has(entry.name) || depth >= REQUIREMENT_DOC_LIMITS.maxDepth) continue;
+          if (SKIPPED_DIRS.has(entry.name)) {
+            if (options.strict) diagnostic('目录包含忽略的子目录，无法完整展开');
+            continue;
+          }
+          if (depth >= REQUIREMENT_DOC_LIMITS.maxDepth) {
+            if (options.strict) diagnostic('需求文档目录超过深度上限');
+            continue;
+          }
           await walk(child, depth + 1);
         } else files.push(child);
       }

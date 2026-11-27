@@ -1,3 +1,4 @@
+import type { ProfileFile } from '@crosscheck/core';
 import { Box, Text, render, useApp, useBoxMetrics, useCursor, useInput, useWindowSize, type DOMElement } from 'ink';
 import { createElement, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { App } from './app';
@@ -15,7 +16,7 @@ export type SlashCommandResult =
   | { kind: 'resume'; messages: ChatMessage[]; history: ChatMessage[]; activate: () => void }
   | { kind: 'exit' }
   | { kind: 'clear' }
-  | { kind: 'review'; args: { project: string; view?: ReviewView; modules?: string[]; runId?: string } }
+  | { kind: 'review'; args: { project: string; view?: ReviewView; modules?: string[]; runId?: string; only?: ProfileFile[] }; lines?: string[] }
   | { kind: 'log'; code: number; lines: string[]; cancelled?: boolean;
       /** 宿主保证这些递增索引指向固定诊断，且未混入用户或服务返回的文本。 */
       fixedDiagnosticLineIndices?: readonly number[]; truncateLineIndices?: readonly number[] };
@@ -146,6 +147,7 @@ export function SessionApp({ options }: { options: RunSessionOptions }) {
   const submit = async (text: string) => {
     if (operation.current || reviewActive.current || externalAbort.current) return;
     const controller = new AbortController();
+    let activeController = controller;
     operation.current = controller;
     setBusy(true);
     setScrollUp(0);
@@ -154,7 +156,7 @@ export function SessionApp({ options }: { options: RunSessionOptions }) {
     // 只接收本次操作的提示，操作结束后迟到的提示直接丢弃。
     const warnings = new Set<string>();
     const progress: SessionProgress = (line, kind) => {
-      if (operation.current !== controller) return;
+      if (operation.current !== activeController || (activeController !== controller && kind !== 'warning')) return;
       if (kind === 'warning') warnings.add(line);
       const lines = line.split('\n').filter((item) => item.trim());
       if (lines.length) setActivity((items) => [...items, ...lines].slice(-ACTIVITY_LINES));
@@ -166,31 +168,41 @@ export function SessionApp({ options }: { options: RunSessionOptions }) {
     let saved: SavedOperation | undefined;
     let outcome: Outcome | undefined;
     let failure: Error | undefined;
+    let reviewOutput: string | undefined;
     const safeError = (error: unknown) => saved?.normalizeError?.(error) ?? saved?.normalize(errorMessage(error)) ?? errorMessage(error);
     const slash = text.startsWith('/');
     let refresh = !slash;
     let quitting = false;
-    const finalize = async () => {
-      // 先提交已确定的业务结果，再等待账本；收尾不接受业务取消信号。
-      let committed = !saved;
-      if (saved && outcome) {
-        try { await saved.finish(outcome); committed = true; }
-        catch (error) { append('assistant', `会话结果保存失败，未加入模型历史：${saved.normalizeStoreError?.(error) ?? safeError(error)}`); }
-      }
-      if (committed && outcome?.reply !== undefined) {
-        history.current = [...history.current, { role: 'user' as const, content: saved?.input ?? text }, { role: 'assistant' as const, content: outcome.reply }].slice(-20);
-      }
+    const settleUsage = async () => {
       let usageFailed = false;
-      for (const settle of settleTasks) {
+      for (const settle of settleTasks.splice(0)) {
         try { await settle(); }
         catch { usageFailed = true; }
       }
-      if (refresh) await refreshUsage();
+      if (refresh) {
+        refresh = false;
+        await refreshUsage();
+      }
       if (usageFailed) {
         setSessionUsage(USAGE_UNAVAILABLE);
         warnings.add('用量收尾失败，本次统计不完整');
       }
       for (const warning of warnings) append('assistant', warning);
+      warnings.clear();
+    };
+    const finalize = async () => {
+      // 普通操作先归档再等账本；嵌入审核的结果直到审核返回才确定。
+      let committed = !saved;
+      if (saved && outcome) {
+        // 把最终状态放在初始化日志前，避免长日志截断时丢失状态说明。
+        const archived = reviewOutput ? { ...outcome, output: `${outcome.output}\n${reviewOutput}` } : outcome;
+        try { await saved.finish(archived); committed = true; }
+        catch (error) { append('assistant', `会话结果保存失败，未加入模型历史：${saved.normalizeStoreError?.(error) ?? safeError(error)}`); }
+      }
+      if (committed && outcome?.reply !== undefined) {
+        history.current = [...history.current, { role: 'user' as const, content: saved?.input ?? text }, { role: 'assistant' as const, content: outcome.reply }].slice(-20);
+      }
+      await settleUsage();
       reviewActive.current = false;
       operation.current = undefined;
       setBusy(false);
@@ -262,20 +274,31 @@ export function SessionApp({ options }: { options: RunSessionOptions }) {
           } else append('assistant', output);
         }
         if (result.kind === 'review') {
+          if (result.lines?.length) {
+            const output = result.lines.join('\n');
+            append('assistant', output);
+            reviewOutput = saved?.normalize(output) ?? output;
+          }
           const env = await options.resolveReview(result.args, controller.signal);
           controller.signal.throwIfAborted();
+          // 先结算用量，再让审核接管输入；收尾期间的 Ctrl+C 不撤销已完成的交接准备。
+          await settleUsage();
+          if (externalAbort.current) controller.signal.throwIfAborted();
+          const reviewController = new AbortController();
+          activeController = reviewController;
+          operation.current = reviewController;
           reviewActive.current = true;
           let closing = false;
-          setReview({ env: { ...env, signal: controller.signal, normalizeError: saved?.normalize ?? env.normalizeError }, args: result.args, close: (error, cancelled) => {
+          setReview({ env: { ...env, signal: reviewController.signal, normalizeError: saved?.normalize ?? env.normalizeError }, args: result.args, close: (error, cancelled) => {
             if (closing) return;
             closing = true;
-            const interrupted = cancelled || controller.signal.aborted;
+            const interrupted = cancelled || reviewController.signal.aborted;
             failure = error;
             const message = error ? `审核错误：${safeError(error)}` : interrupted ? '审核已取消' : '审核已结束';
             outcome = { status: error ? 'error' : interrupted ? 'cancelled' : 'success', output: message };
             setBusy(true);
             setReview(undefined);
-            if (saved || error) append('assistant', error ? outcome.output : message);
+            if (saved || error) append('assistant', message);
             void finalize();
           } });
           setBusy(false);
@@ -360,7 +383,7 @@ export function SessionApp({ options }: { options: RunSessionOptions }) {
       updateInput(inputRef.current + value);
     }
   });
-  if (review) return <App env={review.env} initial={initialRoute(review.args.view, review.args.modules?.[0], review.args.runId)} onExitToParent={review.close} />;
+  if (review) return <App env={review.env} initial={initialRoute(review.args.view, review.args.modules?.[0], review.args.runId, review.args.only)} onExitToParent={review.close} />;
   // 滚动条：按可视比例计算滑块长度，按已翻看位置计算滑块起点。
   const thumb = maxScroll > 0 ? Math.max(1, Math.round(viewport * viewport / height)) : 0;
   const thumbStart = maxScroll > 0 ? Math.round((maxScroll - offset) / maxScroll * (viewport - thumb)) : 0;

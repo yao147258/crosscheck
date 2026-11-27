@@ -1,11 +1,16 @@
-import { loadUserModelConfig, publicModelConfig, type ArtifactStore, type Config, type Role } from '@crosscheck/core';
+import { loadUserModelConfig, publicModelConfig, type ArtifactStore, type Config, type ProfileFile, type Role } from '@crosscheck/core';
 import { createEvidenceRedactor } from '@crosscheck/tools';
 import { createUsageObserver, hasProgressListener, resolveRole, withProgress, type ModelCandidate, type UsageContext, type UsageEvent, type UsageObserver } from '@crosscheck/models';
 import type { RunSuiteOptions } from '@crosscheck/runner';
 
 import type { ReviewDependencies } from './review';
 
-export type CommandDependencies = Pick<RunSuiteOptions, 'modelOptions' | 'resilience' | 'env' | 'userConfigHome' | 'usageContext' | 'usageObservationScope'> & { review?: ReviewDependencies; session?: { isTTY?: boolean } };
+export type CommandDependencies = Pick<RunSuiteOptions, 'modelOptions' | 'resilience' | 'env' | 'userConfigHome' | 'usageContext' | 'usageObservationScope'> & {
+  review?: ReviewDependencies;
+  session?: { isTTY?: boolean };
+  /** 会话内 /init 使用：提供后 init 不自己打开审核，而是把待确认画像交给会话。 */
+  init?: { deferReview?: (only: ProfileFile[]) => void };
+};
 
 export function createCommandUsageObserver(
   project: string, command: UsageEvent['command'], role: UsageEvent['role'], pricing: Config['pricing'],

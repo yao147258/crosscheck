@@ -1,4 +1,4 @@
-import { Approvals } from '@crosscheck/core';
+import { Approvals, readProfileFile } from '@crosscheck/core';
 import { Text, useInput } from 'ink';
 import { cleanup, render } from 'ink-testing-library';
 import { act, useState } from 'react';
@@ -117,6 +117,41 @@ describe('首页与画像视图', () => {
     if (index !== 3) expect(frame(ui)).toContain('（空）');
     ui.stdin.write(KEYS.escape);
     await waitFor(() => frame(ui).includes('画像审核（待处理 7）'));
+  });
+
+  it('40×16 已确认画像详情可滚动读完整确认人，不改写记录', async () => {
+    const { artifacts, session } = await createProject();
+    const file = await readProfileFile(artifacts, 'auth.yaml');
+    if (!file.present || !file.ok) throw new Error('画像无效');
+    const body = 'reviewer-'.repeat(65);
+    const reviewer = `确认人开头\n${body}\\u000a确认人末尾`;
+    await session.mutate((approvals) => approvals.approve('profile', 'auth.yaml', file.value, reviewer));
+    const before = await artifacts.readBytes('approvals.json');
+    const ui = render(<App env={{ session, editor: noEditor, open }} initial={{ name: 'profile', only: ['auth.yaml'] }} />);
+    Object.defineProperties(ui.stdout, { columns: { configurable: true, value: 40 }, rows: { configurable: true, value: 16 } });
+    ui.stdout.emit('resize');
+    await waitFor(() => frame(ui).includes('已确认'));
+    expect(frame(ui)).not.toContain('确认人末尾');
+    ui.stdin.write(KEYS.enter);
+    await waitFor(() => frame(ui).includes('完整详情 · auth.yaml'));
+    const start = '确认人：确认人开头\\u000a';
+    const end = '\\\\u000a确认人末尾';
+    const visible = () => frame(ui).split('\n');
+    expect(visible().join('')).toContain(start);
+    // 逐行滚动，拼接每个窗口首次看到的那一行以验证完整名称未被截断。
+    const viewport = 11;
+    const captured = visible().slice(2, 2 + viewport);
+    for (let i = 0; i < 30 && !captured.join('').includes(end); i++) {
+      const previous = frame(ui);
+      ui.stdin.write(KEYS.down);
+      await waitFor(() => frame(ui) !== previous);
+      expect(visible().length).toBeLessThanOrEqual(16);
+      captured.push(visible()[1 + viewport]!);
+    }
+    expect(captured.join('')).toContain(`${start}${body}${end}`);
+    ui.stdin.write(KEYS.pageDown);
+    await waitFor(() => frame(ui).includes('审批载荷'));
+    expect(await artifacts.readBytes('approvals.json')).toEqual(before);
   });
 
   it.each(['guardrails.yaml', 'auth.yaml', 'environments.yaml'] as const)('40×16 长确认人无编辑器可读 %s 完整审批载荷，详情只读且返回仍可确认', async (name) => {

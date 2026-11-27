@@ -25,7 +25,7 @@ export async function reviewCommand(args: CliArgs, log: (s: string) => void, dep
     const code = await (deps.review?.runReview ?? runReview)({
       artifacts, reviewer, editor: createEditorHost(artifacts, env), open: createOpener(),
       normalizeError: createSessionTextNormalizer(apiKeys),
-      view: args.view, module: args.modules?.[0], runId: args.runId, signal: sig,
+      view: args.view, module: args.modules?.[0], runId: args.runId, only: args.only, signal: sig,
     });
     sig.throwIfAborted();
     return code;

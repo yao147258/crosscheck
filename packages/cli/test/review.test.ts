@@ -4,6 +4,7 @@ import path from 'node:path';
 import { afterEach, expect, it } from 'vitest';
 import type { RunReviewOptions } from '@crosscheck/tui';
 import { cliMain } from '../src/main';
+import { reviewCommand } from '../src/review';
 
 const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map((r) => rm(r, { recursive: true, force: true }))); });
@@ -32,6 +33,31 @@ it.each([
   expect(received).toMatchObject({ reviewer: '王五', ...expected });
   expect(received?.artifacts.root).toBe(path.join(root, '.crosscheck'));
   expect(received?.editor.edit).toBeTypeOf('function'); expect(received?.open).toBeTypeOf('function');
+});
+
+it('审核命令将内部画像筛选交给 TUI', async () => {
+  let received: RunReviewOptions | undefined;
+  const root = await mkdtemp(path.join(os.tmpdir(), 'cli-review-')); roots.push(root);
+  const code = await reviewCommand({ command: 'review', project: root, view: 'profile', only: ['auth.yaml'], open: false }, () => {}, {
+    env: { CROSSCHECK_REVIEWER: '人工' },
+    review: { isTTY: true, runReview: async (options) => { received = options; return 0; } },
+  });
+  expect(code).toBe(0);
+  expect(received?.only).toEqual(['auth.yaml']);
+});
+
+it.each([
+  { env: { CROSSCHECK_REVIEWER: 'auto' }, username: '人工' },
+  { env: {}, username: 'auto' },
+])('公开审核入口拒绝保留身份且不进入 TUI（env=$env，系统名=$username）', async ({ env, username }) => {
+  const lines: string[] = [];
+  let started = false;
+  const code = await cliMain(['review'], { log: (line) => lines.push(line), dependencies: {
+    env, review: { isTTY: true, userInfo: () => ({ username }), runReview: async () => { started = true; return 0; } },
+  } });
+  expect(code).toBe(2);
+  expect(started).toBe(false);
+  expect(lines.join('\n')).toMatch(/auto.*保留/);
 });
 
 it('空白环境确认人回退系统用户名，保留界面退出码', async () => {

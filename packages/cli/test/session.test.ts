@@ -17,9 +17,10 @@ class TestModelV2 implements ModelV2 {
   doStream: ModelV2['doStream'] = async () => { throw new Error('不应启动流'); };
 }
 import { ReviewSession, approveClause } from '@crosscheck/tui';
+import { Approvals, AUTO_REVIEWER, readProfileFile } from '@crosscheck/core';
 import { clause } from '../../tui/test/fixture';
 import { scriptedModel } from '../../agent/src/testing/scripted-model';
-import { cleanupProjects, createProject } from '../../tui/test/fixture';
+import { cleanupProjects, createProject, PROFILE_FILES_CONTENT } from '../../tui/test/fixture';
 import { chatReply as realChatReply, createSlashDispatcher, loadSessionInfo, sessionSlashCommands, tokenizeCommand } from '../src/session';
 import cliPackage from '../package.json';
 import { SessionStore } from '../src/session-store';
@@ -341,6 +342,31 @@ it('status 指令读取指定项目状态且拒绝无效参数', async () => {
   expect(await dispatch(['status', '--unknown'], signal)).toMatchObject({ kind: 'log', code: 2 });
 });
 
+it('status 保留摘要，只列当前已确认画像及可见转义后的确认人，不改写记录', async () => {
+  const { root, artifacts, session } = await createProject();
+  const reviewer = String.fromCodePoint(0x202e, 0x200d, 0xe0001) + '\\u000a人\n名\r\t\x1b\x7f\x9b\u2028末';
+  await session.mutate(async (approvals) => {
+    for (const [name, by] of [['pages.yaml', AUTO_REVIEWER], ['auth.yaml', reviewer], ['guardrails.yaml', '旧确认人']] as const) {
+      const file = await readProfileFile(artifacts, name);
+      if (!file.present || !file.ok) throw new Error(`画像无效：${name}`);
+      approvals.approve('profile', name, file.value, by);
+    }
+  });
+  await artifacts.writeYaml('system/guardrails.yaml', { allowedHosts: ['localhost:40000'] });
+  const before = await artifacts.readBytes('approvals.json');
+  const result = await createSlashDispatcher({ env: { CROSSCHECK_REVIEWER: 'auto' } })(['status', '--project', root], new AbortController().signal);
+  expect(result).toMatchObject({ kind: 'log', code: 0 });
+  if (result.kind !== 'log') throw new Error('状态命令应返回日志');
+  expect(result.lines).toEqual(expect.arrayContaining([
+    expect.stringContaining('当前阶段'), expect.stringContaining('画像：5 / 7'), expect.stringContaining('上一次测试'),
+    expect.stringMatching(/pages\.yaml.*auto/),
+    expect.stringContaining('\\u202e\\u200d\\u{e0001}\\\\u000a人\\u000a名\\u000d\\u0009\\u001b\\u007f\\u009b\\u2028末'),
+  ]));
+  expect(result.lines.find((line) => line.includes('auth.yaml'))).toContain('人\\u000a名');
+  expect(result.lines.join('\n')).not.toMatch(/guardrails\.yaml|fixtures\.yaml|旧确认人|[\r\t\x1b\x7f\x9b\u2028]/);
+  expect(await artifacts.readBytes('approvals.json')).toEqual(before);
+});
+
 it('/usage 固定查询启动项目，区分项目和指定会话，并显示已知部分及损坏诊断', async () => {
   const { root } = await createProject();
   const home = path.join(root, 'user');
@@ -385,18 +411,39 @@ it('/usage 对项目与模型名中的终端和 Unicode 控制字符作单行转
   expect(query).toMatchObject({ kind: 'log', lines: expect.arrayContaining([expect.stringContaining(encoded)]) });
 });
 
-it('跨项目 /init 仅写目标项目账本，启动项目 /usage 不混入该事件', async () => {
-  const { root } = await createProject();
-  const target = await createProject();
-  const home = path.join(root, 'user');
+it.each([false, true])('/init 用实际目标项目交接画像，模型请求仅在目标账本收尾后逐次入账（跨项目：%s）', async crossProject => {
+  const startup = await createProject();
+  const target = crossProject ? await createProject() : startup;
+  const home = startup.userHome;
   const currentId = randomUUID();
-  const model = scriptedModel([{ toolCalls: [{ name: 'finish', input: { markdown: '# 项目笔记' } }] }]);
-  const dispatch = createSlashDispatcher({ userConfigHome: home, modelOptions: { env: {}, factories: { openai: () => model } } }, { currentId, project: root });
+  const approvals = Approvals.empty();
+  for (const [name, value] of Object.entries(PROFILE_FILES_CONTENT)) {
+    if (name !== 'guardrails.yaml') approvals.approve('profile', name, value, '测试人');
+  }
+  await approvals.save(target.artifacts);
+  const model = scriptedModel([
+    { toolCalls: [{ name: 'finish', input: { markdown: '# 项目笔记' } }], usage: { input: 11 } },
+    { toolCalls: [{ name: 'finish', input: { findings: [] } }], usage: { input: 13 } },
+    { toolCalls: [{ name: 'finish', input: { 'guardrails.yaml': PROFILE_FILES_CONTENT['guardrails.yaml'] } }], usage: { input: 17 } },
+  ]);
+  const dispatch = createSlashDispatcher({ userConfigHome: home, resilience: { retries: 0 }, modelOptions: { env: {}, factories: { openai: () => model } } }, { currentId, project: startup.root });
   const signal = new AbortController().signal;
-  expect(await dispatch(['init', '--project', target.root], signal)).toMatchObject({ kind: 'log', code: 0 });
-  expect(await usageEvents(target.root, home)).toEqual([expect.objectContaining({ sessionId: currentId, command: 'init', role: 'extractor' })]);
-  expect((await readUsage({ project: root, home })).total.calls).toBe(0);
-  expect(await dispatch(['usage', '--session'], signal)).toMatchObject({ kind: 'log', code: 0, lines: expect.arrayContaining([expect.stringContaining('调用 0')]) });
+  const settles: Array<() => Promise<void>> = [];
+  const argv = crossProject ? tokenizeCommand(`init --project "${target.root}"`) : ['init'];
+  const result = await dispatch(argv, signal, undefined, settle => settles.push(settle));
+  expect(await usageEvents(target.root, home)).toEqual([]);
+  expect(settles).toHaveLength(1);
+  await settles[0]!();
+  expect(result).toMatchObject({ kind: 'review', args: { project: target.root, view: 'profile', only: ['guardrails.yaml'] }, lines: expect.arrayContaining([expect.stringContaining('需要人工确认')]) });
+  expect((await Approvals.load(target.artifacts)).record('notes', 'project')?.by).toBe(AUTO_REVIEWER);
+  const events = await usageEvents(target.root, home);
+  expect(events).toHaveLength(3);
+  expect(events.map(event => event.usage.inputTokens).sort((a, b) => Number(a) - Number(b))).toEqual([11, 13, 17]);
+  for (const event of events) expect(event).toMatchObject({ sessionId: currentId, role: 'extractor', status: 'success' });
+  expect(events.find(event => event.usage.inputTokens === 11)?.command).toBe('init');
+  const startupCalls = crossProject ? 0 : 3;
+  expect((await readUsage({ project: startup.root, home })).total.calls).toBe(startupCalls);
+  expect(await dispatch(['usage', '--session'], signal)).toMatchObject({ kind: 'log', code: 0, lines: expect.arrayContaining([expect.stringContaining(`总计：调用 ${startupCalls}`)]) });
 });
 
 it('列出历史与无参恢复只读，指定恢复不提前更改当前 ID', async () => {

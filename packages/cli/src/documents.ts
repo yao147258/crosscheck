@@ -1,6 +1,7 @@
 import path from 'node:path';
-import { Approvals, decodeNotesUtf8, parseNotesRequirementDocs, type ArtifactStore } from '@crosscheck/core';
-import { createProjectReader } from '@crosscheck/discovery';
+import { AUTO_REVIEWER, Approvals, contentHash, decodeNotesUtf8, parseNotesRequirementDocs, type ArtifactStore } from '@crosscheck/core';
+import { createDiskDocLister, createProjectReader, expandRequirementDocs, isSafeProjectPath } from '@crosscheck/discovery';
+import { z } from 'zod';
 import type { RequirementDocument } from '@crosscheck/requirements';
 
 /** 使用项目安全读取器拒绝链接、凭证和超大文件，来源统一为正斜线相对路径。 */
@@ -22,7 +23,21 @@ export async function readRequirementDocuments(projectRoot: string, files: strin
   return documents;
 }
 
-export type RequirementEntries = { ok: true; entries: string[]; from: 'config' | 'notes' } | { ok: false; message: string };
+export const NOTES_DISCOVERY_FILE = 'notes-discovery.json';
+const NotesDiscoverySchema = z.strictObject({ hash: z.string(), files: z.array(z.string()) });
+export const autoNotesDocsGuidance = (reason: string) => `自动确认笔记的需求文档无法安全展开：${reason}；请在 config.yaml 的 requirementsDocs 显式登记，或人工审核笔记后运行 crosscheck review notes 确认`;
+
+/** 不读取正文：先完整展开，再检查每个候选文件均在宿主登记范围。 */
+export async function expandAutoNotesDocs(projectRoot: string, entries: string[], registered: ReadonlySet<string>, signal?: AbortSignal): Promise<string[]> {
+  const files = await expandRequirementDocs(entries, createDiskDocLister(createProjectReader(projectRoot), undefined, { strict: true }), signal);
+  if (files.some((file) => !isSafeProjectPath(file) || !registered.has(file))) throw new Error('存在不安全或未登记的候选文件');
+  return files;
+}
+
+export type RequirementEntries =
+  | { ok: true; entries: string[]; from: 'config' | 'notes' }
+  | { ok: true; entries: string[]; from: 'auto-notes'; allowed: string[] }
+  | { ok: false; message: string };
 
 const NOT_REGISTERED = 'requirementsDocs 为空：请在 config.yaml 的 requirementsDocs 登记需求文档，或在 notes.md 的“需求文档”小节登记并运行 crosscheck review notes 确认';
 
@@ -39,6 +54,15 @@ export async function resolveRequirementEntries(artifacts: ArtifactStore, config
   const approvals = await Approvals.load(artifacts);
   if (approvals.state('notes', 'project', text) !== 'approved') {
     return { ok: false, message: 'notes.md 的“需求文档”小节尚未确认：请先运行 crosscheck review notes 审核并确认笔记' };
+  }
+  if (approvals.record('notes', 'project')?.by === AUTO_REVIEWER) {
+    let discovery: z.infer<typeof NotesDiscoverySchema> | undefined;
+    try { discovery = await artifacts.readJson(NOTES_DISCOVERY_FILE, NotesDiscoverySchema); }
+    catch { return { ok: false, message: autoNotesDocsGuidance('无法读取宿主登记记录') }; }
+    if (!discovery || discovery.hash !== contentHash(text)) {
+      return { ok: false, message: autoNotesDocsGuidance('缺少与当前笔记匹配的宿主登记记录') };
+    }
+    return { ok: true, entries, from: 'auto-notes', allowed: discovery.files };
   }
   return { ok: true, entries, from: 'notes' };
 }

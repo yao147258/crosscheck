@@ -1,4 +1,4 @@
-import { CaseIdSchema, ProfileNameSchema } from '@crosscheck/core';
+import { CaseIdSchema, ProfileNameSchema, type ProfileFile } from '@crosscheck/core';
 
 export type Command = 'init' | 'profile' | 'reqs' | 'plan' | 'review' | 'run' | 'report' | 'impact';
 export type ReviewView = 'notes' | 'profile' | 'clauses' | 'cases' | 'results';
@@ -16,11 +16,12 @@ export interface CliArgs {
   refresh?: boolean;
   since?: string;
   json?: boolean;
+  only?: ProfileFile[];
 }
 
 export const HELP = `Crosscheck 本地验收 CLI（Node >=22.12）
   crosscheck（无参数：进入交互会话，stdin/stdout 均须为 TTY）
-  crosscheck init [--refresh] [--project <目录>]
+  crosscheck init [--refresh] [--openapi <文件>]... [--project <目录>]
   crosscheck profile [--openapi <文件>]... [--project <目录>]
   crosscheck reqs --module <id> [--project <目录>]
   crosscheck plan --module <id> [--project <目录>]
@@ -34,7 +35,7 @@ export const HELP = `Crosscheck 本地验收 CLI（Node >=22.12）
 /usage 查看启动项目累计；/usage --session [UUID] 查询当前或指定会话。/clear 开启新会话，不删除旧会话或用量记录。
 会话聊天会在发送与保存前脱敏，可能改变文字含义；脱敏不保证覆盖所有秘密。
 普通文本使用 planner 模型和当前项目只读摘要，模型无工具；审核仍须人工确认。
-init 生成笔记，profile 基于已确认笔记和结构化扫描生成画像；init/profile/reqs/plan 只写草稿，不自动确认；确认只能在 review 中由人完成。
+init 生成并自动确认笔记，生成七份画像，自动确认来源核验通过的 api-catalog 与 pages，其余画像进入 review 由人确认；profile 可单独重跑画像；reqs/plan 只写草稿，条款与用例只能在 review 中由人确认。
 review 需要交互式终端；编辑使用 VISUAL 或 EDITOR 指定的编辑器，确认人取 CROSSCHECK_REVIEWER 或系统用户名。
 run 中重复 module/case 各自为集合，两类筛选取交集。未知/空选择不视为通过。
 report 仅读取历史快照与真实证据，离线重建 JSON/JUnit/HTML。
@@ -45,7 +46,7 @@ AI 可按需使用 Playwright Chromium 操作测试页面（需安装 Chromium�
 
 const COMMANDS: readonly Command[] = ['init', 'profile', 'reqs', 'plan', 'review', 'run', 'report', 'impact'];
 const FLAGS: Record<Command, readonly string[]> = {
-  init: ['--refresh', '--project'],
+  init: ['--refresh', '--openapi', '--project'],
   profile: ['--openapi', '--project'],
   reqs: ['--module', '--project'],
   plan: ['--module', '--project'],
@@ -55,7 +56,7 @@ const FLAGS: Record<Command, readonly string[]> = {
   impact: ['--since', '--json', '--project'],
 };
 const REPEATABLE: Record<Command, readonly string[]> = {
-  init: [], profile: ['--openapi'], run: ['--module', '--case'], reqs: [], plan: [], review: [], report: [], impact: [],
+  init: ['--openapi'], profile: ['--openapi'], run: ['--module', '--case'], reqs: [], plan: [], review: [], report: [], impact: [],
 };
 const VIEWS: readonly ReviewView[] = ['notes', 'profile', 'clauses', 'cases', 'results'];
 const RUN_ID = /^\d{8}T\d{9}Z-[a-f0-9]{32}$/;

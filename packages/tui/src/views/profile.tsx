@@ -1,17 +1,19 @@
+import type { ProfileFile } from '@crosscheck/core';
 import { Box, Text, useInput, useWindowSize } from 'ink';
 import { useContext, useState } from 'react';
 import { APPROVAL_COLOR, APPROVAL_LABEL, Footer, List, ReviewDetails, StatusLine, clampIndex, moveIndex } from '../components';
 import { ActionContext, useReview } from '../context';
 import { useAction, useEditorPause, useLoader } from '../hooks';
+import { escapeTerminalLine } from '../io/terminal';
 import { navKey, type Nav } from '../routes';
 import { approveProfileFile, editProfileFile, loadProfileOverview, revokeProfileFile } from '../state/profile';
 
-export function ProfileView({ nav }: { nav: Nav }) {
+export function ProfileView({ nav, only }: { nav: Nav; only?: readonly ProfileFile[] }) {
   const { session, editor } = useReview();
   const actions = useContext(ActionContext);
   const { rows: terminalRows, columns } = useWindowSize();
   const compact = columns < 70 || terminalRows < 24;
-  const { data, error, reload } = useLoader(() => loadProfileOverview(session), [session], overview => {
+  const { data, error, reload } = useLoader(() => loadProfileOverview(session, only), [session, only], overview => {
     const invalid = overview.rows.find(row => row.status === 'invalid');
     if (invalid) return new Error(`${invalid.name} 不合法：${invalid.error}`);
     if (overview.crossCheck) return new Error(`交叉校验未通过：${overview.crossCheck}`);
@@ -24,9 +26,15 @@ export function ProfileView({ nav }: { nav: Nav }) {
   const rows = data?.rows ?? [];
   const current = clampIndex(index, rows.length);
   const row = rows[current];
+  const canShowAll = Boolean(only?.length && data?.crossCheck);
   useInput((input, key) => {
     if (key.ctrl) return;
     if (navKey(input, key, nav)) return;
+    if (input === 'f' && canShowAll) {
+      if (actions?.busy.current) setStatus({ kind: 'error', text: '请等待当前操作完成' });
+      else nav.push({ name: 'profile' });
+      return;
+    }
     if (key.upArrow || key.downArrow) { setIndex(moveIndex(current, rows.length, key)); return; }
     if (!row) return;
     if (key.return) {
@@ -38,14 +46,18 @@ export function ProfileView({ nav }: { nav: Nav }) {
     if (input === 'r') void run(() => revokeProfileFile(session, row.name));
     if (input === 'e') void run(() => pause(() => editProfileFile(session, editor, row.name)));
   }, { isActive: !(details && row) });
-  if (details && row) return <ReviewDetails title={row.name} lines={row.details} close={() => setDetails(false)} quit={nav.quit} />;
+  if (details && row) {
+    const lines = row.by === undefined ? row.details : [`确认人：${escapeTerminalLine(row.by)}`, ...row.details];
+    return <ReviewDetails title={row.name} lines={lines} close={() => setDetails(false)} quit={nav.quit} />;
+  }
   return (
     <Box flexDirection="column">
       <Text bold>画像审核</Text>
-      <List items={rows.map((r) => ({ key: r.name, label: `${r.name.padEnd(18)} ${APPROVAL_LABEL[r.status]}`, color: APPROVAL_COLOR[r.status] }))} index={current} maxRows={Math.max(2, terminalRows - 9)} />
+      <List items={rows.map((r) => ({ key: r.name, label: `${r.name.padEnd(18)} ${APPROVAL_LABEL[r.status]}${r.by !== undefined ? ` · ${escapeTerminalLine(r.by)}` : ''}`, color: APPROVAL_COLOR[r.status] }))} index={current} maxRows={Math.max(2, terminalRows - 9)} />
       {!data && !error && <Text dimColor>加载中…</Text>}
       {row?.error && <Text color="red" wrap="truncate-end">{row.error}</Text>}
       {data?.crossCheck && <Text color="yellow" wrap="truncate-end">交叉校验未通过：{data.crossCheck}</Text>}
+      {canShowAll && <Text>按 f 打开完整画像审核</Text>}
       {error && <Text color="red" wrap="truncate-end">{error}</Text>}
       <Box flexDirection="column" maxHeight={2} overflow="hidden" flexShrink={0}>
         <StatusLine status={status} />

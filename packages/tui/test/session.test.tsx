@@ -1,6 +1,6 @@
 import { cleanup, render } from 'ink-testing-library';
 import { afterEach, expect, it, vi } from 'vitest';
-import { Approvals, ArtifactStore, loadProfile, readProfileFiles } from '@crosscheck/core';
+import { Approvals, ArtifactStore, loadProfile, readProfileFile, readProfileFiles } from '@crosscheck/core';
 import type { CommandDependencies } from '../../cli/src/context';
 import { createSlashDispatcher, sessionCommand, sessionSlashCommands, tokenizeCommand } from '../../cli/src/session';
 import * as tui from '../src/index';
@@ -12,7 +12,7 @@ import * as fs from 'node:fs/promises';
 import path from 'node:path';
 import { ReviewSession } from '../src/io/session';
 import { SessionApp, type RunSessionOptions } from '../src/session';
-import { cleanupProjects, createProject } from './fixture';
+import { cleanupProjects, createProject, PROFILE_FILES_CONTENT } from './fixture';
 import { deferred, KEYS, renderInteractive, terminalSnapshot, waitFor } from './helpers';
 
 vi.mock('node:fs/promises', { spy: true });
@@ -224,6 +224,97 @@ it('审核退出返回聊天并重新解析会话', async () => {
   await waitFor(() => resolveReview.mock.calls.length === 2);
 });
 
+it('进入审核只显示筛选的画像，并在返回时保留进入前的命令日志', async () => {
+  const { session, root } = await createProject();
+  const options: RunSessionOptions = {
+    ...noUsage,
+    tokenize: text => [text],
+    runSlashCommand: async () => ({ kind: 'review', args: { project: root, view: 'profile', only: ['auth.yaml'] }, lines: ['画像准备完毕', '请确认剩余画像'] }),
+    resolveReview: async () => ({ session, editor, open }),
+    chatReply: async () => '',
+  };
+  const ui = render(<SessionApp options={options} />);
+  ui.stdin.write('/review'); ui.stdin.write(KEYS.enter);
+  await waitFor(() => frame(ui).includes('auth.yaml'));
+  expect(frame(ui)).not.toContain('environments.yaml');
+  ui.stdin.write('q');
+  await waitFor(() => frame(ui).includes('AI Agent Command Line Client'));
+  expect(frame(ui)).toContain('画像准备完毕\n请确认剩余画像');
+});
+
+it('/init 等待用量收尾，不让审核界面的返回键提前清除执行状态', async () => {
+  const { session, root } = await createProject();
+  const release = deferred<void>();
+  let settling = false;
+  const ui = render(<SessionApp options={{
+    ...noUsage,
+    tokenize: tokenizeCommand,
+    runSlashCommand: async (_tokens, _signal, _progress, registerSettle) => {
+      registerSettle?.(async () => { settling = true; await release.promise; });
+      return { kind: 'review', args: { project: root, view: 'profile', only: ['auth.yaml'] } };
+    },
+    resolveReview: async () => ({ session, editor, open }),
+    chatReply: async () => '',
+  }} />);
+  try {
+    await mounted();
+    ui.stdin.write('/init'); ui.stdin.write(KEYS.enter);
+    await waitFor(() => settling && (frame(ui).includes('Ctrl+C 中断') || frame(ui).includes('auth.yaml')));
+    expect(frame(ui)).not.toContain('auth.yaml');
+    ui.stdin.write('q');
+    ui.stdin.write('\u0003');
+    release.resolve();
+    await waitFor(() => frame(ui).includes('auth.yaml'));
+    ui.stdin.write('q');
+    await waitFor(() => frame(ui).includes('AI Agent Command Line Client'));
+  } finally { release.resolve(); ui.unmount(); }
+});
+
+it('会话筛选审核交叉校验失败后可直接打开完整画像审核', async () => {
+  const { session, root, artifacts } = await createProject();
+  await artifacts.writeYaml('system/fixtures.yaml', { version: 1, fixtures: { bad: { kind: 'http', operation: 'missing' } } });
+  await session.mutate(async (approvals) => {
+    for (const name of ['environments.yaml', 'auth.yaml', 'api-catalog.yaml', 'pages.yaml', 'data-model.yaml', 'fixtures.yaml', 'guardrails.yaml'] as const) {
+      const file = await readProfileFile(artifacts, name);
+      if (!file.present || !file.ok) throw new Error(`画像无效：${name}`);
+      approvals.approve('profile', name, file.value, name === 'api-catalog.yaml' ? 'auto' : '人工');
+    }
+  });
+  const ui = render(<SessionApp options={{
+    ...noUsage,
+    tokenize: text => [text],
+    runSlashCommand: async () => ({ kind: 'review', args: { project: root, view: 'profile', only: ['fixtures.yaml'] } }),
+    resolveReview: async () => ({ session, editor, open }),
+    chatReply: async () => '',
+  }} />);
+  ui.stdin.write('/init'); ui.stdin.write(KEYS.enter);
+  await waitFor(() => frame(ui).includes('交叉校验未通过'));
+  expect(frame(ui)).not.toContain('api-catalog.yaml');
+  ui.stdin.write('f');
+  await waitFor(() => /api-catalog\.yaml\s+已确认.*auto/.test(frame(ui)));
+  ui.stdin.write('q');
+  await waitFor(() => frame(ui).includes('AI Agent Command Line Client'));
+});
+
+it('画像审核列表与页首可见转义确认人的换行和控制字符', async () => {
+  const { root, artifacts } = await createProject();
+  const session = await ReviewSession.open(artifacts, '当前\n人\x1b');
+  const file = await readProfileFile(artifacts, 'auth.yaml');
+  if (!file.present || !file.ok) throw new Error('画像无效');
+  await session.mutate((approvals) => approvals.approve('profile', 'auth.yaml', file.value, '历史\n人\x1b'));
+  const ui = render(<SessionApp options={{
+    ...noUsage,
+    tokenize: text => [text],
+    runSlashCommand: async () => ({ kind: 'review', args: { project: root, view: 'profile' } }),
+    resolveReview: async () => ({ session, editor, open }),
+    chatReply: async () => '',
+  }} />);
+  ui.stdin.write('/review'); ui.stdin.write(KEYS.enter);
+  await waitFor(() => frame(ui).includes('auth.yaml'));
+  expect(frame(ui)).toContain('确认人 当前\\u000a人\\u001b');
+  expect(frame(ui)).toMatch(/auth\.yaml.*历史\\u000a人\\u001b/);
+});
+
 it('外部取消等待审核写盘完成后才退出', async () => {
   const { session, artifacts, root } = await createProject();
   const gate = deferred<void>(), entered = deferred<void>();
@@ -430,7 +521,7 @@ it('真实命令清单中 /profile 可提示、补全并提交', async () => {
   const ui = render(<SessionApp options={options} />);
   await mounted();
   ui.stdin.write('/pro');
-  await waitFor(() => frame(ui).includes('/profile 根据已确认笔记生成画像草稿'));
+  await waitFor(() => frame(ui).includes('/profile 单独重新生成画像草稿（需已确认笔记）'));
   ui.stdin.write(KEYS.tab);
   await waitFor(() => frame(ui).includes('> /profile'));
   ui.stdin.write(KEYS.enter);
@@ -533,9 +624,21 @@ it('执行中隐藏终端光标，结束后重新显示', async () => {
   ui.unmount();
 });
 
+// 用量界面测试仅生成笔记；另有测试覆盖待确认画像的审核交接。
+async function projectWithApprovedProfiles() {
+  const project = await createProject();
+  await project.session.mutate(async approvals => {
+    for (const file of await readProfileFiles(project.artifacts)) {
+      if (!file.present || !file.ok) throw new Error(`画像无效：${file.name}`);
+      approvals.approve('profile', file.name, file.value, project.session.reviewer);
+    }
+  });
+  return project;
+}
+
 it('启动会话在聊天和模型命令后刷新用量，跨项目命令不混入且清空换 ID', async () => {
-  const { root } = await createProject();
-  const target = await createProject();
+  const { root } = await projectWithApprovedProfiles();
+  const target = await projectWithApprovedProfiles();
   const home = path.join(root, 'user');
   const prompt = '会话提示词不得写入账本';
   const model = scriptedModel([{ text: '真实会话回复', usage: { cacheRead: 0 } }, { toolCalls: [{ name: 'finish', input: { markdown: '# 当前项目笔记' } }] }, { toolCalls: [{ name: 'finish', input: { markdown: '# 目标项目笔记' } }] }]);
@@ -576,7 +679,7 @@ it('启动会话在聊天和模型命令后刷新用量，跨项目命令不混�
 });
 
 it('账本写入告警在操作结束后仍可见，恢复可读也不把缺失统计标成完整', async () => {
-  const { root } = await createProject();
+  const { root } = await projectWithApprovedProfiles();
   const home = path.join(root, 'user');
   const { directory } = await projectUsageLocation(root, home);
   const originalMkdir = (await vi.importActual<typeof fs>('node:fs/promises')).mkdir;
@@ -619,6 +722,68 @@ async function persistedSession(root: string, model: ReturnType<typeof scriptedM
     return { ui, id, home, store: new SessionStore(root, home), send: (text: string) => { ui.stdin.write(text); ui.stdin.write(KEYS.enter); }, done: (text: string) => waitFor(() => frame(ui).includes(text) && !frame(ui).includes('Ctrl+C 中断')) };
   } finally { run.mockRestore(); }
 }
+
+it.each([false, true])('/init 自动确认笔记、先结算用量，再交接审核或响应外部退出（退出：%s）', async abortDuringSettle => {
+  const { root, artifacts } = await createProject();
+  const approvals = Approvals.empty();
+  for (const file of await readProfileFiles(artifacts)) {
+    if (!file.present || !file.ok) throw new Error(`画像无效：${file.name}`);
+    if (file.name !== 'guardrails.yaml') approvals.approve('profile', file.name, file.value, '测试人');
+  }
+  await approvals.save(artifacts);
+  const model = scriptedModel([
+    { toolCalls: [{ name: 'finish', input: { markdown: '# 初始化笔记' } }] },
+    { toolCalls: [{ name: 'finish', input: { findings: [] } }] },
+    { toolCalls: [{ name: 'finish', input: { 'guardrails.yaml': PROFILE_FILES_CONTENT['guardrails.yaml'] } }] },
+  ]);
+  const controller = new AbortController();
+  const { ui, id, home, store, send, done } = await persistedSession(root, model, controller.signal);
+  const sessionId = id()!;
+  const { directory } = await projectUsageLocation(root, home);
+  const release = deferred<void>();
+  let settling = false;
+  const originalMkdir = (await vi.importActual<typeof fs>('node:fs/promises')).mkdir;
+  const mkdir = vi.mocked(fs.mkdir).mockImplementation((async (...args: Parameters<typeof fs.mkdir>) => {
+    if (args[0] === directory) { settling = true; await release.promise; }
+    return originalMkdir(...args);
+  }) as typeof fs.mkdir);
+  try {
+    send('/init');
+    await waitFor(() => settling || frame(ui).includes('画像审核'));
+    expect(frame(ui)).not.toContain('画像审核');
+    expect((await Approvals.load(artifacts)).record('notes', 'project')?.by).toBe('auto');
+    expect((await store.load(sessionId))?.revision).toBe(1);
+    if (abortDuringSettle) {
+      controller.abort();
+      expect(exit).not.toHaveBeenCalled();
+      release.resolve();
+      await waitFor(() => exit.mock.calls.length > 0);
+      expect(exit).toHaveBeenCalledWith(2);
+      expect(frame(ui)).not.toContain('画像审核');
+      expect((await readUsage({ project: root, home, sessionId })).total.calls).toBe(3);
+      expect((await store.load(sessionId))?.entries.at(-1)).toMatchObject({
+        kind: 'end', status: 'cancelled', output: expect.stringMatching(/^操作已中断\n[\s\S]*以下画像需要人工确认：guardrails\.yaml$/),
+      });
+      expect((await Approvals.load(artifacts)).record('profile', 'guardrails.yaml')).toBeUndefined();
+      return;
+    }
+    release.resolve();
+    await waitFor(() => frame(ui).includes('画像审核') && frame(ui).includes('guardrails.yaml'));
+    expect(frame(ui)).not.toContain('environments.yaml');
+    expect((await readUsage({ project: root, home, sessionId })).total.calls).toBe(3);
+    ui.stdin.write('a');
+    await waitFor(() => /guardrails\.yaml\s+已确认 · 测试员/.test(frame(ui)));
+    ui.stdin.write('q');
+    await done('审核已结束');
+    const archived = await store.load(sessionId);
+    expect(archived?.entries).toMatchObject([
+      { kind: 'begin', operation: 'slash', input: '/init' },
+      { kind: 'end', status: 'success', output: expect.stringMatching(/^审核已结束\n[\s\S]*以下画像需要人工确认：guardrails\.yaml$/) },
+    ]);
+    expect(archived?.history).toEqual([]);
+    expect((await Approvals.load(artifacts)).record('profile', 'guardrails.yaml')?.by).toBe('测试员');
+  } finally { release.resolve(); mkdir.mockRestore(); }
+});
 
 it('模型配置部分无效时仍脱敏普通命令的输入和输出', async () => {
   const { root, userHome } = await createProject();
@@ -1292,7 +1457,7 @@ it.each(['q', '\u0003', '外部取消'])('审核返回（%s）保存最终状态
 });
 
 it.each(['聊天', 'init'] as const)('%s 已确定结果后，账本屏障中的 Ctrl+C 不撤销结果', async kind => {
-  const { root, artifacts } = await createProject();
+  const { root, artifacts } = await projectWithApprovedProfiles();
   const home = path.join(root, 'user');
   const { directory } = await projectUsageLocation(root, home);
   const entered = deferred<void>(), release = deferred<void>();

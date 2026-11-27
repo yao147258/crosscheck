@@ -1,6 +1,7 @@
 import { Box, Text, useApp, useInput } from 'ink';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { ActionContext, ReviewContext, type ReviewEnv } from './context';
+import { escapeTerminalLine } from './io/terminal';
 import type { Nav, Route } from './routes';
 import { CasesView } from './views/cases';
 import { ClausesView } from './views/clauses';
@@ -15,7 +16,7 @@ function RouteView({ route, nav }: { route: Route; nav: Nav }) {
   switch (route.name) {
     case 'home': return <HomeView nav={nav} />;
     case 'notes': return <NotesView nav={nav} />;
-    case 'profile': return <ProfileView nav={nav} />;
+    case 'profile': return <ProfileView nav={nav} only={route.only} />;
     case 'modules': return <ModulesView nav={nav} kind={route.kind} />;
     case 'clauses': return <ClausesView nav={nav} module={route.module} />;
     case 'cases': return <CasesView nav={nav} module={route.module} />;
@@ -105,7 +106,7 @@ export function App({ env, initial, onExitToParent }: { env: ReviewEnv; initial:
     <ReviewContext.Provider value={{ ...env, signal }}>
       <ActionContext.Provider value={actions}>
         <Box flexDirection="column">
-          <Text bold color="cyan" wrap="truncate-end">Crosscheck 审核 · 确认人 {env.session.reviewer}</Text>
+          <Text bold color="cyan" wrap="truncate-end">Crosscheck 审核 · 确认人 {escapeTerminalLine(env.session.reviewer)}</Text>
           <RouteView key={`${stack.length}:${JSON.stringify(route)}`} route={route} nav={nav} />
           {notice && <Text color="yellow">{notice}</Text>}
         </Box>

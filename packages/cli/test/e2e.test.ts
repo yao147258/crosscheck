@@ -187,22 +187,28 @@ it('第二case中断后resume只重跑incomplete，保留第一case提交与历�
   expect(s.counts().actions).toBe(2); expect((await result(s)).data.cases.map((c: any) => c.attempt)).toEqual([1, 2]);
   expect(await s.artifacts.readBytes(`runs/${saved.id}/cases/M-TC-2/attempts/1/result.json`)).toBeDefined();
 }, 30000);
-it('init → review notes → profile → review profile → reqs → plan → review → run 全链路', async () => {
+it('init 内审核画像 → reqs → plan → review → run 全链路', async () => {
   const { cliMain } = await import('../src/main');
-  const { ReviewSession, approveNotes, approveProfileFile, approveAllClauses, approveAllCases, loadNotesOverview, loadProfileOverview } = await import('@crosscheck/tui');
+  const { ReviewSession, approveProfileFile, approveAllClauses, approveAllCases, loadProfileOverview } = await import('@crosscheck/tui');
   const { scriptedModel } = await import('../../agent/src/testing/scripted-model');
-  const base = await server((_req, res) => { res.setHeader('content-type', 'application/json'); res.end(JSON.stringify({ value: 'ok' })); });
+  let actions = 0;
+  const base = await server((req, res) => { if (req.url === '/api/action') actions++; res.setHeader('content-type', 'application/json'); res.end(JSON.stringify({ value: 'ok' })); });
   const root = await mkdtemp(path.join(os.tmpdir(), 'flow14-')); roots.push(root);
   const artifacts = new ArtifactStore(root); const userHome = await makeUserHome(root);
   await artifacts.writeYaml('config.yaml', { defaultEnvironment: 'local', requirementsDocs: ['需求.md'], budget: { perCase: { steps: 20, tokens: 100000, minutes: 1 } } });
-  await import('node:fs/promises').then((fs) => fs.writeFile(path.join(root, '需求.md'), '下单接口返回 ok\n'));
+  await writeFile(path.join(root, '需求.md'), '下单接口返回 ok\n');
+  const source = { file: 'routes.ts', line: 1, excerpt: 'export const order = "/api/action";' };
+  await writeFile(path.join(root, source.file), `${source.excerpt}\n`);
   const finish = (input: unknown) => ({ toolCalls: [{ name: 'finish', input }] });
   const extractor = scriptedModel([
     finish({ markdown: '# 项目笔记\n\n本地回环服务，下单接口返回 ok。' }),
-    finish({ findings: [] }),
+    finish({ findings: [{ kind: 'api', method: 'POST', path: '/api/action', source }] }),
     finish({ 'environments.yaml': { version: 1, environments: { local: { baseURL: base, healthcheck: `${base}/health`, reset: null } } } }),
     finish({ 'auth.yaml': { version: 1, actors: { guest: { kind: 'anonymous' } } } }),
-    finish({ 'api-catalog.yaml': { version: 1, operations: {} }, 'pages.yaml': { version: 1, pages: {} } }),
+    finish({
+      'api-catalog.yaml': { version: 1, operations: { order: { environment: 'local', method: 'POST', path: '/api/action', description: '下单', sources: [source] } } },
+      'pages.yaml': { version: 1, pages: { order: { environment: 'local', path: '/item', description: '订单页', sources: [source] } } },
+    }),
     finish({ 'data-model.yaml': { version: 1, queries: {} }, 'fixtures.yaml': { version: 1, fixtures: {} } }),
     finish({ 'guardrails.yaml': { allowedHosts: [new URL(base).host] } }),
     finish([{ id: 'M-AC-1', text: '下单接口返回 ok', source: { file: '需求.md', line: 1, excerpt: '下单接口返回 ok' } }]),
@@ -215,8 +221,13 @@ it('init → review notes → profile → review profile → reqs → plan → r
     // 仅模型及人工键盘选择用测试替身；审核状态函数、落盘和门禁均使用真实实现。
     review: { isTTY: true, runReview: async (options: import('@crosscheck/tui').RunReviewOptions) => {
       const session = await ReviewSession.open(options.artifacts, options.reviewer);
-      if (options.view === 'notes') expect(await approveNotes(session, (await loadNotesOverview(session)).text)).toBe('已确认项目笔记');
-      else if (options.view === 'profile') for (const row of (await loadProfileOverview(session)).rows) await approveProfileFile(session, row.name);
+      if (options.view === 'profile') {
+        expect(options.only).toEqual(['environments.yaml', 'auth.yaml', 'data-model.yaml', 'fixtures.yaml', 'guardrails.yaml']);
+        const pendingLogs: string[] = [];
+        expect(await cliMain(['plan', '--module', 'M', '--project', root], { dependencies, log: (line) => pendingLogs.push(line) })).toBe(2);
+        expect(pendingLogs.join('\n')).toContain('系统画像尚未全部确认');
+        for (const row of (await loadProfileOverview(session, options.only)).rows) await approveProfileFile(session, row.name);
+      }
       else if (options.view === 'clauses') expect(await approveAllClauses(session, options.module!)).toBe('已确认 1 条条款');
       else if (options.view === 'cases') expect(await approveAllCases(session, options.module!)).toBe('已确认 1 个用例');
       else throw new Error('测试未安排的审核视图');
@@ -227,20 +238,20 @@ it('init → review notes → profile → review profile → reqs → plan → r
   const command = (argv: string[]) => { logs.length = 0; return cliMain([...argv, '--project', root], { log: (line) => logs.push(line), dependencies }); };
   expect(await command(['init'])).toBe(0);
   expect((await artifacts.readBytes('notes.md'))?.toString()).toContain('项目笔记');
-  expect(await artifacts.readBytes('approvals.json')).toBeUndefined();
-  expect(await command(['profile'])).toBe(2);
-  expect(await command(['review', 'notes'])).toBe(0);
-  expect(await artifacts.readBytes('approvals.json')).toBeDefined();
-  expect(await command(['profile'])).toBe(0);
-  expect(await command(['plan', '--module', 'M'])).toBe(2);
-  expect(logs.join('\n')).toContain('系统画像尚未全部确认');
-  expect(await command(['review', 'profile'])).toBe(0);
+  const approvals = await Approvals.load(artifacts);
+  expect(approvals.record('notes', 'project')?.by).toBe('auto');
+  for (const name of Object.keys(await loadProfile(artifacts))) {
+    expect(approvals.record('profile', name)?.by).toBe(['api-catalog.yaml', 'pages.yaml'].includes(name) ? 'auto' : '流程测试');
+  }
   expect(await command(['reqs', '--module', 'M'])).toBe(0);
   expect(await command(['plan', '--module', 'M'])).toBe(2);
+  expect(logs.join('\n')).toContain('没有已确认且 active 的条款');
+  await expect(artifacts.listModules('cases')).resolves.toEqual([]);
   expect(await command(['review', 'clauses', '--module', 'M'])).toBe(0);
   expect(await command(['plan', '--module', 'M'])).toBe(0);
   const env = { ...process.env, USERPROFILE: userHome, HOME: userHome, CROSSCHECK_TEST_MODE: 'pass', CROSSCHECK_TEST_BASE: base };
   await expect(exec(runtime, [harness, 'run', '--project', root], { env, timeout: 20000 })).rejects.toMatchObject({ code: 2 });
+  expect(actions).toBe(0);
   expect(await command(['review', 'cases', '--module', 'M'])).toBe(0);
   const out = await exec(runtime, [harness, 'run', '--project', root], { env, timeout: 20000 });
   expect(out.stdout).toContain('PASS');

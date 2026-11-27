@@ -39,6 +39,15 @@ describe('resolveReviewer', () => {
   it('否则使用系统用户名', () => {
     expect(resolveReviewer({ CROSSCHECK_REVIEWER: '  ' }, () => ({ username: 'os-user' }))).toBe('os-user');
   });
+  it('环境变量中的保留身份 auto 不回退到系统用户名', () => {
+    expect(() => resolveReviewer({ CROSSCHECK_REVIEWER: ' auto ' }, () => ({ username: '人工' }))).toThrow(/auto.*保留/);
+  });
+  it('系统用户名为保留身份 auto 时拒绝', () => {
+    expect(() => resolveReviewer({}, () => ({ username: 'auto' }))).toThrow(/auto.*保留/);
+  });
+  it('只保留精确同名，允许大小写不同的人工确认人', () => {
+    expect(resolveReviewer({ CROSSCHECK_REVIEWER: 'Auto' })).toBe('Auto');
+  });
   it('都拿不到时报错', () => {
     expect(() => resolveReviewer({}, () => { throw new Error('无'); })).toThrow(/CROSSCHECK_REVIEWER/);
   });

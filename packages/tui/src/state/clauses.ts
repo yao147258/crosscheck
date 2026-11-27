@@ -41,19 +41,19 @@ export async function revokeClause(session: ReviewSession, module: string, id: s
 
 /** 历史结果调用时在同一次会话修改内校验快照，避免检查后再获取会话的竞态。 */
 export async function markClauseUnclear(session: ReviewSession, module: string, id: string, expected?: Clause): Promise<string> {
-  await session.mutate(async (approvals) => {
+  await session.mutate(async (approvals, stageWrite) => {
     const { clauses, clause } = await find(session, module, id);
     if (expected && contentHash(clause) !== contentHash(expected)) throw new Error(`${id} 与历史快照相比已变化，拒绝过时裁决`);
-    await session.artifacts.saveClauses(module, clauses.map((clause) => clause.id === id ? { ...clause, status: 'unclear' as const } : clause));
+    stageWrite('clause', id, () => session.artifacts.saveClauses(module, clauses.map((clause) => clause.id === id ? { ...clause, status: 'unclear' as const } : clause)));
     approvals.revoke('clause', id);
   });
   return `${id} 已标记为 unclear`;
 }
 
 export async function deleteClause(session: ReviewSession, module: string, id: string): Promise<string> {
-  await session.mutate(async (approvals) => {
+  await session.mutate(async (approvals, stageWrite) => {
     const { clauses } = await find(session, module, id);
-    await session.artifacts.saveClauses(module, clauses.filter((clause) => clause.id !== id));
+    stageWrite('clause', id, () => session.artifacts.saveClauses(module, clauses.filter((clause) => clause.id !== id)));
     approvals.revoke('clause', id);
   });
   return `已删除 ${id}`;
@@ -76,10 +76,10 @@ export async function editClause(session: ReviewSession, editor: EditorHost, mod
     return parsed.ok && parsed.value.id !== id ? { ok: false, error: `不能修改条款 ID（应为 ${id}）` } : parsed;
   });
   if (outcome.status === 'cancelled') return '未修改';
-  await session.mutate(async () => {
+  await session.mutate(async (_approvals, stageWrite) => {
     const current = await find(session, module, id);
     if (contentHash(current.clause) !== contentHash(clause)) throw new Error(`${id} 在编辑期间已变化，请重新编辑`);
-    await session.artifacts.saveClauses(module, current.clauses.map((item) => item.id === id ? outcome.value : item));
+    stageWrite('clause', id, () => session.artifacts.saveClauses(module, current.clauses.map((item) => item.id === id ? outcome.value : item)));
   });
   return `已保存 ${id}`;
 }

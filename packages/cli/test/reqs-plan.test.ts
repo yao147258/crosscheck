@@ -430,6 +430,35 @@ it('config 的 requirementsDocs 为空时使用已确认笔记的需求文档小
   expect(JSON.stringify(model.doGenerateCalls[0]!.prompt)).toContain('docs/子/二.md');
 });
 
+it.each(['docs/需求.md', 'docs/'])('reqs 拒绝没有宿主登记证据的自动笔记：%s', async (entry) => {
+  const { root, artifacts } = await project([]);
+  const notes = `# 笔记\n\n## 需求文档\n\n- \`${entry}\`\n`;
+  await artifacts.writeBytes('notes.md', Buffer.from(notes));
+  const approvals = Approvals.empty();
+  approvals.approve('notes', 'project', notes, 'auto');
+  await approvals.save(artifacts);
+  const model = scriptedModel([finish([c1])]);
+  const out: string[] = [];
+  expect(await cliMain(['reqs', '--module', 'M', '--project', root], { log: (s) => out.push(s), dependencies: deps(model) })).toBe(2);
+  expect(out.join('\n')).toMatch(/requirementsDocs.*review notes/);
+  expect(model.doGenerateCalls).toHaveLength(0);
+  expect(await artifacts.list('requirements')).toEqual([]);
+});
+
+it('自动笔记的宿主登记记录损坏时阻断并提示人工处理', async () => {
+  const { root, artifacts } = await project([]);
+  await artifacts.writeBytes('notes.md', Buffer.from(notesWithDocs));
+  const approvals = Approvals.empty();
+  approvals.approve('notes', 'project', notesWithDocs, 'auto');
+  await approvals.save(artifacts);
+  await artifacts.writeBytes('notes-discovery.json', Buffer.from('{无效记录'));
+  const model = scriptedModel([]);
+  const out: string[] = [];
+  expect(await cliMain(['reqs', '--module', 'M', '--project', root], { log: (s) => out.push(s), dependencies: deps(model) })).toBe(2);
+  expect(out.join('\n')).toMatch(/登记记录.*requirementsDocs.*review notes/);
+  expect(model.doGenerateCalls).toHaveLength(0);
+});
+
 it('笔记未确认时拒绝使用其需求文档小节，提示先审核笔记', async () => {
   const { root, artifacts } = await project([]);
   await artifacts.writeBytes('notes.md', Buffer.from(notesWithDocs));

@@ -1,5 +1,5 @@
 import { PassThrough } from 'node:stream';
-import { Approvals, ArtifactStore } from '@crosscheck/core';
+import { Approvals, ArtifactStore, readProfileFiles } from '@crosscheck/core';
 import type { RenderOptions } from 'ink';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { runReview } from '../src/index';
@@ -66,6 +66,48 @@ describe('runReview 真实 Ink 退出码（组件模拟流，不代表真实 TTY
     await expect(runReview({ artifacts, reviewer: '取消测试', editor, open, signal: AbortSignal.abort() })).resolves.toBe(2);
     expect(read).not.toHaveBeenCalled();
     expect(io.output()).toBe('');
+  });
+
+  it('独立审核入口只显示指定画像，退出码不变', async () => {
+    const { artifacts } = await createProject();
+    const io = createTerminal();
+    const result = runReview({ artifacts, reviewer: '测试人', editor, open, view: 'profile', only: ['auth.yaml'] });
+    await waitFor(() => io.output().includes('auth.yaml'));
+    expect(io.output()).not.toContain('environments.yaml');
+    io.stdin.write('q');
+    await expect(result).resolves.toBe(0);
+  });
+
+  it('独立筛选审核交叉校验失败后，可显示并编辑原先隐藏的 auto 画像', async () => {
+    const { artifacts } = await createProject();
+    await artifacts.writeYaml('system/api-catalog.yaml', { version: 1, operations: { bad: { environment: 'missing', method: 'GET', path: '/bad', description: '冲突接口', sources: [{ file: 'server.ts', line: 1, excerpt: '接口' }] } } });
+    const approvals = Approvals.empty();
+    for (const file of await readProfileFiles(artifacts)) {
+      if (!file.present || !file.ok) throw new Error(`画像无效：${file.name}`);
+      approvals.approve('profile', file.name, file.value, file.name === 'api-catalog.yaml' ? 'auto' : '人工');
+    }
+    await approvals.save(artifacts);
+    const io = createTerminal();
+    const result = runReview({ artifacts, reviewer: '测试人', open, view: 'profile', only: ['auth.yaml'], editor: {
+      async edit(text) { return text.replace('environment: missing', 'environment: local'); },
+    } });
+    try {
+      await waitFor(() => io.output().includes('交叉校验未通过'));
+      expect(io.output()).not.toMatch(/api-catalog\.yaml\s+已确认/);
+      io.stdin.write('f');
+      await waitFor(() => /api-catalog\.yaml\s+已确认/.test(io.output()));
+      const afterOpen = io.output().length;
+      io.stdin.write(KEYS.down);
+      await waitFor(() => io.output().slice(afterOpen).includes('› auth.yaml'));
+      io.stdin.write(KEYS.down);
+      await waitFor(() => io.output().includes('› api-catalog.yaml'));
+      io.stdin.write('e');
+      await waitFor(() => io.output().includes('已保存 api-catalog.yaml'));
+      expect((await artifacts.readBytes('system/api-catalog.yaml'))?.toString()).toContain('environment: local');
+    } finally {
+      io.stdin.write('q');
+      await result;
+    }
   });
 
   it('空闲时外部取消退出 2', async () => {

@@ -1,7 +1,7 @@
 export type { DiscoveryContext, DiscoveryDiagnostic, DiscoveryFact, DiscoveryPlugin, DiscoveryResult, DiscoverySource, ProjectEntry, ProjectLister, ProjectReader } from './types';
 export { DEFAULT_IGNORES, WALK_LIMITS, parseGitignore, walkProject } from './walk';
 export type { FileEntry, WalkResult } from './walk';
-export { createProjectReader, isSafeProjectPath } from './files';
+export { createProjectReader, isSafeProjectPath, normalizeSafeProjectPath } from './files';
 export { REQUIREMENT_DOC_LIMITS, createDiskDocLister, expandRequirementDocs, parseDocEntry } from './requirement-docs';
 export type { DocDirLister } from './requirement-docs';
 export { discover } from './discover';
@@ -18,3 +18,5 @@ export { FINDING_LIMIT, FindingSchema, factKey, verifyFindings } from './verify-
 export type { Finding } from './verify-findings';
 export { EXPLORE_SYSTEM, exploreProject } from './explore-project';
 export type { ExploreProjectOptions, ExploreProjectResult } from './explore-project';
+export { verifyEntrySources } from './verify-entry-sources';
+export type { DroppedEntry, EntrySource } from './verify-entry-sources';
